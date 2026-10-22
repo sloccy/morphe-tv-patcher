@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -66,7 +67,8 @@ type Verified struct {
 	Signer  string
 	Package string
 	Version string
-	Rank    int // how well the bundle's native code matches the device (0 = its best ABI)
+	Rank    int      // how well the bundle's native code matches the device (0 = its best ABI)
+	ABIs    []string // native code in the bundle (empty when it has none)
 }
 
 // Want is what a file has to be.
@@ -277,7 +279,9 @@ func Verify(ctx context.Context, path string, w Want) (*Verified, error) {
 		return nil, err
 	}
 	rank, _ := abi.Rank(f.ABIs, w.ABIs)
-	return &Verified{Path: path, Source: w.Source, Signer: f.Signer, Package: f.Package, Version: f.Version, Rank: rank}, nil
+	have := keys(f.ABIs)
+	sort.Strings(have)
+	return &Verified{Path: path, Source: w.Source, Signer: f.Signer, Package: f.Package, Version: f.Version, Rank: rank, ABIs: have}, nil
 }
 
 func keys(m map[string]bool) []string {

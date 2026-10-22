@@ -617,3 +617,62 @@ func TestSameVariantIsNotDownloadedTwiceAndDifferentVariantsDoNotShareAName(t *t
 		t.Fatalf("different variants must be cached under different names: %q %q files=%d %v", r64.Path, r32.Path, f2.files, err)
 	}
 }
+
+func TestAvailableABIsOnRealRows(t *testing.T) {
+	cases := map[string]string{
+		"peacock": "arm64-v8a,armeabi-v7a", // all three variants together
+		"netflix": "armeabi-v7a",
+		"disney":  "arm64-v8a,armeabi-v7a",
+	}
+	for app, want := range cases {
+		if got := strings.Join(AvailableABIs(realRows(t, app)), ","); got != want {
+			t.Errorf("%s: %q, want %q", app, got, want)
+		}
+	}
+	row := `<div class="table-row headerFont"><a class="accent_color" href="/v">v</a> 1.0 BUNDLE universal Android 5.0+</div>`
+	if got := AvailableABIs(page(t, "<html>"+row+"</html>")); len(got) != 1 || got[0] != "*" {
+		t.Errorf("universal builds are reported as *: %v", got)
+	}
+	if got := AvailableABIs(page(t, "<html>no table</html>")); len(got) != 0 {
+		t.Errorf("a release without a table says nothing: %v", got)
+	}
+}
+
+func TestResultCarriesAvailableAndNoBuildCarriesItToo(t *testing.T) {
+	srv := mirror(t, nil)
+	c := &Client{F: NewDirect(Profiles[0]), Base: srv.URL, Sleep: noSleep}
+	r := req(t)
+	r.Hint = slug
+	res, err := c.Fetch(context.Background(), r)
+	if err != nil || len(res.Available) != 1 || res.Available[0] != "armeabi-v7a" {
+		t.Fatalf("%+v %v", res, err)
+	}
+	// an arm64-only device: the release only has a 32-bit build, and the error says what it has
+	r2 := req(t)
+	r2.Hint, r2.ABIs = slug, []string{"arm64-v8a"}
+	_, err = c.Fetch(context.Background(), r2)
+	nb, ok := errors.AsType[*NoBuildError](err)
+	if !ok || !errors.Is(err, ErrNoBuild) || !errors.Is(err, ErrNotFound) || len(nb.Available) != 1 || nb.Available[0] != "armeabi-v7a" {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestProbeLearnsBuildsWithoutDownloading(t *testing.T) {
+	var files int
+	srv := mirror(t, func(w http.ResponseWriter, r *http.Request) bool {
+		if strings.Contains(r.URL.Path, "download.php") {
+			files++
+		}
+		return false
+	})
+	_ = srv
+	// Probe uses Download(), which builds its own clients against the real site; exercise the
+	// same path through a Client against the local mirror instead.
+	c := &Client{F: NewDirect(Profiles[0]), Base: srv.URL, Sleep: noSleep}
+	r := req(t)
+	r.Hint, r.DryRun = slug, true
+	res, err := c.Fetch(context.Background(), r)
+	if err != nil || res.Path != srv.URL+relPath || files != 0 || len(res.Available) != 1 {
+		t.Fatalf("%+v %v files=%d", res, err, files)
+	}
+}

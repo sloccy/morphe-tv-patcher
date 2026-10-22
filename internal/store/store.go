@@ -85,6 +85,10 @@ type AppState struct {
 	FetchFailures  int    `json:"fetch_failures,omitempty"`
 	LastFetchError string `json:"last_fetch_error,omitempty"`
 	LastFetchAlert int64  `json:"last_fetch_alert,omitempty"` // unix seconds
+	// Builds records which CPU builds a version of the app offers (ABI names, "*" = universal),
+	// learned from APKMirror or from a bundle we have. It lets the page refuse to give a device an
+	// app it cannot run without downloading anything.
+	Builds map[string][]string `json:"builds,omitempty"`
 }
 
 // Install is what we put on one device.
@@ -425,6 +429,38 @@ func (s *Store) UpdateApp(pkg string, fn func(*AppState)) error {
 	}
 	fn(a)
 	return s.write("state.json", s.state)
+}
+
+// Builds returns the CPU builds recorded for an app version, and whether any are recorded.
+func (s *Store) Builds(pkg, version string) ([]string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a := s.state.Apps[pkg]
+	if a == nil {
+		return nil, false
+	}
+	b, ok := a.Builds[version]
+	return append([]string{}, b...), ok && len(b) > 0
+}
+
+// SetBuilds records which CPU builds an app version offers. An empty list changes nothing.
+func (s *Store) SetBuilds(pkg, version string, abis []string) error {
+	if len(abis) == 0 {
+		return nil
+	}
+	return s.UpdateApp(pkg, func(a *AppState) {
+		if a.Builds == nil {
+			a.Builds = map[string][]string{}
+		}
+		// keep only the newest few versions so the file stays small
+		if _, ok := a.Builds[version]; !ok && len(a.Builds) >= 6 {
+			for k := range a.Builds {
+				delete(a.Builds, k)
+				break
+			}
+		}
+		a.Builds[version] = append([]string{}, abis...)
+	})
 }
 
 // Install returns what is recorded on a device for a package.

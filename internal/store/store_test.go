@@ -252,3 +252,34 @@ func TestDeviceInfoRoundTripAndRemoval(t *testing.T) {
 		t.Error("removing a device forgets its CPU info")
 	}
 }
+
+func TestBuildsAreRecordedAndBounded(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := Open(dir)
+	if _, ok := s.Builds("com.a", "1"); ok {
+		t.Fatal("nothing known yet")
+	}
+	_ = s.SetBuilds("com.a", "1", nil) // nothing to record
+	if _, ok := s.Builds("com.a", "1"); ok {
+		t.Error("an empty list is not knowledge")
+	}
+	_ = s.SetBuilds("com.a", "1", []string{"armeabi-v7a"})
+	got, ok := s.Builds("com.a", "1")
+	if !ok || len(got) != 1 || got[0] != "armeabi-v7a" {
+		t.Errorf("%v %v", got, ok)
+	}
+	got[0] = "mutated"
+	if again, _ := s.Builds("com.a", "1"); again[0] != "armeabi-v7a" {
+		t.Error("Builds must return a copy")
+	}
+	for i := range 10 {
+		_ = s.SetBuilds("com.a", fmt.Sprintf("v%d", i), []string{"*"})
+	}
+	s2, _ := Open(dir) // survives a restart, and stays small
+	if n := len(s2.App("com.a").Builds); n > 6 {
+		t.Errorf("old versions should be dropped, have %d", n)
+	}
+	if _, ok := s2.Builds("com.a", "v9"); !ok {
+		t.Error("the latest version must be kept")
+	}
+}

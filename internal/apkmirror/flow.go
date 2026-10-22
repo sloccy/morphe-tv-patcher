@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -75,6 +76,43 @@ type AppRequest struct {
 type Result struct {
 	Path string
 	Slug string
+	// Available lists the CPU builds the release offers (ABI names; "*" for a universal build).
+	// Empty when the release page does not say (single-variant releases).
+	Available []string
+}
+
+// NoBuildError is ErrNoBuild plus what the release does offer.
+type NoBuildError struct {
+	Available []string
+	Err       error
+}
+
+func (e *NoBuildError) Error() string { return e.Err.Error() }
+func (e *NoBuildError) Unwrap() error { return e.Err }
+
+// AvailableABIs returns the union of CPU builds over every BUNDLE/APK row of a release page
+// ("*" stands for universal/noarch). Rows are counted whatever their Android version.
+func AvailableABIs(rel *Page) []string {
+	set := map[string]bool{}
+	for _, row := range find(rel.Doc, func(n *html.Node) bool { return n.Data == "div" && hasClass(n, "table-row", "headerFont") }) {
+		t := strings.ToLower(text(row))
+		if !variantType.MatchString(t) {
+			continue
+		}
+		r := abi.ParseRow(t)
+		for _, a := range r.ABIs {
+			set[a] = true
+		}
+		if r.Universal {
+			set["*"] = true
+		}
+	}
+	out := make([]string, 0, len(set))
+	for a := range set {
+		out = append(out, a)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // FindRelease finds the release page for a version under an app page. The URL is guessed
@@ -260,14 +298,15 @@ func fileLink(p *Page) (string, error) {
 }
 
 // fetchSlug runs the whole chain for one candidate app page.
-func (c *Client) fetchSlug(ctx context.Context, req AppRequest, slug string) (string, error) {
+func (c *Client) fetchSlug(ctx context.Context, req AppRequest, slug string) (path string, available []string, err error) {
 	rel, rp, err := c.FindRelease(ctx, slug, req.Version)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if !strings.Contains(rp.Raw, req.Package) {
-		return "", fmt.Errorf("%w: %s is a different app (page never mentions %s)", ErrNotFound, slug, req.Package)
+		return "", nil, fmt.Errorf("%w: %s is a different app (page never mentions %s)", ErrNotFound, slug, req.Package)
 	}
+	available = AvailableABIs(rp)
 	slog.Info("apkmirror release page", "url", rel)
 	c.pause(ctx, 2*time.Second, 6*time.Second)
 	variant := rel
@@ -280,43 +319,45 @@ func (c *Client) fetchSlug(ctx context.Context, req AppRequest, slug string) (st
 		variant = c.base() + vhref
 		vp, err := c.F.Page(ctx, variant, rel)
 		if err != nil {
-			return "", err
+			return "", available, err
 		}
 		if btn, err = downloadButton(vp); err != nil {
-			return "", err
+			return "", available, err
 		}
 	case errors.Is(err, ErrNotFound) && !hasVariantTable(rp):
 		// a release with a single variant has no table: the download button is on this page
 		if btn, err = downloadButton(rp); err != nil || !strings.Contains(btn, "/download/") {
-			return "", fmt.Errorf("%w: no variants and no download button on the release page", ErrNotFound)
+			return "", nil, fmt.Errorf("%w: no variants and no download button on the release page", ErrNotFound)
 		}
+	case errors.Is(err, ErrNoBuild):
+		return "", available, &NoBuildError{Available: available, Err: err}
 	default:
-		return "", err
+		return "", available, err
 	}
 	if req.DryRun {
-		return rel, nil
+		return rel, available, nil
 	}
 	c.pause(ctx, 2*time.Second, 6*time.Second)
 	dlURL := c.base() + btn
 	dp, err := c.F.Page(ctx, dlURL, variant)
 	if err != nil {
-		return "", err
+		return "", available, err
 	}
 	fl, err := fileLink(dp)
 	if err != nil {
-		return "", err
+		return "", available, err
 	}
 	c.pause(ctx, 2*time.Second, 4*time.Second)
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(variantKey))
 	dest := filepath.Join(req.DestDir, fmt.Sprintf("%s-%s-%08x.apkm", slugFile(slug), patches.Slug(req.Version), h.Sum32()))
 	if have := existing(dest); have != "" {
-		return have, nil // the same release and variant is already cached
+		return have, available, nil // the same release and variant is already cached
 	}
 	if err := c.F.File(ctx, c.base()+fl, dlURL, dest); err != nil {
-		return "", err
+		return "", available, err
 	}
-	return fixExtension(dest), nil
+	return fixExtension(dest), available, nil
 }
 
 // existing returns dest (or its plain-APK twin) if it is already on disk.
@@ -371,10 +412,10 @@ func (c *Client) Fetch(ctx context.Context, req AppRequest) (Result, error) {
 		}
 		tried[slug] = true
 		c.pause(ctx, 2*time.Second, 6*time.Second)
-		path, err := c.fetchSlug(ctx, req, slug)
+		path, avail, err := c.fetchSlug(ctx, req, slug)
 		switch {
 		case err == nil:
-			return Result{Path: path, Slug: slug}, true, nil
+			return Result{Path: path, Slug: slug, Available: avail}, true, nil
 		case errors.Is(err, ErrNotFound):
 			slog.Info("apkmirror candidate rejected", "slug", slug, "err", err)
 			lastNotFound = err
@@ -526,4 +567,18 @@ func Download(ctx context.Context, req AppRequest, o Options) (Result, string, e
 		}
 	}
 	return Result{}, "", last
+}
+
+// Probe finds out which CPU builds an app version offers without downloading anything. It
+// returns what the release lists, or nothing when APKMirror does not say (or cannot be reached).
+func Probe(ctx context.Context, req AppRequest, o Options) ([]string, error) {
+	req.DryRun = true
+	res, _, err := Download(ctx, req, o)
+	if err == nil {
+		return res.Available, nil
+	}
+	if nb, ok := errors.AsType[*NoBuildError](err); ok {
+		return nb.Available, nil // the release exists; it just has no build for the default CPU
+	}
+	return nil, err
 }

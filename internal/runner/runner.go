@@ -46,7 +46,9 @@ type Deps struct {
 	Apps     func(ctx context.Context, src store.Source, rel *patches.Release, mpp string) (*patches.List, error)
 	// Cached returns the last bundle downloaded for a source, used when the repository cannot be
 	// reached (or is gone) so existing setups keep working.
-	Cached    func(src store.Source) (*patches.Release, string, bool)
+	Cached func(src store.Source) (*patches.Release, string, bool)
+	// Probe asks which CPU builds an app version offers without downloading it.
+	Probe     func(ctx context.Context, src store.Source, pkg, name, version string) ([]string, error)
 	Fetch     func(ctx context.Context, a sources.App, sdk int) (*sources.Fetched, error)
 	Patch     func(ctx context.Context, o morphe.Options) error
 	PackageOf func(path string) (string, error)
@@ -523,6 +525,9 @@ func (r *Runner) appGroup(ctx context.Context, o Options, ld *loaded, pkg, name,
 		SignerPin: strings.ToLower(ov.SignerSHA256), SlugOverride: ov.APKMirror, ABIs: abis, AllowPhone: src.AllowPhone}, sdk)
 	if err != nil {
 		fe, _ := errors.AsType[*sources.FetchError](err)
+		if fe != nil {
+			_ = r.Store.SetBuilds(pkg, newest, fe.Available)
+		}
 		if fe != nil && fe.NoBuild {
 			// the release exists, but not for this CPU: say so once, it is not a download failure
 			alert := r.noteNoBuild(pkg, newest, key)
@@ -546,6 +551,7 @@ func (r *Runner) appGroup(ctx context.Context, o Options, ld *loaded, pkg, name,
 		}
 		return out
 	}
+	_ = r.Store.SetBuilds(pkg, newest, fetched.Available)
 	if r.noteRecovered(pkg) {
 		*recovered = true
 	}

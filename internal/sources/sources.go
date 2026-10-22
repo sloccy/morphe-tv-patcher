@@ -61,8 +61,9 @@ func DefaultEnv() Env {
 // Fetched is a verified bundle.
 type Fetched struct {
 	*verify.Verified
-	Detail        string // "dropfolder", "cache", "apkmirror (chrome)", "apkpure", ...
-	LearnedSigner bool   // first time we recorded this app's signer
+	Detail        string   // "dropfolder", "cache", "apkmirror (chrome)", "apkpure", ...
+	LearnedSigner bool     // first time we recorded this app's signer
+	Available     []string // CPU builds this version is known to offer (from the release page or the file)
 }
 
 // FetchError says why nothing worked. Fatal means a wrong or tampered file was seen.
@@ -72,6 +73,8 @@ type FetchError struct {
 	// NoBuild means the release exists but has no build for the device's CPU: not a download
 	// problem, so it must not feed the "cannot download" alert counters.
 	NoBuild bool
+	// Available lists the CPU builds the release does offer, when a source reported them.
+	Available []string
 }
 
 func (e *FetchError) Error() string {
@@ -94,17 +97,25 @@ func Fetch(ctx context.Context, e *Env, a App, sdk int) (*Fetched, error) {
 	want := func(source string) verify.Want {
 		return verify.Want{Package: a.Package, Version: a.Version, Source: source, Pinned: pinned, ABIs: a.ABIs, AllowPhone: a.AllowPhone}
 	}
+	var seenAvail []string // what a release page said it offers (kept even when nothing was usable)
 	finish := func(v *verify.Verified, detail string) *Fetched {
 		learned := pinned == ""
 		if learned {
 			_ = e.Store.UpdateApp(a.Package, func(s *store.AppState) { s.SignerSHA256 = v.Signer })
 			slog.Warn("recorded signer for app (pin it with signer_sha256 to lock it in)", "package", a.Package, "signer", v.Signer)
 		}
-		return &Fetched{Verified: v, Detail: detail, LearnedSigner: learned}
+		avail := seenAvail
+		if len(avail) == 0 {
+			avail = v.ABIs
+		}
+		return &Fetched{Verified: v, Detail: detail, LearnedSigner: learned, Available: avail}
 	}
 	note := func(label string, err error) {
 		if errors.Is(err, apkmirror.ErrNoBuild) {
 			noBuild = true
+		}
+		if nb, ok := errors.AsType[*apkmirror.NoBuildError](err); ok && len(nb.Available) > 0 {
+			seenAvail = nb.Available
 		}
 		if ve, ok := errors.AsType[*verify.Error](err); ok {
 			noBuild = noBuild || ve.Kind == verify.KindArch
@@ -198,6 +209,9 @@ func Fetch(ctx context.Context, e *Env, a App, sdk int) (*Fetched, error) {
 					if err != nil {
 						return "", "", err
 					}
+					if len(res.Available) > 0 {
+						seenAvail = res.Available
+					}
 					_ = e.Store.UpdateApp(a.Package, func(s *store.AppState) { s.Slug = res.Slug })
 					if o.FlareURL == "" {
 						_ = e.Store.SetLastProfile(used)
@@ -234,5 +248,5 @@ func Fetch(ctx context.Context, e *Env, a App, sdk int) (*Fetched, error) {
 	if bestLocal != nil { // downloads failed or found nothing, but a usable (if not ideal) file exists
 		return finish(bestLocal.Verified, bestLocal.Detail), nil
 	}
-	return nil, &FetchError{Attempts: append(attempts, fatals...), Fatal: len(fatals) > 0, NoBuild: noBuild && len(fatals) == 0}
+	return nil, &FetchError{Attempts: append(attempts, fatals...), Fatal: len(fatals) > 0, NoBuild: noBuild && len(fatals) == 0, Available: seenAvail}
 }
