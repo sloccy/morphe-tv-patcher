@@ -1,0 +1,102 @@
+// Package config reads settings from environment variables (the same style as Lantern).
+package config
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Config is everything set by the environment.
+type Config struct {
+	DataDir      string
+	MorpheJar    string
+	PatchesRepo  string
+	Prerelease   bool
+	BytecodeMode string
+	Interval     time.Duration
+
+	FlareSolverrURL     string
+	APKPureOK           bool // APKPURE_ACKNOWLEDGE_DANGERS=true
+	DirectOK            bool // false with APKMIRROR_DIRECT_DISABLED=true (tests the other routes)
+	FailuresBeforeAlert int
+
+	WebBind string
+	WebPort int
+	// AllowedHostSuffixes lists extra Host header endings the web UI answers to (e.g. ".sloccy.com"),
+	// besides IP addresses and localhost. This stops DNS-rebinding from other web pages.
+	AllowedHostSuffixes []string
+
+	TelegramToken string
+	TelegramChat  string
+	GitHubToken   string
+}
+
+// Dirs under the data volume.
+func (c Config) Cache() string    { return filepath.Join(c.DataDir, "work", "cache") }
+func (c Config) Input() string    { return filepath.Join(c.DataDir, "work", "input") }
+func (c Config) Output() string   { return filepath.Join(c.DataDir, "work", "output") }
+func (c Config) Keystore() string { return filepath.Join(c.DataDir, "keystore", "morphe.keystore") }
+
+// Ensure creates the working directories.
+func (c Config) Ensure() error {
+	for _, d := range []string{c.Cache(), c.Input(), c.Output(), filepath.Dir(c.Keystore())} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// FromEnv builds a Config; getenv is os.Getenv in production.
+func FromEnv(getenv func(string) string) (Config, error) {
+	def := func(k, d string) string {
+		if v := strings.TrimSpace(getenv(k)); v != "" {
+			return v
+		}
+		return d
+	}
+	flag := func(k string) bool {
+		v := strings.ToLower(strings.TrimSpace(getenv(k)))
+		return v == "1" || v == "true" || v == "yes"
+	}
+	c := Config{
+		DataDir:             def("DATA_DIR", "/data"),
+		MorpheJar:           def("MORPHE_JAR", "/opt/morphe/morphe.jar"),
+		PatchesRepo:         def("PATCHES_REPO", "ajstrick81/morphe-androidtv-patches"),
+		Prerelease:          flag("PATCHES_PRERELEASE"),
+		BytecodeMode:        def("BYTECODE_MODE", "STRIP_SAFE"),
+		FlareSolverrURL:     strings.TrimRight(def("FLARESOLVERR_URL", ""), "/"),
+		APKPureOK:           flag("APKPURE_ACKNOWLEDGE_DANGERS"),
+		DirectOK:            !flag("APKMIRROR_DIRECT_DISABLED"),
+		WebBind:             def("WEB_BIND", "0.0.0.0"),
+		AllowedHostSuffixes: splitList(def("ALLOWED_HOST_SUFFIXES", "")),
+		TelegramToken:       def("TELEGRAM_BOT_TOKEN", ""),
+		TelegramChat:        def("TELEGRAM_CHAT_ID", ""),
+		GitHubToken:         def("GITHUB_TOKEN", ""),
+	}
+	var err error
+	if c.Interval, err = time.ParseDuration(def("INTERVAL", "6h")); err != nil || c.Interval < time.Minute {
+		return c, fmt.Errorf("INTERVAL must be a duration of at least 1m (e.g. 6h): %q", getenv("INTERVAL"))
+	}
+	if c.WebPort, err = strconv.Atoi(def("WEB_PORT", "8093")); err != nil || c.WebPort < 1 || c.WebPort > 65535 {
+		return c, fmt.Errorf("WEB_PORT must be a port number: %q", getenv("WEB_PORT"))
+	}
+	if c.FailuresBeforeAlert, err = strconv.Atoi(def("FETCH_FAILURES_BEFORE_ALERT", "3")); err != nil || c.FailuresBeforeAlert < 1 {
+		return c, fmt.Errorf("FETCH_FAILURES_BEFORE_ALERT must be 1 or more: %q", getenv("FETCH_FAILURES_BEFORE_ALERT"))
+	}
+	return c, nil
+}
+
+func splitList(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.ToLower(strings.TrimSpace(p)); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}

@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TV Patcher</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1b1f24; --muted: #5d6671; --line: #dfe3e8;
+    --accent: #2f6fed; --accent-text: #ffffff; --ok: #1a7f4b; --bad: #b3261e; --warn: #9a6700; --chip: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14171b; --card: #1d2228; --text: #e8ebef; --muted: #98a2ae; --line: #313840;
+      --accent: #6b97ff; --accent-text: #0d1117; --ok: #4cc38a; --bad: #ff8a80; --warn: #e3b341; --chip: #272d34;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 16px; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  h1 { font-size: 20px; margin: 0; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 14px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .grow { flex: 1 1 auto; min-width: 0; }
+  button { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--text); border-radius: 7px; padding: 6px 12px; cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  button.danger { color: var(--bad); }
+  button:disabled { opacity: .5; cursor: default; }
+  input[type=text], input[type=number] { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--text); min-width: 0; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: var(--muted); margin-right: 6px; }
+  .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
+  .apps { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 6px 14px; margin: 12px 0; }
+  label.app { display: flex; gap: 8px; align-items: flex-start; padding: 6px 8px; border-radius: 7px; cursor: pointer; }
+  label.app:hover { background: var(--chip); }
+  label.app input { margin-top: 3px; }
+  .meta { color: var(--muted); font-size: 12.5px; display: block; }
+  .chip { background: var(--chip); border-radius: 999px; padding: 1px 8px; font-size: 12px; color: var(--muted); margin-left: 6px; }
+  .chip.warn { color: var(--warn); }
+  .msg { font-size: 13px; margin: 6px 0 0; }
+  .msg.ok { color: var(--ok); } .msg.bad { color: var(--bad); }
+  .results { font-size: 13px; color: var(--muted); margin: 4px 0 0; padding-left: 18px; }
+  .results .bad { color: var(--bad); } .results .ok { color: var(--ok); }
+  pre { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; overflow: auto; max-height: 320px; font-size: 12px; }
+  details summary { cursor: pointer; color: var(--muted); }
+  .empty { color: var(--muted); text-align: center; padding: 24px 8px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>TV Patcher</h1>
+      <div class="sub" id="sub">loading…</div>
+    </div>
+    <div class="row">
+      <label class="sub"><input type="checkbox" id="force"> reinstall everything</label>
+      <button class="primary" id="runall">Run now</button>
+    </div>
+  </header>
+
+  <div id="devices"></div>
+
+  <section class="card">
+    <strong>Add a device</strong>
+    <div class="sub">Turn on Developer options → Wireless debugging on the TV, then enter its IP address. Give the TV a fixed IP in your router.</div>
+    <div class="row" style="margin-top:8px">
+      <input type="text" id="newname" placeholder="Name (Living room)" maxlength="60">
+      <input type="text" id="newhost" placeholder="IP address (10.0.0.6)" maxlength="253">
+      <button id="adddev">Add</button>
+    </div>
+    <div class="msg" id="addmsg"></div>
+  </section>
+
+  <details class="card" id="logbox">
+    <summary>Log</summary>
+    <pre id="log">(open to load)</pre>
+  </details>
+</main>
+
+<script>
+"use strict";
+let state = null;
+const dirty = {};      // device id -> Set of selected packages not yet saved
+const openPair = {};   // device id -> true while the pairing form is open
+const notes = {};      // device id -> {text, ok}
+
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (v === true) el.setAttribute(k, "");
+    else if (v !== false && v != null) el.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid);
+  return el;
+}
+
+async function api(method, path, body) {
+  const opt = { method, headers: {} };
+  if (body !== undefined || method === "POST" || method === "PUT") {
+    opt.headers["Content-Type"] = "application/json";
+    opt.body = JSON.stringify(body === undefined ? {} : body);
+  }
+  const r = await fetch(path, opt);
+  let data = {};
+  try { data = await r.json(); } catch (e) { /* empty body */ }
+  if (!r.ok) throw new Error(data.error || ("HTTP " + r.status));
+  return data;
+}
+
+function when(iso) {
+  if (!iso || iso.startsWith("0001")) return "";
+  const d = new Date(iso);
+  return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function selection(dev) { return dirty[dev.id] || new Set(dev.apps || []); }
+
+function deviceCard(dev) {
+  const sel = selection(dev);
+  const isDirty = !!dirty[dev.id];
+  const last = dev.last || [];
+  const offline = last.some(r => !r.ok && !r.package);
+  const note = notes[dev.id];
+
+  const apps = h("div", { class: "apps" }, (state.apps || []).map(a => {
+    const inst = (dev.installs || {})[a.package];
+    return h("label", { class: "app" },
+      h("input", { type: "checkbox", checked: sel.has(a.package), onchange: ev => {
+        const s = new Set(selection(dev));
+        ev.target.checked ? s.add(a.package) : s.delete(a.package);
+        dirty[dev.id] = s;
+        render();
+      } }),
+      h("span", { class: "grow" },
+        h("span", {}, a.name, a.experimental ? h("span", { class: "chip warn" }, "experimental") : null),
+        h("span", { class: "meta" }, "newest supported " + a.newest + (inst ? " · installed " + inst.apk_version + " (" + when(inst.installed_at) + ")" : ""))));
+  }));
+
+  const pairForm = openPair[dev.id] ? h("div", { class: "row", style: "margin-top:8px" },
+    h("span", { class: "sub" }, "On the TV choose “Pair device with pairing code”, then enter the port and code it shows:"),
+    h("input", { type: "number", id: "pp-" + dev.id, placeholder: "pairing port", min: 1024, max: 65535, style: "width:130px" }),
+    h("input", { type: "text", id: "pc-" + dev.id, placeholder: "6-digit code", maxlength: 6, inputmode: "numeric", style: "width:120px" }),
+    h("button", { onclick: () => doPair(dev) }, "Pair")) : null;
+
+  return h("section", { class: "card" },
+    h("div", { class: "row" },
+      h("span", { class: "grow" },
+        h("strong", {}, h("span", { class: "dot " + (last.length ? (offline ? "bad" : "ok") : "") }), dev.name),
+        h("span", { class: "sub" }, "  " + dev.host)),
+      h("button", { onclick: () => { openPair[dev.id] = !openPair[dev.id]; render(); } }, "Pair…"),
+      h("button", { onclick: () => doRun(dev.id) }, "Run now"),
+      h("button", { class: "danger", onclick: () => doRemove(dev) }, "Remove")),
+    pairForm,
+    apps,
+    h("div", { class: "row" },
+      h("button", { class: "primary", disabled: !isDirty, onclick: () => doSave(dev) }, "Save"),
+      h("span", { class: "sub" }, isDirty ? "Unsaved changes. Saving never installs anything." : "Saved. Installs happen on the next run.")),
+    note ? h("div", { class: "msg " + (note.ok ? "ok" : "bad") }, note.text) : null,
+    last.length ? h("ul", { class: "results" }, last.map(r => h("li", { class: r.ok ? "ok" : "bad" }, r.message))) : null);
+}
+
+function render() {
+  if (!state) return;
+  const st = state.status || {};
+  document.getElementById("sub").textContent =
+    "patches " + (st.patches_version || "?") + " · " + (st.running ? "running…" : (st.finished_at && !st.finished_at.startsWith("0001") ? "last run " + when(st.finished_at) : "no run yet")) +
+    (state.version ? " · " + state.version : "");
+  document.getElementById("runall").disabled = !!st.running;
+  const box = document.getElementById("devices");
+  box.replaceChildren(...((state.devices || []).length
+    ? state.devices.map(deviceCard)
+    : [h("div", { class: "card empty" }, "No devices yet. Add one below.")]));
+}
+
+async function refresh() {
+  try { state = await api("GET", "/api/state"); render(); } catch (e) { document.getElementById("sub").textContent = "cannot reach the server: " + e.message; }
+  const running = state && state.status && state.status.running;
+  if (document.getElementById("logbox").open) loadLog();
+  setTimeout(refresh, running ? 4000 : 30000);
+}
+
+async function loadLog() {
+  try { const l = await api("GET", "/api/log"); const pre = document.getElementById("log"); pre.textContent = l.lines.join("\n") || "(empty)"; pre.scrollTop = pre.scrollHeight; } catch (e) { /* ignore */ }
+}
+
+async function doSave(dev) {
+  try {
+    await api("PUT", "/api/devices/" + encodeURIComponent(dev.id) + "/apps", { apps: [...selection(dev)] });
+    delete dirty[dev.id];
+    notes[dev.id] = { ok: true, text: "Saved." };
+  } catch (e) { notes[dev.id] = { ok: false, text: e.message }; }
+  await reload();
+}
+
+async function doRun(device) {
+  try { await api("POST", "/api/run", { device: device || "", force: document.getElementById("force").checked }); } catch (e) { alert(e.message); }
+  await reload(); setTimeout(refresh, 1500);
+}
+
+async function doPair(dev) {
+  const port = parseInt(document.getElementById("pp-" + dev.id).value, 10);
+  const code = document.getElementById("pc-" + dev.id).value.trim();
+  notes[dev.id] = { ok: true, text: "Pairing…" }; render();
+  try {
+    const r = await api("POST", "/api/devices/" + encodeURIComponent(dev.id) + "/pair", { pair_port: port, code });
+    notes[dev.id] = { ok: true, text: r.message }; openPair[dev.id] = false;
+  } catch (e) { notes[dev.id] = { ok: false, text: e.message }; }
+  render();
+}
+
+async function doRemove(dev) {
+  if (!confirm("Remove " + dev.name + "? Nothing is uninstalled from the TV.")) return;
+  try { await api("DELETE", "/api/devices/" + encodeURIComponent(dev.id)); delete dirty[dev.id]; } catch (e) { alert(e.message); }
+  await reload();
+}
+
+async function reload() { try { state = await api("GET", "/api/state"); } catch (e) { /* keep old */ } render(); }
+
+document.getElementById("runall").addEventListener("click", () => doRun(""));
+document.getElementById("adddev").addEventListener("click", async () => {
+  const msg = document.getElementById("addmsg");
+  try {
+    const d = await api("POST", "/api/devices", { name: document.getElementById("newname").value, host: document.getElementById("newhost").value });
+    document.getElementById("newname").value = ""; document.getElementById("newhost").value = "";
+    msg.className = "msg ok"; msg.textContent = "Added. Use “Pair…” on its card next.";
+    openPair[d.id] = true;
+  } catch (e) { msg.className = "msg bad"; msg.textContent = e.message; }
+  await reload();
+});
+document.getElementById("logbox").addEventListener("toggle", ev => { if (ev.target.open) loadLog(); });
+refresh();
+</script>
+</body>
+</html>

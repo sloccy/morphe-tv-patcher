@@ -301,3 +301,32 @@ func runAPKSigner(ctx context.Context, apk string) (*bool, string, string) {
 	}
 	return &ok, notes, cert
 }
+
+// PackageOf reads the package name from a plain APK's manifest (used on patched output, where
+// a clone patch may have renamed the package, e.g. com.netflix.ninja.clone).
+func PackageOf(apkPath string) (string, error) {
+	zr, err := zip.OpenReader(apkPath)
+	if err != nil {
+		return "", &Error{KindFormat, "not a zip/apk"}
+	}
+	defer zr.Close()
+	for _, f := range zr.File {
+		if f.Name == "AndroidManifest.xml" {
+			rc, err := f.Open()
+			if err != nil {
+				return "", err
+			}
+			b, err := io.ReadAll(io.LimitReader(rc, 16<<20))
+			rc.Close()
+			if err != nil {
+				return "", err
+			}
+			m, err := apk.ParseManifest(b)
+			if err != nil {
+				return "", &Error{KindFormat, err.Error()}
+			}
+			return m.Package, nil
+		}
+	}
+	return "", &Error{KindFormat, "no AndroidManifest.xml"}
+}
