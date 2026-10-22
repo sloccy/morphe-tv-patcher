@@ -249,7 +249,7 @@ function render() {
     : [h("div", { class: "card empty" }, "No devices yet. Add one below.")]));
   // keep what is being typed in the add-repository form
   const keep = ["newrepo", "newpre", "newphone", "newtrust"].map(id => { const e = document.getElementById(id); return e ? [id, e.type === "checkbox" ? e.checked : e.value] : null; }).filter(Boolean);
-  document.getElementById("sources").replaceChildren(...sourcesCard());
+  document.getElementById("sources").replaceChildren(...sourcesCard().filter(Boolean));
   for (const [id, v] of keep) { const e = document.getElementById(id); if (e) { if (e.type === "checkbox") e.checked = v; else e.value = v; } }
 }
 

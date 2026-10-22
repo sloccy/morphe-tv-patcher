@@ -44,6 +44,19 @@ jobs:
             -e APKMIRROR_DIRECT_DISABLED=true -e FLARESOLVERR_URL=http://127.0.0.1:8191 \
             "$IMAGE" fetch --package com.amazon.amazonvideo.livingroom
 
+  second-repository:
+    name: A second patch repository (MorpheApp) works
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add the repository and resolve its apps
+        run: |
+          mkdir -p data/state
+          cat > data/state/settings.json <<'JSON'
+          {"sources": [{"id": "morpheapp-morphe-patches", "repo": "MorpheApp/morphe-patches", "allow_phone": true}], "devices": []}
+          JSON
+          sudo chown -R 65532:65532 data
+          docker run --rm -v "$PWD/data:/data" "$IMAGE" resolve --source morpheapp-morphe-patches
+
   resolve:
     name: Every supported app can be found on APKMirror
     runs-on: ubuntu-latest

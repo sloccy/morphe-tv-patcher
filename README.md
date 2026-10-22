@@ -49,6 +49,31 @@ Apps first installed by Morphe Manager are signed with Manager's key, so Android
 them: uninstall them once (the page tells you), or set `allow_uninstall` for that app in
 `settings.json`. Never uninstall stock Netflix; the patched copy installs beside it as a clone.
 
+## More patch repositories
+
+The default repository is `PATCHES_REPO`. The **Patch sources** card on the page adds any other GitHub
+repository that publishes Morphe bundles (`.mpp` release assets), for example `MorpheApp/morphe-patches`
+(YouTube, YouTube Music, Reddit). Its apps then appear on every device card. If two repositories
+support the same app, a dropdown on that app picks which repository's patches a device uses (one per
+app per device; bundles are never combined). Apps from a repository that is marked "allow phone apps"
+skip the Android TV check (they may install but not show in the TV launcher); everything else keeps it.
+
+**Trust model.** Patches are code that runs in the Morphe JVM on this server, which holds the signing
+key and the adb pairing keys, and the patched apps are then installed on your TVs. The page has no
+login, so anyone who can reach it can add a repository; adding one requires ticking a trust
+confirmation, and every addition and removal is logged. To limit who can be added, set
+`PATCH_SOURCES_ALLOWED_OWNERS=ajstrick81,MorpheApp` (comma separated GitHub owners); empty allows any.
+Bundles are only taken from GitHub release assets, at most 100 MB.
+
+## CPU architectures
+
+Each device reports its CPU list (for example `arm64-v8a,armeabi-v7a,armeabi` for a 64-bit TV box,
+`armeabi-v7a,armeabi` for a 32-bit one) and the page shows it on the card. Builds are chosen to match:
+a native 64-bit build is preferred for a 64-bit-capable device, a 32-bit build is used when that is all
+there is, and a device only gets a build it can run. Devices with the same list share one download and
+one patched file; a different list gets its own. If an app has no build for a device's CPU (for example
+Netflix on an arm64-only box, since the patches only exist for 32-bit builds) the page says so once.
+
 ## Where APKs come from
 
 In order, the first file that passes every check wins:
@@ -81,13 +106,14 @@ wrong signature or a phone build alerts at once; a message follows when it recov
 | `ALLOWED_HOST_SUFFIXES` | | extra `Host` names the page answers to |
 | `FLARESOLVERR_URL` | | e.g. `http://127.0.0.1:8191` |
 | `APKPURE_ACKNOWLEDGE_DANGERS` | `false` | allow APKPure (signer-checked) |
-| `PATCHES_REPO` / `PATCHES_PRERELEASE` | `ajstrick81/morphe-androidtv-patches` / `false` | |
+| `PATCHES_REPO` / `PATCHES_PRERELEASE` | `ajstrick81/morphe-androidtv-patches` / `false` | the default patch source |
+| `PATCH_SOURCES_ALLOWED_OWNERS` | | limit repositories added from the page to these GitHub owners |
 | `BYTECODE_MODE` | `STRIP_SAFE` | Morphe `--bytecode-mode` |
 | `FETCH_FAILURES_BEFORE_ALERT` | `3` | |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | | notifications |
 | `GITHUB_TOKEN` | | optional, avoids API rate limits |
 
-`/data/state/settings.json` holds your devices and apps (edited by the page) plus optional per-app
+`/data/state/settings.json` holds your patch sources, devices and apps (edited by the page) plus optional per-app
 `overrides`: `apkmirror` (publisher/app path), `sources`, `signer_sha256`, `enable`/`disable` (Morphe
 patch names), `options_file`, `allow_uninstall`.
 
@@ -98,10 +124,10 @@ every app has to be uninstalled before it can update.
 
 ```
 tv-patcher run                  web page + scheduler (default)
-tv-patcher once [--device ID] [--app PKG,PKG] [--force] [--dry-run] [--no-device]
+tv-patcher once [--device ID] [--app PKG,PKG] [--force] [--dry-run] [--no-device [--source ID] [--abi LIST]]
 tv-patcher pair --device ID --pair-port N --code 123456
-tv-patcher fetch --package PKG [--version V]     download and verify one app
-tv-patcher resolve [--package PKG]               find apps on APKMirror, no download
+tv-patcher fetch --package PKG [--version V] [--source ID] [--abi LIST]   download and verify one app
+tv-patcher resolve [--package PKG] [--source ID] find apps on APKMirror, no download
 tv-patcher healthcheck | version
 ```
 
