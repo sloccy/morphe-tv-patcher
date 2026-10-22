@@ -136,7 +136,14 @@ func Inspect(ctx context.Context, path string) (*Facts, error) {
 	abis := map[string]bool{}
 	basePath := path
 	var tmp string
-	if !strings.HasSuffix(path, ".apk") {
+	plain := false
+	for _, f := range zr.File {
+		if f.Name == "AndroidManifest.xml" {
+			plain = true // a single APK, whatever it is called
+			break
+		}
+	}
+	if !plain {
 		for _, f := range zr.File {
 			if m := abiSplit.FindStringSubmatch(f.Name); m != nil {
 				abis[strings.ReplaceAll(m[1], "_", "-")] = true

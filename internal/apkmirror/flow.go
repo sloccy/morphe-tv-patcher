@@ -1,12 +1,14 @@
 package apkmirror
 
 import (
+	"archive/zip"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -122,6 +124,8 @@ func (c *Client) FindRelease(ctx context.Context, slug, version string) (string,
 	return "", nil, fmt.Errorf("%w: %s for %s", ErrNotFound, version, slug)
 }
 
+var variantType = regexp.MustCompile(`\b(bundle|apk)\b`)
+
 var androidMin = regexp.MustCompile(`android\s+(\d+)(?:\.\d+)?(l?)\+`)
 
 // APILevel maps the "Android 12L+" style minimum shown on APKMirror to an API level.
@@ -134,7 +138,7 @@ func APILevel(major int, l bool) int {
 	return api
 }
 
-// PickVariant chooses the variant page: a BUNDLE row whose architecture we can run and whose
+// PickVariant chooses the variant page: a BUNDLE or APK row whose architecture we can run and whose
 // minimum Android fits the device. Rows naming the exact version win; then rows listing both
 // arm64-v8a and armeabi-v7a (or universal) over armeabi-v7a only.
 func PickVariant(rel *Page, version string, sdk int) (string, error) {
@@ -147,7 +151,7 @@ func PickVariant(rel *Page, version string, sdk int) (string, error) {
 	anyExact := false
 	for _, row := range find(rel.Doc, func(n *html.Node) bool { return n.Data == "div" && hasClass(n, "table-row", "headerFont") }) {
 		t := strings.ToLower(text(row))
-		if !strings.Contains(t, "bundle") {
+		if !variantType.MatchString(t) { // BUNDLE (split apks) or APK (single file)
 			continue
 		}
 		link := first(row, func(n *html.Node) bool { return isA(n) && hasClass(n, "accent_color") })
@@ -188,9 +192,19 @@ func PickVariant(rel *Page, version string, sdk int) (string, error) {
 		if len(title) > 80 {
 			title = title[:80]
 		}
-		return "", fmt.Errorf("%w: no compatible BUNDLE variant on the release page (title %q)", ErrNotFound, title)
+		return "", fmt.Errorf("%w: no compatible variant (BUNDLE or APK for armeabi-v7a) on the release page (title %q)", ErrNotFound, title)
 	}
 	return cands[best].href, nil
+}
+
+// hasVariantTable reports whether the page lists variants (even unusable ones).
+func hasVariantTable(p *Page) bool {
+	for _, row := range find(p.Doc, func(n *html.Node) bool { return n.Data == "div" && hasClass(n, "table-row", "headerFont") }) {
+		if variantType.MatchString(strings.ToLower(text(row))) {
+			return true
+		}
+	}
+	return false
 }
 
 func downloadButton(p *Page) (string, error) {
@@ -231,17 +245,24 @@ func (c *Client) fetchSlug(ctx context.Context, req AppRequest, slug string) (st
 	}
 	slog.Info("apkmirror release page", "url", rel)
 	c.pause(ctx, 2*time.Second, 6*time.Second)
+	variant, btn := rel, ""
 	vhref, err := PickVariant(rp, req.Version, req.SDK)
-	if err != nil {
-		return "", err
-	}
-	variant := c.base() + vhref
-	vp, err := c.F.Page(ctx, variant, rel)
-	if err != nil {
-		return "", err
-	}
-	btn, err := downloadButton(vp)
-	if err != nil {
+	switch {
+	case err == nil:
+		variant = c.base() + vhref
+		vp, err := c.F.Page(ctx, variant, rel)
+		if err != nil {
+			return "", err
+		}
+		if btn, err = downloadButton(vp); err != nil {
+			return "", err
+		}
+	case errors.Is(err, ErrNotFound) && !hasVariantTable(rp):
+		// a release with a single variant has no table: the download button is on this page
+		if btn, err = downloadButton(rp); err != nil || !strings.Contains(btn, "/download/") {
+			return "", fmt.Errorf("%w: no variants and no download button on the release page", ErrNotFound)
+		}
+	default:
 		return "", err
 	}
 	c.pause(ctx, 2*time.Second, 6*time.Second)
@@ -259,7 +280,32 @@ func (c *Client) fetchSlug(ctx context.Context, req AppRequest, slug string) (st
 	if err := c.F.File(ctx, c.base()+fl, dlURL, dest); err != nil {
 		return "", err
 	}
-	return dest, nil
+	return fixExtension(dest), nil
+}
+
+// fixExtension renames a plain APK (AndroidManifest.xml at the top) from .apkm to .apk, since
+// Morphe merges split bundles by extension.
+func fixExtension(path string) string {
+	zr, err := zip.OpenReader(path)
+	if err != nil {
+		return path
+	}
+	plain := false
+	for _, f := range zr.File {
+		if f.Name == "AndroidManifest.xml" {
+			plain = true
+			break
+		}
+	}
+	zr.Close()
+	if !plain {
+		return path
+	}
+	apk := strings.TrimSuffix(path, filepath.Ext(path)) + ".apk"
+	if os.Rename(path, apk) != nil {
+		return path
+	}
+	return apk
 }
 
 func slugFile(slug string) string { return strings.ReplaceAll(slug, "/", "_") }
@@ -333,6 +379,24 @@ func tokens(pkg, name string) []string {
 	return out
 }
 
+// matches reports whether a publisher/app path contains one of the identifying tokens as a
+// whole word (so "fox" does not match "firefox"). Longer tokens may also match across the
+// dashes of the path ("formulaone" in "formula-one").
+func matches(slug string, toks []string) bool {
+	words := map[string]bool{}
+	for _, w := range regexp.MustCompile(`[a-z0-9]+`).FindAllString(strings.ToLower(slug), -1) {
+		words[w] = true
+	}
+	joined := strings.ReplaceAll(strings.ToLower(slug), "-", "")
+	joined = strings.ReplaceAll(joined, "/", "")
+	for _, t := range toks {
+		if words[t] || (len(t) >= 7 && strings.Contains(joined, t)) {
+			return true
+		}
+	}
+	return false
+}
+
 // Candidates searches APKMirror by package id and returns up to four publisher/app paths
 // that look like this app, Android TV pages first. Results are only guesses: the release
 // page must also name the package, and the downloaded file is verified.
@@ -352,13 +416,7 @@ func (c *Client) Candidates(ctx context.Context, pkg, name string) ([]string, er
 			continue
 		}
 		seen[m[1]] = true
-		match := false
-		for _, t := range toks {
-			if strings.Contains(strings.ReplaceAll(m[1], "-", ""), t) || strings.Contains(m[1], t) {
-				match = true
-			}
-		}
-		if !match {
+		if !matches(m[1], toks) {
 			continue // sidebar noise (trending apps) shows up in every search
 		}
 		if strings.Contains(m[1], "android-tv") {

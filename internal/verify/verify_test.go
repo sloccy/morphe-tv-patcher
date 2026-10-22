@@ -94,6 +94,18 @@ func TestInspectAPKPureXAPKPicksRightBase(t *testing.T) {
 	}
 }
 
+func TestInspectPlainAPKWhateverItIsCalled(t *testing.T) {
+	noAPKSigner(t)
+	der, want := apktest.Cert("pub")
+	apkBytes := apktest.SignedAPK(map[string][]byte{"AndroidManifest.xml": manifest(t), "lib/armeabi-v7a/x.so": []byte("so")}, der)
+	for _, name := range []string{"single.apk", "single.apkm", "single.bin"} {
+		f, err := Inspect(context.Background(), write(t, name, apkBytes))
+		if err != nil || f.Package != primePkg || f.Signer != want || !f.ABIs["armeabi-v7a"] {
+			t.Errorf("%s: %+v %v", name, f, err)
+		}
+	}
+}
+
 func TestInspectRejectsBadFiles(t *testing.T) {
 	noAPKSigner(t)
 	var e *Error

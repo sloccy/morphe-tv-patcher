@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/sloccy/morphe-tv-patcher/internal/apk/apktest"
 )
 
 const (
@@ -239,7 +241,9 @@ func TestPickVariantRanking(t *testing.T) {
 		want            string
 	}{
 		{"both archs beat armv7-only", row("/a", "BUNDLE armeabi-v7a Android 7.0+") + row("/b", "BUNDLE arm64-v8a + armeabi-v7a Android 7.0+"), "1.0", 31, "/b"},
-		{"apk rows are not bundles", row("/a", "APK armeabi-v7a Android 5.0+") + row("/b", "BUNDLE armeabi-v7a Android 5.0+"), "1.0", 31, "/b"},
+		{"plain APK rows are fine", row("/a", "APK armeabi-v7a Android 5.0+"), "1.0", 31, "/a"},
+		{"better arch beats type", row("/a", "APK armeabi-v7a Android 5.0+") + row("/b", "BUNDLE arm64-v8a + armeabi-v7a Android 5.0+"), "1.0", 31, "/b"},
+		{"rows that are neither are ignored", row("/a", "Download armeabi-v7a Android 5.0+"), "1.0", 31, ""},
 		{"arm64 only is unusable", row("/a", "BUNDLE arm64-v8a Android 7.0+"), "1.0", 31, ""},
 		{"too new for the device", row("/a", "BUNDLE armeabi-v7a Android 12L+") + row("/b", "BUNDLE armeabi-v7a Android 7.0+"), "1.0", 31, "/b"},
 		{"12L fits an sdk 32 device", row("/a", "BUNDLE armeabi-v7a Android 12L+"), "1.0", 32, "/a"},
@@ -313,6 +317,37 @@ func TestReleaseLookupVariants(t *testing.T) {
 	}
 }
 
+func TestWholeWordMatching(t *testing.T) {
+	foxOne := tokens("com.fox.foxone", "Fox One Android TV")
+	if matches("mozilla/firefox-fenix", foxOne) {
+		t.Error(`"fox" must not match "firefox"`)
+	}
+	if !matches("fox-corp/fox-one-android-tv", foxOne) {
+		t.Error("the real Fox One page should match")
+	}
+	f1 := tokens("com.formulaone.production", "F1 TV Android TV")
+	if !matches("formula-one-digital-media-limited/f1-tv-android-tv", f1) || matches("google-inc/youtube", f1) {
+		t.Error("F1 TV matching wrong")
+	}
+}
+
+func TestPlainAPKIsRenamedAndBundlesAreNot(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string, files map[string][]byte) string {
+		p := filepath.Join(dir, name)
+		os.WriteFile(p, apktest.Zip(files), 0o644)
+		return p
+	}
+	plain := write("a.apkm", map[string][]byte{"AndroidManifest.xml": []byte("x")})
+	bundle := write("b.apkm", map[string][]byte{"base.apk": []byte("x"), "info.json": []byte("{}")})
+	if got := fixExtension(plain); !strings.HasSuffix(got, "a.apk") {
+		t.Errorf("plain apk kept %s", got)
+	}
+	if got := fixExtension(bundle); !strings.HasSuffix(got, "b.apkm") {
+		t.Errorf("bundle renamed to %s", got)
+	}
+}
+
 func TestTokens(t *testing.T) {
 	got := strings.Join(tokens("com.formulaone.production", "F1 TV Android TV"), ",")
 	if got != "f1,formulaone" {
@@ -363,5 +398,71 @@ func TestFlareUnavailableIsBlocked(t *testing.T) {
 	f := NewFlare("http://127.0.0.1:1")
 	if _, err := f.Page(context.Background(), "http://x/", ""); !errors.Is(err, ErrBlocked) {
 		t.Errorf("got %v", err)
+	}
+}
+
+// scripted serves saved pages by URL path and records every request.
+type scripted struct {
+	pages map[string]string
+	seen  []string
+	refs  map[string]string
+}
+
+func (f *scripted) Page(ctx context.Context, u, ref string) (*Page, error) {
+	f.seen = append(f.seen, u)
+	if f.refs == nil {
+		f.refs = map[string]string{}
+	}
+	f.refs[u] = ref
+	raw, ok := f.pages[u]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, u)
+	}
+	return parsePage(u, raw)
+}
+
+func (f *scripted) File(ctx context.Context, u, ref, dest string) error {
+	f.seen = append(f.seen, "FILE "+u)
+	return os.WriteFile(dest, []byte(zipBytes), 0o644)
+}
+
+func TestSingleVariantReleaseUsesTheDownloadButtonOnThePage(t *testing.T) {
+	single := fx(t, "single-release")
+	if hasVariantTable(page(t, single)) {
+		t.Fatal("fixture should be a release page without a variants table")
+	}
+	btn, err := downloadButton(page(t, single))
+	if err != nil || !strings.Contains(btn, "/download/?key=") {
+		t.Fatalf("%q %v", btn, err)
+	}
+	rel := "https://m.test/apk/future-today-inc/fawesome-movies-tv-shows-android-tv/fawesome-movies-tv-shows-android-tv-19-7-release/"
+	f := &scripted{pages: map[string]string{
+		"https://m.test/":      "<title>home</title>",
+		rel:                    single,
+		"https://m.test" + btn: fx(t, "download"),
+	}}
+	c := &Client{F: f, Base: "https://m.test", Sleep: noSleep}
+	// the release page names the package, so the page check passes
+	f.pages[rel] = single + " com.future.moviesByFawesomeAndroidTV"
+	res, err := c.Fetch(context.Background(), AppRequest{Package: "com.future.moviesByFawesomeAndroidTV", Name: "Fawesome", Version: "19.7",
+		Hint: "future-today-inc/fawesome-movies-tv-shows-android-tv", SDK: 31, DestDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.refs["https://m.test"+btn] != rel {
+		t.Errorf("download page referer %q, want the release page", f.refs["https://m.test"+btn])
+	}
+	if b, _ := os.ReadFile(res.Path); string(b) != zipBytes {
+		t.Errorf("file %q", b)
+	}
+}
+
+func TestUnusableVariantTableIsNotRescuedByTheButton(t *testing.T) {
+	row := `<div class="table-row headerFont"><a class="accent_color" href="/v">v</a> BUNDLE arm64-v8a Android 7.0+</div>`
+	if _, err := PickVariant(page(t, "<html>"+row+`<a class="downloadButton" href="/x/download/?key=1">d</a></html>`), "1", 31); !errors.Is(err, ErrNotFound) {
+		t.Errorf("got %v", err)
+	}
+	if !hasVariantTable(page(t, "<html>"+row+"</html>")) {
+		t.Error("a table of unusable rows still counts as a table")
 	}
 }
