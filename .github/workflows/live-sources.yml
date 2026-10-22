@@ -102,6 +102,30 @@ jobs:
           import re
           print("table-ish classes:", sorted(set(re.findall(r'class="(table[^"]{0,60})"', s["html"])))[:12])
           PY
+      - name: Debug the final download request
+        continue-on-error: true
+        run: |
+          python - <<'PY'
+          from curl_cffi import requests as cr
+          from patcher import apkmirror as A
+          c = A.Client("chrome", "http://localhost:8191")
+          c.html(A.BASE + "/")
+          rel, rsoup = A.find_release(c, "amazon-mobile-llc/prime-video-android-tv-android-tv", "6.23.23+v15.5.0.70-armv7a")
+          variant = A.pick_variant(rsoup, 28)
+          dl_page = A.final_link(c.html(variant, referer=rel))
+          url = A.file_link(c.html(dl_page, referer=variant))
+          print("final url:", url[:110])
+          print("cookies from flaresolverr:", sorted(c.cookies))
+          print("ua:", c.ua)
+          def probe(label, sess, **kw):
+              r = sess.get(url, timeout=60, stream=True, **kw)
+              head = next(r.iter_content(200), b"")
+              print(f"{label}: HTTP {r.status_code} cf-mitigated={r.headers.get('cf-mitigated')} type={r.headers.get('content-type')} body[:60]={head[:60]!r}")
+          probe("A fs-cookies+ua+referer (chrome tls)", cr.Session(impersonate="chrome"), headers={"Referer": dl_page, "User-Agent": c.ua}, cookies=c.cookies)
+          probe("B fs-cookies+referer, impersonate UA", cr.Session(impersonate="chrome"), headers={"Referer": dl_page}, cookies=c.cookies)
+          probe("C no cookies, chrome", cr.Session(impersonate="chrome"), headers={"Referer": dl_page})
+          probe("D no cookies, firefox", cr.Session(impersonate="firefox"), headers={"Referer": dl_page})
+          PY
       - name: APKMirror through FlareSolverr (Prime Video)
         run: |
           python - <<'PY'
