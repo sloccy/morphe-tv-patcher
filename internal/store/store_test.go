@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -281,5 +282,155 @@ func TestBuildsAreRecordedAndBounded(t *testing.T) {
 	}
 	if _, ok := s2.Builds("com.a", "v9"); !ok {
 		t.Error("the latest version must be kept")
+	}
+}
+
+// ---- app sets ----
+
+func setsRig(t *testing.T) (st *Store, first, second Device) {
+	t.Helper()
+	s, _ := Open(t.TempDir())
+	_ = s.SeedSources([]string{"o/one", "o/two"}, false)
+	a, _ := s.AddDevice("Living room", "10.0.0.6")
+	b, _ := s.AddDevice("Bedroom", "10.0.0.7")
+	return s, a, b
+}
+
+func pkgs(es []EffectiveApp) string {
+	out := make([]string, 0, len(es))
+	for _, e := range es {
+		out = append(out, e.Package+"@"+e.Source+"<"+e.Via)
+	}
+	return strings.Join(out, " ")
+}
+
+func TestSetsAreGivenToSeveralDevices(t *testing.T) {
+	s, a, b := setsRig(t)
+	set, err := s.AddSet("Streaming", []AppChoice{{"com.netflix", ""}, {"com.disney", "o-two"}}, []string{a.ID, b.ID})
+	if err != nil || set.ID != "streaming" {
+		t.Fatalf("%+v %v", set, err)
+	}
+	for _, d := range []Device{a, b} {
+		if got := pkgs(s.EffectiveApps(d.ID)); got != "com.disney@o-two<set:streaming com.netflix@o-one<set:streaming" {
+			t.Errorf("%s: %s", d.Name, got)
+		}
+	}
+	// edit the set once: both devices follow
+	devs := []string{a.ID, b.ID}
+	if err := s.UpdateSet("streaming", "Streaming", []AppChoice{{"com.netflix", "o-one"}}, &devs); err != nil {
+		t.Fatal(err)
+	}
+	if got := pkgs(s.EffectiveApps(b.ID)); got != "com.netflix@o-one<set:streaming" {
+		t.Errorf("%s", got)
+	}
+	// assign from the set side to only one device
+	only := []string{a.ID}
+	_ = s.UpdateSet("streaming", "Streaming", []AppChoice{{"com.netflix", ""}}, &only)
+	if len(s.EffectiveApps(b.ID)) != 0 || len(s.EffectiveApps(a.ID)) != 1 {
+		t.Error("assignment from the set side should add and remove devices")
+	}
+	// and from the device side, with order
+	set2, _ := s.AddSet("Kids", []AppChoice{{"com.kids", ""}}, nil)
+	_ = s.SetDeviceSets(b.ID, []string{set2.ID, "streaming", set2.ID})
+	if got := s.Settings().Devices[1].Sets; len(got) != 2 || got[0] != "kids" {
+		t.Errorf("sets keep their order and are not repeated: %v", got)
+	}
+}
+
+func TestExtrasWinThenFirstSetWins(t *testing.T) {
+	s, a, _ := setsRig(t)
+	s1, _ := s.AddSet("One", []AppChoice{{"com.x", "o-one"}, {"com.only1", ""}}, nil)
+	s2, _ := s.AddSet("Two", []AppChoice{{"com.x", "o-two"}, {"com.only2", ""}}, nil)
+	_ = s.SetDeviceSets(a.ID, []string{s2.ID, s1.ID})
+	if got := pkgs(s.EffectiveApps(a.ID)); got != "com.only1@o-one<set:one com.only2@o-one<set:two com.x@o-two<set:two" {
+		t.Errorf("the first set wins a clash: %s", got)
+	}
+	_ = s.SetApps(a.ID, []AppChoice{{"com.x", "o-one"}}) // the device's own choice beats every set
+	if got := pkgs(s.EffectiveApps(a.ID)); !strings.Contains(got, "com.x@o-one<device") {
+		t.Errorf("a device's own extras win: %s", got)
+	}
+	if got := s.EffectiveApps("nope"); got != nil {
+		t.Errorf("%v", got)
+	}
+}
+
+func TestSetValidationAndRemoval(t *testing.T) {
+	s, a, b := setsRig(t)
+	if _, err := s.AddSet("  ", nil, nil); err == nil {
+		t.Error("blank name")
+	}
+	if _, err := s.AddSet(strings.Repeat("x", 61), nil, nil); err == nil {
+		t.Error("overlong name")
+	}
+	set, err := s.AddSet("Movies", []AppChoice{{"com.a", ""}}, []string{a.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddSet("movies", nil, nil); err == nil {
+		t.Error("names are unique, any case")
+	}
+	if _, err := s.AddSet("Bad source", []AppChoice{{"com.a", "ghost"}}, nil); err == nil {
+		t.Error("unknown source")
+	}
+	if _, err := s.AddSet("Bad device", nil, []string{"ghost"}); err == nil {
+		t.Error("unknown device")
+	}
+	if len(s.Settings().Sets) != 1 {
+		t.Error("a refused set must not be saved (even half-created)")
+	}
+	if _, err := s.AddSet("", nil, nil); err == nil {
+		t.Error("empty")
+	}
+	if err := s.SetDeviceSets(b.ID, []string{"ghost"}); err == nil {
+		t.Error("unknown set")
+	}
+	if err := s.UpdateSet("ghost", "X", nil, nil); err == nil {
+		t.Error("unknown set update")
+	}
+	if err := s.RemoveSet(set.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Settings(); len(got.Sets) != 0 || len(got.Devices[0].Sets) != 0 {
+		t.Errorf("removing a set takes it off every device: %+v", got)
+	}
+	if s.RemoveSet(set.ID) == nil {
+		t.Error("removing twice")
+	}
+}
+
+func TestPreviewDoesNotChangeAnything(t *testing.T) {
+	s, a, _ := setsRig(t)
+	set, _ := s.AddSet("Streaming", []AppChoice{{"com.a", ""}}, nil)
+	before := s.Settings()
+	after := s.Preview(func(st *Settings) {
+		_ = st.Assign(set.ID, []string{a.ID})
+		st.Sets[0].Apps = append(st.Sets[0].Apps, AppChoice{Package: "com.b", Source: "o-one"})
+	})
+	if got := Effective(after, a.ID); len(got) != 2 {
+		t.Errorf("the preview shows the proposed result: %+v", got)
+	}
+	if got := s.EffectiveApps(a.ID); len(got) != 0 || len(s.Settings().Sets[0].Apps) != 1 || len(before.Devices[0].Sets) != 0 {
+		t.Error("Preview must not touch the store")
+	}
+}
+
+func TestSetsSurviveRestartAndOldFilesLoad(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := Open(dir)
+	_ = s.SeedSources([]string{"o/one"}, false)
+	d, _ := s.AddDevice("TV", "10.0.0.6")
+	_, _ = s.AddSet("Streaming", []AppChoice{{"com.a", ""}}, []string{d.ID})
+	s2, _ := Open(dir)
+	if got := pkgs(s2.EffectiveApps("tv")); got != "com.a@o-one<set:streaming" {
+		t.Errorf("%s", got)
+	}
+	old := t.TempDir()
+	_ = os.WriteFile(filepath.Join(old, "settings.json"), []byte(`{"sources":[{"id":"x","repo":"o/x"}],"devices":[{"id":"tv","name":"TV","host":"10.0.0.6","apps":[{"package":"com.a","source":"x"}]}]}`), 0o600)
+	s3, err := Open(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := pkgs(s3.EffectiveApps("tv")); got != "com.a@x<device" {
+		t.Errorf("a file without sets keeps working; its apps are the device's extras: %s", got)
 	}
 }

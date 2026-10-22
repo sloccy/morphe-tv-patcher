@@ -234,9 +234,21 @@ func (r *Runner) CheckRepo(ctx context.Context, repo string, prerelease bool) er
 	return nil
 }
 
-// Pair registers this machine with a device's wireless debugging (one time).
-func (r *Runner) Pair(ctx context.Context, host string, pairPort int, code string) error {
-	return r.ADB.Pair(ctx, host, pairPort, code)
+// PairDevice registers this machine with a device's wireless debugging (one time), notes when
+// it was paired, and then reads the device's CPU so the page can use it straight away. Reading
+// the CPU is best effort: the pairing itself already worked if it fails.
+func (r *Runner) PairDevice(ctx context.Context, d store.Device, pairPort int, code string) (cpuKnown bool, err error) {
+	if err := r.ADB.Pair(ctx, d.Host, pairPort, code); err != nil {
+		return false, err
+	}
+	_ = r.Store.UpdateDeviceInfo(d.ID, func(i *store.DeviceInfo) { i.PairedAt = r.Now().Format(time.RFC3339) })
+	cctx, cancel := context.WithTimeout(ctx, 40*time.Second)
+	defer cancel()
+	if _, err := r.connect(cctx, d); err != nil {
+		slog.Info("paired, but could not read the device yet", "device", d.Name, "err", err)
+		return false, nil
+	}
+	return true, nil
 }
 
 // Trigger asks the scheduler for a run now. It returns false if one is already queued.
@@ -300,6 +312,7 @@ func (r *Runner) Run(ctx context.Context, o Options) []Result {
 
 type conn struct {
 	dev    store.Device
+	apps   []store.AppChoice // what this device should have (its sets plus its own extras)
 	serial string
 	abis   []string
 	sdk    int
@@ -325,21 +338,25 @@ func (r *Runner) pass(ctx context.Context, o Options) []Result {
 		} else {
 			seen := map[string]bool{}
 			for _, d := range settings.Devices {
-				for _, c := range d.Apps {
-					if !seen[c.Package+"\x00"+c.Source] {
-						seen[c.Package+"\x00"+c.Source] = true
-						choices = append(choices, c)
+				for _, e := range store.Effective(settings, d.ID) {
+					if !seen[e.Package+"\x00"+e.Source] {
+						seen[e.Package+"\x00"+e.Source] = true
+						choices = append(choices, e.AppChoice)
 					}
 				}
 			}
 		}
-		conns = append(conns, conn{dev: store.Device{ID: "", Name: "(no device)", Apps: choices}, abis: abi.Normalize(o.ABIs)})
+		conns = append(conns, conn{dev: store.Device{ID: "", Name: "(no device)"}, apps: choices, abis: abi.Normalize(o.ABIs)})
 	} else {
 		for _, d := range settings.Devices {
 			if o.DeviceID != "" && d.ID != o.DeviceID {
 				continue
 			}
-			if len(d.Apps) == 0 {
+			var apps []store.AppChoice
+			for _, e := range store.Effective(settings, d.ID) {
+				apps = append(apps, e.AppChoice)
+			}
+			if len(apps) == 0 {
 				continue
 			}
 			c, err := r.connect(ctx, d)
@@ -349,6 +366,7 @@ func (r *Runner) pass(ctx context.Context, o Options) []Result {
 				continue
 			}
 			r.noteRecovered("device:" + d.ID)
+			c.apps = apps
 			conns = append(conns, c)
 		}
 	}
@@ -356,7 +374,7 @@ func (r *Runner) pass(ctx context.Context, o Options) []Result {
 	// which apps, from which patch source, on which devices
 	byApp := map[appKey][]*conn{}
 	for i := range conns {
-		for _, c := range conns[i].dev.Apps {
+		for _, c := range conns[i].apps {
 			if o.Package == "" || o.Package == c.Package {
 				id := c.Source
 				if src, ok := r.Store.Source(id); ok {

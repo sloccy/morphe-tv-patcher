@@ -27,6 +27,10 @@ type fakeBackend struct {
 	queueFull bool
 	pairErr   error
 	paired    []string
+	cpuKnown  bool
+	problems  []runner.Problem // what Compat reports as known mismatches
+	unchecked []string
+	compatSaw map[string][]string // device id -> the packages it would receive, per Compat call
 	checkErr  error
 	checked   []string
 	refreshed atomic.Int32 // written by the background refresh, read by the test
@@ -46,9 +50,23 @@ func (f *fakeBackend) CheckRepo(ctx context.Context, repo string, prerelease boo
 	return f.checkErr
 }
 func (f *fakeBackend) RefreshLists(context.Context) { f.refreshed.Add(1) }
-func (f *fakeBackend) Pair(ctx context.Context, host string, port int, code string) error {
-	f.paired = append(f.paired, host+" "+code)
-	return f.pairErr
+func (f *fakeBackend) PairDevice(ctx context.Context, d store.Device, port int, code string) (bool, error) {
+	f.paired = append(f.paired, d.Host+" "+code)
+	return f.cpuKnown, f.pairErr
+}
+func (f *fakeBackend) Compat(ctx context.Context, st store.Settings, ids []string) (problems []runner.Problem, unchecked []string) {
+	if f.compatSaw == nil {
+		f.compatSaw = map[string][]string{}
+	}
+	for _, id := range ids {
+		eff := store.Effective(st, id)
+		pk := make([]string, 0, len(eff))
+		for _, e := range eff {
+			pk = append(pk, e.Package)
+		}
+		f.compatSaw[id] = pk
+	}
+	return f.problems, f.unchecked
 }
 
 type ring struct{ lines []string }
@@ -471,5 +489,223 @@ func TestStateShowsAnUnreachableSourcesWarning(t *testing.T) {
 	_, body := do(t, srv, "GET", "/api/state", "", nil)
 	if !strings.Contains(body, `"warning":"HTTP 404. Using the last good bundle (v1)"`) {
 		t.Errorf("%s", body)
+	}
+}
+
+// ---- app sets ----
+
+func twoTVs(t *testing.T, s *Server) (first, second store.Device) {
+	t.Helper()
+	a, _ := s.Store.AddDevice("Living room", "10.0.0.6")
+	b, _ := s.Store.AddDevice("Bedroom", "10.0.0.7")
+	return a, b
+}
+
+func TestCreateASetAndGiveItToBothTVs(t *testing.T) {
+	srv, s, fb := setup(t)
+	a, b := twoTVs(t, s)
+	fb.unchecked = []string{"Bedroom has not been reached yet"}
+	body := `{"name":"Streaming","apps":[{"package":"com.netflix.ninja"},"com.disney.disneyplus"],"devices":["` + a.ID + `","` + b.ID + `"]}`
+	code, resp := do(t, srv, "POST", "/api/sets", body, nil)
+	if code != 201 || !strings.Contains(resp, `"unchecked":["Bedroom has not been reached yet"]`) {
+		t.Fatalf("%d %s", code, resp)
+	}
+	for _, d := range []store.Device{a, b} {
+		if got := strings.Join(fb.compatSaw[d.ID], ","); got != "com.disney.disneyplus,com.netflix.ninja" {
+			t.Errorf("the check must see what %s would receive (before saving): %q", d.Name, got)
+		}
+		if got := s.Store.EffectiveApps(d.ID); len(got) != 2 || got[0].Via != "set:streaming" {
+			t.Errorf("%s: %+v", d.Name, got)
+		}
+	}
+	if sets := s.Store.Settings().Sets; len(sets) != 1 || sets[0].Apps[0].Source != defSrc {
+		t.Errorf("%+v", sets)
+	}
+}
+
+func TestBlockedSaveSavesNothing(t *testing.T) {
+	srv, s, fb := setup(t)
+	a, b := twoTVs(t, s)
+	fb.problems = []runner.Problem{{Device: "Bedroom", Package: "com.netflix.ninja", Name: "Netflix", Reason: "Netflix only has armeabi-v7a builds; Bedroom runs arm64-v8a"}}
+	body := `{"name":"Streaming","apps":[{"package":"com.netflix.ninja"}],"devices":["` + a.ID + `","` + b.ID + `"]}`
+	code, resp := do(t, srv, "POST", "/api/sets", body, nil)
+	if code != http.StatusConflict {
+		t.Fatalf("%d %s", code, resp)
+	}
+	var got struct {
+		Error    string           `json:"error"`
+		Problems []runner.Problem `json:"problems"`
+	}
+	if err := json.Unmarshal([]byte(resp), &got); err != nil || len(got.Problems) != 1 || got.Problems[0].Device != "Bedroom" || !strings.Contains(got.Error, "not saved") {
+		t.Errorf("%v %+v", err, got)
+	}
+	if len(s.Store.Settings().Sets) != 0 || len(s.Store.EffectiveApps(a.ID)) != 0 {
+		t.Error("a blocked save must change nothing, for any device")
+	}
+	// the same set for the device that can run it is accepted
+	fb.problems = nil
+	if code, _ := do(t, srv, "POST", "/api/sets", `{"name":"Streaming","apps":[{"package":"com.netflix.ninja"}],"devices":["`+a.ID+`"]}`, nil); code != 201 {
+		t.Errorf("%d", code)
+	}
+	// editing the set so it would break a device is blocked as well, and leaves the set as it was
+	fb.problems = []runner.Problem{{Device: "Living room", Package: "com.disney.disneyplus", Name: "Disney+", Reason: "x"}}
+	if code, _ := do(t, srv, "PUT", "/api/sets/streaming", `{"name":"Streaming","apps":[{"package":"com.disney.disneyplus"}]}`, nil); code != 409 {
+		t.Errorf("%d", code)
+	}
+	if apps := s.Store.Settings().Sets[0].Apps; len(apps) != 1 || apps[0].Package != "com.netflix.ninja" {
+		t.Errorf("%+v", apps)
+	}
+}
+
+func TestEditingASetChecksWhoUsesItAndNewDevices(t *testing.T) {
+	srv, s, fb := setup(t)
+	a, b := twoTVs(t, s)
+	_, _ = s.Store.AddSet("Streaming", []store.AppChoice{{Package: "com.netflix.ninja"}}, []string{a.ID})
+	// change the apps without naming devices: the device using it is checked
+	if code, _ := do(t, srv, "PUT", "/api/sets/streaming", `{"name":"Streaming","apps":[{"package":"com.disney.disneyplus"}]}`, nil); code != 200 {
+		t.Fatalf("%d", code)
+	}
+	if _, ok := fb.compatSaw[a.ID]; !ok {
+		t.Error("the device that already uses the set must be checked")
+	}
+	if got := strings.Join(fb.compatSaw[a.ID], ","); got != "com.disney.disneyplus" {
+		t.Errorf("%q", got)
+	}
+	// push it to the second TV as well in the same save
+	if code, _ := do(t, srv, "PUT", "/api/sets/streaming", `{"name":"Streaming","apps":[{"package":"com.disney.disneyplus"}],"devices":["`+a.ID+`","`+b.ID+`"]}`, nil); code != 200 {
+		t.Fatalf("%d", code)
+	}
+	if got := s.Store.EffectiveApps(b.ID); len(got) != 1 {
+		t.Errorf("%+v", got)
+	}
+	// and take it off the first
+	if code, _ := do(t, srv, "PUT", "/api/sets/streaming", `{"name":"Streaming","apps":[{"package":"com.disney.disneyplus"}],"devices":["`+b.ID+`"]}`, nil); code != 200 {
+		t.Fatalf("%d", code)
+	}
+	if got := s.Store.EffectiveApps(a.ID); len(got) != 0 {
+		t.Errorf("%+v", got)
+	}
+	if code, _ := do(t, srv, "PUT", "/api/sets/ghost", `{"name":"x","apps":[]}`, nil); code != 404 {
+		t.Errorf("unknown set: %d", code)
+	}
+}
+
+func TestDeviceSetsAndExtrasAreCheckedToo(t *testing.T) {
+	srv, s, fb := setup(t)
+	a, _ := twoTVs(t, s)
+	_, _ = s.Store.AddSet("Streaming", []store.AppChoice{{Package: "com.netflix.ninja"}}, nil)
+	if code, _ := do(t, srv, "PUT", "/api/devices/"+a.ID+"/sets", `{"sets":["streaming"]}`, nil); code != 200 {
+		t.Fatalf("%d", code)
+	}
+	if got := strings.Join(fb.compatSaw[a.ID], ","); got != "com.netflix.ninja" {
+		t.Errorf("%q", got)
+	}
+	for _, c := range []struct{ path, body string }{
+		{"/api/devices/" + a.ID + "/sets", `{"sets":["ghost"]}`},
+		{"/api/devices/ghost/sets", `{"sets":[]}`},
+	} {
+		if code, _ := do(t, srv, "PUT", c.path, c.body, nil); code < 400 || code >= 500 {
+			t.Errorf("%s: %d", c.path, code)
+		}
+	}
+	fb.problems = []runner.Problem{{Device: "Living room", Package: "com.disney.disneyplus", Name: "Disney+", Reason: "x"}}
+	if code, _ := do(t, srv, "PUT", "/api/devices/"+a.ID+"/apps", `{"apps":[{"package":"com.disney.disneyplus"}]}`, nil); code != 409 {
+		t.Errorf("extras are checked: %d", code)
+	}
+	if got := s.Store.Settings().Devices[0].Apps; len(got) != 0 {
+		t.Errorf("%+v", got)
+	}
+	if code, _ := do(t, srv, "PUT", "/api/devices/"+a.ID+"/sets", `{"sets":["streaming"]}`, nil); code != 409 {
+		t.Errorf("a set that breaks the device is refused: %d", code)
+	}
+}
+
+func TestSetValidationAndRemoval(t *testing.T) {
+	srv, s, fb := setup(t)
+	a, _ := twoTVs(t, s)
+	bad := map[string]int{
+		`{"name":"","apps":[]}`:                                                  400,
+		`{"name":"x","apps":[{"package":"com.not.real"}]}`:                       400,
+		`{"name":"x","apps":[{"package":"com.netflix.ninja","source":"ghost"}]}`: 400,
+		`{"name":"x","apps":[],"devices":["ghost"]}`:                             400,
+		`{"name":"x","apps":[],"extra":1}`:                                       400,
+		`{"name":"` + strings.Repeat("n", 70) + `","apps":[]}`:                   400,
+	}
+	for body, want := range bad {
+		if code, _ := do(t, srv, "POST", "/api/sets", body, nil); code != want {
+			t.Errorf("%s: %d", body, code)
+		}
+	}
+	if len(s.Store.Settings().Sets) != 0 {
+		t.Error("nothing saved")
+	}
+	if code, _ := do(t, srv, "POST", "/api/sets", `{"name":"Empty","apps":[]}`, nil); code != 201 {
+		t.Errorf("an empty set is allowed: %d", code)
+	}
+	if code, _ := do(t, srv, "POST", "/api/sets", `{"name":"empty","apps":[]}`, nil); code != 400 {
+		t.Errorf("names are unique: %d", code)
+	}
+	delete(fb.lists, defSrc)
+	if code, _ := do(t, srv, "POST", "/api/sets", `{"name":"S2","apps":[{"package":"com.netflix.ninja"}]}`, nil); code != 503 {
+		t.Errorf("source not loaded: %d", code)
+	}
+	_ = a
+	if code, _ := do(t, srv, "DELETE", "/api/sets/empty", "", nil); code != 200 {
+		t.Errorf("delete: %d", code)
+	}
+	if code, _ := do(t, srv, "DELETE", "/api/sets/empty", "", nil); code != 404 {
+		t.Errorf("delete again: %d", code)
+	}
+	if code, _ := do(t, srv, "POST", "/api/sets", `{"name":"x","apps":[]}`, map[string]string{"Origin": "https://evil.example"}); code != 403 {
+		t.Errorf("cross-origin: %d", code)
+	}
+}
+
+func TestStateShowsSetsAndWhereEachAppComesFrom(t *testing.T) {
+	srv, s, _ := setup(t)
+	a, b := twoTVs(t, s)
+	_, _ = s.Store.AddSet("Streaming", []store.AppChoice{{Package: "com.netflix.ninja"}}, []string{a.ID, b.ID})
+	_ = s.Store.SetApps(a.ID, []store.AppChoice{{Package: "com.disney.disneyplus"}})
+	_, body := do(t, srv, "GET", "/api/state", "", nil)
+	var st struct {
+		Sets []struct {
+			ID      string   `json:"id"`
+			Devices []string `json:"devices"`
+		} `json:"sets"`
+		Devices []struct {
+			ID        string `json:"id"`
+			Effective []struct {
+				Package string `json:"package"`
+				Via     string `json:"via"`
+			} `json:"effective"`
+			Sets []string `json:"sets"`
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal([]byte(body), &st); err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Sets) != 1 || len(st.Sets[0].Devices) != 2 {
+		t.Errorf("%+v", st.Sets)
+	}
+	living := make([]string, 0, len(st.Devices[0].Effective))
+	for _, e := range st.Devices[0].Effective {
+		living = append(living, e.Package+"<"+e.Via)
+	}
+	if strings.Join(living, " ") != "com.disney.disneyplus<device com.netflix.ninja<set:streaming" || len(st.Devices[0].Sets) != 1 {
+		t.Errorf("%v", living)
+	}
+}
+
+func TestPairMessageMentionsTheCPUWhenRead(t *testing.T) {
+	srv, s, fb := setup(t)
+	d, _ := s.Store.AddDevice("TV", "10.0.0.6")
+	_ = s.Store.SetDeviceInfo(d.ID, store.DeviceInfo{ABIs: []string{"arm64-v8a", "armeabi-v7a"}, SDK: 34})
+	fb.cpuKnown = true
+	if _, b := do(t, srv, "POST", "/api/devices/tv/pair", `{"pair_port":38000,"code":"123456"}`, nil); !strings.Contains(b, "arm64-v8a") {
+		t.Errorf("%s", b)
+	}
+	fb.cpuKnown = false
+	if _, b := do(t, srv, "POST", "/api/devices/tv/pair", `{"pair_port":38000,"code":"123456"}`, nil); !strings.Contains(b, "could not be read") {
+		t.Errorf("%s", b)
 	}
 }

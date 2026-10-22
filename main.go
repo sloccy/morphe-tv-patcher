@@ -131,6 +131,12 @@ func setup() (*app, error) {
 			}
 			return patches.FromCLI(rel.Tag, patches.ParseListPatches(stable), patches.ParseListPatches(all), names), nil
 		},
+		Probe: func(ctx context.Context, src store.Source, pkg, name, version string) ([]string, error) {
+			// a quick look at the release page (no download), used to learn which CPU builds exist
+			return apkmirror.Probe(ctx, apkmirror.AppRequest{Package: pkg, Name: name, Version: version,
+				KnownSlug: a.st.App(pkg).Slug, Hint: apkmirror.Hints[pkg], AllowPhone: src.AllowPhone},
+				apkmirror.Options{ProfileHint: a.st.LastProfile(), Backoff: []time.Duration{time.Second}})
+		},
 		Fetch: func(ctx context.Context, x sources.App, sdk int) (*sources.Fetched, error) {
 			return sources.Fetch(ctx, &env, x, sdk)
 		},
@@ -223,22 +229,26 @@ func cmdPair(args []string) error {
 		return err
 	}
 	devs := a.st.Settings().Devices
-	var host string
+	var dev store.Device
 	for _, d := range devs {
 		if *device == d.ID || (*device == "" && len(devs) == 1) {
-			host = d.Host
+			dev = d
 		}
 	}
-	if host == "" {
+	if dev.ID == "" {
 		return errors.New("choose a device with --device (add it in the web page first)")
 	}
 	if *port == 0 || *code == "" {
 		return errors.New("usage: pair --device ID --pair-port PORT --code 123456")
 	}
-	if err := a.runner.Pair(context.Background(), host, *port, *code); err != nil {
+	cpu, err := a.runner.PairDevice(context.Background(), dev, *port, *code)
+	if err != nil {
 		return err
 	}
-	fmt.Println("paired with", host)
+	fmt.Println("paired with", dev.Host)
+	if info, ok := a.st.DeviceInfo(dev.ID); ok && cpu {
+		fmt.Println("CPU:", strings.Join(info.ABIs, ", "))
+	}
 	return nil
 }
 

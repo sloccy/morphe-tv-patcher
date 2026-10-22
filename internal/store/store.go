@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -54,7 +55,65 @@ type Device struct {
 	ID   string      `json:"id"`
 	Name string      `json:"name"`
 	Host string      `json:"host"`
-	Apps []AppChoice `json:"apps"` // apps to keep installed
+	Apps []AppChoice `json:"apps"`           // this device's own extra apps (on top of its sets)
+	Sets []string    `json:"sets,omitempty"` // ids of the app sets it uses, in order
+}
+
+// AppSet is a named list of apps that can be given to several devices at once.
+type AppSet struct {
+	ID   string      `json:"id"`
+	Name string      `json:"name"`
+	Apps []AppChoice `json:"apps"`
+}
+
+// EffectiveApp is an app a device should have, and where that choice comes from.
+type EffectiveApp struct {
+	AppChoice
+	Via string `json:"via"` // "device" for its own extras, otherwise "set:<id>"
+}
+
+// Effective works out the apps a device gets from a settings snapshot: its own extras first
+// (they win), then each of its sets in order. One choice per package, the first one wins;
+// sorted by package. Unknown set ids are ignored.
+func Effective(st Settings, deviceID string) []EffectiveApp {
+	var d *Device
+	for i := range st.Devices {
+		if st.Devices[i].ID == deviceID {
+			d = &st.Devices[i]
+		}
+	}
+	if d == nil {
+		return nil
+	}
+	first := ""
+	if len(st.Sources) > 0 {
+		first = st.Sources[0].ID
+	}
+	seen := map[string]bool{}
+	var out []EffectiveApp
+	add := func(c AppChoice, via string) {
+		if c.Source == "" {
+			c.Source = first
+		}
+		if !seen[c.Package] {
+			seen[c.Package] = true
+			out = append(out, EffectiveApp{AppChoice: c, Via: via})
+		}
+	}
+	for _, c := range d.Apps {
+		add(c, "device")
+	}
+	for _, id := range d.Sets {
+		for _, set := range st.Sets {
+			if set.ID == id {
+				for _, c := range set.Apps {
+					add(c, "set:"+set.ID)
+				}
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Package < out[j].Package })
+	return out
 }
 
 // Override is a per-app tweak edited by hand in settings.json (the UI never touches it).
@@ -74,6 +133,7 @@ type Settings struct {
 	// every source later is respected (they are not added again on the next start).
 	SourcesSeeded bool                `json:"sources_seeded,omitempty"`
 	Sources       []Source            `json:"sources"`
+	Sets          []AppSet            `json:"sets,omitempty"`
 	Devices       []Device            `json:"devices"`
 	Overrides     map[string]Override `json:"overrides,omitempty"`
 }
@@ -103,9 +163,10 @@ type Install struct {
 
 // DeviceInfo is what we learned about a device the last time we reached it.
 type DeviceInfo struct {
-	ABIs   []string `json:"abis"` // in order of preference, as the device reports them
-	SDK    int      `json:"sdk"`
-	SeenAt string   `json:"seen_at"`
+	ABIs     []string `json:"abis"` // in order of preference, as the device reports them
+	SDK      int      `json:"sdk"`
+	SeenAt   string   `json:"seen_at"`
+	PairedAt string   `json:"paired_at,omitempty"` // set when pairing from the page succeeded
 }
 
 type stateFile struct {
@@ -191,7 +252,12 @@ func (s *Store) Settings() Settings {
 	out.Sources = append([]Source{}, s.settings.Sources...)
 	for _, d := range s.settings.Devices {
 		d.Apps = append([]AppChoice{}, d.Apps...)
+		d.Sets = append([]string{}, d.Sets...)
 		out.Devices = append(out.Devices, d)
+	}
+	for _, set := range s.settings.Sets {
+		set.Apps = append([]AppChoice{}, set.Apps...)
+		out.Sets = append(out.Sets, set)
 	}
 	maps.Copy(out.Overrides, s.settings.Overrides)
 	return out
@@ -278,14 +344,28 @@ func (s *Store) SetApps(id string, choices []AppChoice) error {
 	if i < 0 {
 		return errors.New("no such device")
 	}
+	apps, err := s.normalizeLocked(choices)
+	if err != nil {
+		return err
+	}
+	s.settings.Devices[i].Apps = apps
+	return s.write("settings.json", s.settings)
+}
+
+// normalizeLocked validates app choices: known sources (an empty one means the first), one per
+// package (the first wins), sorted by package.
+func (s *Store) normalizeLocked(choices []AppChoice) ([]AppChoice, error) {
 	seen := map[string]bool{}
 	apps := []AppChoice{}
 	for _, c := range choices {
+		if c.Package == "" || len(c.Package) > 200 {
+			return nil, errors.New("every app needs a package name")
+		}
 		if c.Source == "" && len(s.settings.Sources) > 0 {
 			c.Source = s.settings.Sources[0].ID
 		}
 		if s.sourceIndex(c.Source) < 0 {
-			return fmt.Errorf("unknown patch source %q (add a patch repository first)", c.Source)
+			return nil, fmt.Errorf("unknown patch source %q (add a patch repository first)", c.Source)
 		}
 		if !seen[c.Package] {
 			seen[c.Package] = true
@@ -293,8 +373,170 @@ func (s *Store) SetApps(id string, choices []AppChoice) error {
 		}
 	}
 	sort.Slice(apps, func(a, b int) bool { return apps[a].Package < apps[b].Package })
-	s.settings.Devices[i].Apps = apps
+	return apps, nil
+}
+
+// ---- app sets ----
+
+func (s *Store) setIndex(id string) int {
+	for i, set := range s.settings.Sets {
+		if set.ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+func (s *Store) nameTakenLocked(name, exceptID string) bool {
+	for _, set := range s.settings.Sets {
+		if set.ID != exceptID && strings.EqualFold(set.Name, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// Assign makes exactly the given devices use a set (and no others) in a settings value.
+func (st *Settings) Assign(setID string, devices []string) error {
+	want := map[string]bool{}
+	for _, id := range devices {
+		known := false
+		for _, d := range st.Devices {
+			known = known || d.ID == id
+		}
+		if !known {
+			return fmt.Errorf("no such device %q", id)
+		}
+		want[id] = true
+	}
+	for i := range st.Devices {
+		d := &st.Devices[i]
+		has := slices.Contains(d.Sets, setID)
+		switch {
+		case want[d.ID] && !has:
+			d.Sets = append(d.Sets, setID)
+		case !want[d.ID] && has:
+			d.Sets = slices.DeleteFunc(d.Sets, func(x string) bool { return x == setID })
+		}
+	}
+	return nil
+}
+
+// Preview returns a copy of the settings with change applied to it. Nothing is saved: the page
+// uses it to see what each device would end up with before it allows a save.
+func (s *Store) Preview(change func(*Settings)) Settings {
+	cp := s.Settings()
+	change(&cp)
+	return cp
+}
+
+// Normalize validates app choices the same way saving does (known sources, one per package, sorted).
+func (s *Store) Normalize(choices []AppChoice) ([]AppChoice, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.normalizeLocked(choices)
+}
+
+// AddSet creates a set and gives it to the listed devices.
+func (s *Store) AddSet(name string, apps []AppChoice, devices []string) (AppSet, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || len(name) > 60 {
+		return AppSet{}, errors.New("a set needs a name of 1-60 characters")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.nameTakenLocked(name, "") {
+		return AppSet{}, fmt.Errorf("a set called %q already exists", name)
+	}
+	list, err := s.normalizeLocked(apps)
+	if err != nil {
+		return AppSet{}, err
+	}
+	base := strings.Trim(nonSlug.ReplaceAllString(strings.ToLower(name), "-"), "-")
+	if base == "" {
+		base = "set"
+	}
+	id := base
+	for n := 2; s.setIndex(id) >= 0; n++ {
+		id = fmt.Sprintf("%s-%d", base, n)
+	}
+	set := AppSet{ID: id, Name: name, Apps: list}
+	s.settings.Sets = append(s.settings.Sets, set)
+	if err := s.settings.Assign(id, devices); err != nil {
+		s.settings.Sets = s.settings.Sets[:len(s.settings.Sets)-1]
+		return AppSet{}, err
+	}
+	return set, s.write("settings.json", s.settings)
+}
+
+// UpdateSet changes a set's name and apps; devices (when not nil) becomes the exact list of
+// devices that use it.
+func (s *Store) UpdateSet(id, name string, apps []AppChoice, devices *[]string) error {
+	name = strings.TrimSpace(name)
+	if name == "" || len(name) > 60 {
+		return errors.New("a set needs a name of 1-60 characters")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := s.setIndex(id)
+	if i < 0 {
+		return errors.New("no such set")
+	}
+	if s.nameTakenLocked(name, id) {
+		return fmt.Errorf("a set called %q already exists", name)
+	}
+	list, err := s.normalizeLocked(apps)
+	if err != nil {
+		return err
+	}
+	if devices != nil {
+		if err := s.settings.Assign(id, *devices); err != nil {
+			return err
+		}
+	}
+	s.settings.Sets[i].Name, s.settings.Sets[i].Apps = name, list
 	return s.write("settings.json", s.settings)
+}
+
+// RemoveSet deletes a set and takes it off every device (nothing is uninstalled).
+func (s *Store) RemoveSet(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := s.setIndex(id)
+	if i < 0 {
+		return errors.New("no such set")
+	}
+	_ = s.settings.Assign(id, nil)
+	s.settings.Sets = append(s.settings.Sets[:i], s.settings.Sets[i+1:]...)
+	return s.write("settings.json", s.settings)
+}
+
+// SetDeviceSets makes a device use exactly these sets, in this order.
+func (s *Store) SetDeviceSets(deviceID string, ids []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := s.deviceIndex(deviceID)
+	if i < 0 {
+		return errors.New("no such device")
+	}
+	seen := map[string]bool{}
+	out := []string{}
+	for _, id := range ids {
+		if s.setIndex(id) < 0 {
+			return fmt.Errorf("no such set %q", id)
+		}
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	s.settings.Devices[i].Sets = out
+	return s.write("settings.json", s.settings)
+}
+
+// EffectiveApps returns the apps a device gets from its sets and its own extras.
+func (s *Store) EffectiveApps(deviceID string) []EffectiveApp {
+	return Effective(s.Settings(), deviceID)
 }
 
 // ---- patch sources ----
@@ -490,14 +732,29 @@ func (s *Store) DeviceInfo(dev string) (DeviceInfo, bool) {
 	if d == nil {
 		return DeviceInfo{}, false
 	}
-	return DeviceInfo{ABIs: append([]string{}, d.ABIs...), SDK: d.SDK, SeenAt: d.SeenAt}, true
+	return DeviceInfo{ABIs: append([]string{}, d.ABIs...), SDK: d.SDK, SeenAt: d.SeenAt, PairedAt: d.PairedAt}, true
 }
 
-// SetDeviceInfo records a device's CPU list and Android level.
+// SetDeviceInfo records a device's CPU list and Android level (keeping when it was paired).
 func (s *Store) SetDeviceInfo(dev string, in DeviceInfo) error {
+	return s.UpdateDeviceInfo(dev, func(d *DeviceInfo) {
+		d.ABIs, d.SDK, d.SeenAt = in.ABIs, in.SDK, in.SeenAt
+		if in.PairedAt != "" {
+			d.PairedAt = in.PairedAt
+		}
+	})
+}
+
+// UpdateDeviceInfo changes what we know about a device under the lock and saves it.
+func (s *Store) UpdateDeviceInfo(dev string, fn func(*DeviceInfo)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.state.Devices[dev] = &in
+	d := s.state.Devices[dev]
+	if d == nil {
+		d = &DeviceInfo{}
+		s.state.Devices[dev] = d
+	}
+	fn(d)
 	return s.write("state.json", s.state)
 }
 

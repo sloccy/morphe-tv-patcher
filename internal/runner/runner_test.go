@@ -27,6 +27,8 @@ type fakeADB struct {
 	installMsg  map[string]string   // pkg -> failure output (first attempt)
 	installs    []string            // "serial pkg"
 	uninstalled []string
+	pairErr     error
+	paired      []string
 }
 
 func newADB() *fakeADB {
@@ -72,7 +74,10 @@ func (f *fakeADB) Uninstall(ctx context.Context, s, pkg string) error {
 	f.uninstalled = append(f.uninstalled, s+" "+pkg)
 	return nil
 }
-func (f *fakeADB) Pair(context.Context, string, int, string) error { return nil }
+func (f *fakeADB) Pair(ctx context.Context, host string, port int, code string) error {
+	f.paired = append(f.paired, fmt.Sprintf("%s:%d %s", host, port, code))
+	return f.pairErr
+}
 
 type rig struct {
 	r        *Runner
@@ -835,5 +840,191 @@ func TestNoPatchSourcesAtAllIsHandled(t *testing.T) {
 	rg.r.RefreshLists(context.Background()) // must not panic with no sources
 	if len(rg.r.Lists()) != 1 {             // the list loaded earlier is not invented or lost
 		t.Logf("lists: %v", rg.r.Lists())
+	}
+}
+
+// ---- app sets, compatibility, pairing ----
+
+func (rg *rig) knownDevice(t *testing.T, name, host string, abis ...string) store.Device {
+	t.Helper()
+	d, err := rg.st.AddDevice(name, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = rg.st.SetDeviceInfo(d.ID, store.DeviceInfo{ABIs: abis, SDK: 31, SeenAt: "t"})
+	return d
+}
+
+func TestADeviceGetsItsSetsPlusItsOwnExtras(t *testing.T) {
+	rg := newRig(t)
+	a := rg.device(t, "Living room", "10.0.0.1", disney)
+	b := rg.device(t, "Bedroom", "10.0.0.2")
+	set, err := rg.st.AddSet("Streaming", []store.AppChoice{{Package: prime}, {Package: netflix}}, []string{a.ID, b.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = set
+	res := rg.r.Run(context.Background(), Options{})
+	for _, x := range res {
+		if !x.OK {
+			t.Fatalf("%+v", res)
+		}
+	}
+	if len(rg.adb.installs) != 5 { // living room: disney + prime + netflix, bedroom: prime + netflix
+		t.Errorf("installs %v", rg.adb.installs)
+	}
+	if rg.fetches != 3 { // each app is fetched once for the one CPU group, however many devices use it
+		t.Errorf("fetches %d", rg.fetches)
+	}
+	if _, ok := rg.st.Install(b.ID, disney); ok {
+		t.Error("the bedroom TV does not have the living room's extra app")
+	}
+	// the set changes once; both TVs follow on the next run
+	_ = rg.st.UpdateSet("streaming", "Streaming", []store.AppChoice{{Package: netflix}}, nil)
+	rg.adb.installs = nil
+	rg.r.Run(context.Background(), Options{Force: true})
+	if len(rg.adb.installs) != 3 { // living room: disney + netflix, bedroom: netflix
+		t.Errorf("after editing the set: %v", rg.adb.installs)
+	}
+}
+
+const disney = "com.disney.disneyplus"
+
+func TestCompatBlocksOnlyKnownMismatches(t *testing.T) {
+	rg := newRig(t)
+	rg.r.RefreshLists(context.Background())
+	onn := rg.knownDevice(t, "Onn", "10.0.0.1", "armeabi-v7a", "armeabi")
+	box := rg.knownDevice(t, "Box64", "10.0.0.2", "arm64-v8a", "armeabi-v7a", "armeabi")
+	only := rg.knownDevice(t, "OnlyArm64", "10.0.0.3", "arm64-v8a")
+	nev := rg.st.Settings()
+	_ = nev
+	_ = rg.st.SetBuilds(netflix, "13.0.1 build 25028", []string{"armeabi-v7a"})
+	_ = rg.st.SetBuilds(disney, "26.16.0+rc2-2026.09.08", []string{"arm64-v8a", "armeabi-v7a"})
+	set, _ := rg.st.AddSet("All", []store.AppChoice{{Package: netflix}, {Package: disney}}, []string{onn.ID, box.ID, only.ID})
+	_ = set
+	problems, unchecked := rg.r.Compat(context.Background(), rg.st.Settings(), []string{onn.ID, box.ID, only.ID})
+	if len(problems) != 1 || problems[0].Device != "OnlyArm64" || problems[0].Package != netflix ||
+		!strings.Contains(problems[0].Reason, "armeabi-v7a") || !strings.Contains(problems[0].Reason, "arm64-v8a") {
+		t.Fatalf("only the arm64-only box cannot run Netflix: %+v", problems)
+	}
+	if len(unchecked) != 0 {
+		t.Errorf("%v", unchecked)
+	}
+}
+
+func TestCompatUniversalBuildsRunEverywhereAndUnknownsDoNotBlock(t *testing.T) {
+	rg := newRig(t)
+	rg.r.RefreshLists(context.Background())
+	fresh, _ := rg.st.AddDevice("Never reached", "10.0.0.9") // CPU unknown
+	only := rg.knownDevice(t, "OnlyArm64", "10.0.0.3", "arm64-v8a")
+	_ = rg.st.SetBuilds(prime, "6.23.23+v15.5.0.70-armv7a", []string{"*"})
+	_, _ = rg.st.AddSet("S", []store.AppChoice{{Package: prime}, {Package: netflix}}, []string{fresh.ID, only.ID})
+	// netflix: builds unknown and no probe available
+	problems, unchecked := rg.r.Compat(context.Background(), rg.st.Settings(), []string{fresh.ID, only.ID})
+	if len(problems) != 0 {
+		t.Errorf("universal builds run anywhere and unknowns are never blocked: %+v", problems)
+	}
+	joined := strings.Join(unchecked, "|")
+	if !strings.Contains(joined, "Never reached") || !strings.Contains(joined, "could not check") {
+		t.Errorf("the page should say what was not checked: %v", unchecked)
+	}
+}
+
+func TestCompatLearnsBuildsByProbingOnceAndRemembersThem(t *testing.T) {
+	rg := newRig(t)
+	rg.r.RefreshLists(context.Background())
+	a := rg.knownDevice(t, "A", "10.0.0.1", "arm64-v8a")
+	b := rg.knownDevice(t, "B", "10.0.0.2", "arm64-v8a")
+	_, _ = rg.st.AddSet("S", []store.AppChoice{{Package: netflix}}, []string{a.ID, b.ID})
+	calls := 0
+	rg.r.Deps.Probe = func(ctx context.Context, src store.Source, pkg, name, version string) ([]string, error) {
+		calls++
+		return []string{"armeabi-v7a"}, nil
+	}
+	problems, _ := rg.r.Compat(context.Background(), rg.st.Settings(), []string{a.ID, b.ID})
+	if calls != 1 || len(problems) != 2 {
+		t.Fatalf("one probe serves both devices: calls %d problems %+v", calls, problems)
+	}
+	rg.r.Compat(context.Background(), rg.st.Settings(), []string{a.ID})
+	if calls != 1 {
+		t.Errorf("what was learned is remembered; probed %d times", calls)
+	}
+	// a failing probe is "unchecked", never a block
+	rg2 := newRig(t)
+	rg2.r.RefreshLists(context.Background())
+	c := rg2.knownDevice(t, "C", "10.0.0.3", "arm64-v8a")
+	_, _ = rg2.st.AddSet("S", []store.AppChoice{{Package: netflix}}, []string{c.ID})
+	rg2.r.Deps.Probe = func(context.Context, store.Source, string, string, string) ([]string, error) {
+		return nil, errors.New("HTTP 429")
+	}
+	problems, unchecked := rg2.r.Compat(context.Background(), rg2.st.Settings(), []string{c.ID})
+	if len(problems) != 0 || len(unchecked) != 1 {
+		t.Errorf("%+v %v", problems, unchecked)
+	}
+}
+
+func TestRunsRememberWhichBuildsAnAppOffers(t *testing.T) {
+	rg := newRig(t)
+	rg.device(t, "TV", "10.0.0.6", prime)
+	orig := rg.r.Deps.Fetch
+	rg.r.Deps.Fetch = func(ctx context.Context, a sources.App, sdk int) (*sources.Fetched, error) {
+		f, err := orig(ctx, a, sdk)
+		f.Available = []string{"armeabi-v7a"}
+		return f, err
+	}
+	rg.r.Run(context.Background(), Options{})
+	if b, ok := rg.st.Builds(prime, "6.23.23+v15.5.0.70-armv7a"); !ok || len(b) != 1 {
+		t.Errorf("%v %v", b, ok)
+	}
+	// and a 'no build' failure records what the release does have
+	rg2 := newRig(t)
+	d := rg2.device(t, "Box", "10.0.0.5", netflix)
+	rg2.adb.abis["10.0.0.5"] = []string{"arm64-v8a"}
+	rg2.fetchErr = &sources.FetchError{NoBuild: true, Available: []string{"armeabi-v7a"}}
+	rg2.r.Run(context.Background(), Options{})
+	_ = d
+	if b, ok := rg2.st.Builds(netflix, "13.0.1 build 25028"); !ok || b[0] != "armeabi-v7a" {
+		t.Errorf("%v %v", b, ok)
+	}
+}
+
+func TestPairingSavesWhenAndReadsTheCPU(t *testing.T) {
+	rg := newRig(t)
+	d, _ := rg.st.AddDevice("TV", "10.0.0.6")
+	rg.adb.abis["10.0.0.6"] = []string{"arm64-v8a", "armeabi-v7a"}
+	cpu, err := rg.r.PairDevice(context.Background(), d, 38000, "123456")
+	if err != nil || !cpu {
+		t.Fatalf("%v %v", cpu, err)
+	}
+	info, _ := rg.st.DeviceInfo(d.ID)
+	if info.PairedAt == "" || len(info.ABIs) != 2 || info.SDK != 31 {
+		t.Errorf("%+v", info)
+	}
+	if len(rg.adb.paired) != 1 || rg.adb.paired[0] != "10.0.0.6:38000 123456" {
+		t.Errorf("%v", rg.adb.paired)
+	}
+	// a later run keeps the pairing time
+	_, _ = rg.r.connect(context.Background(), d)
+	if again, _ := rg.st.DeviceInfo(d.ID); again.PairedAt == "" {
+		t.Error("reaching the device again must not forget it was paired")
+	}
+	// paired, but the TV cannot be read right now: still success
+	rg.adb.down["10.0.0.7"] = true
+	d2, _ := rg.st.AddDevice("TV2", "10.0.0.7")
+	cpu, err = rg.r.PairDevice(context.Background(), d2, 38001, "654321")
+	if err != nil || cpu {
+		t.Errorf("%v %v", cpu, err)
+	}
+	if i2, _ := rg.st.DeviceInfo(d2.ID); i2.PairedAt == "" {
+		t.Error("pairing worked, so it is recorded")
+	}
+	// a wrong code is an error and records nothing
+	rg.adb.pairErr = errors.New("pairing failed: wrong code")
+	d3, _ := rg.st.AddDevice("TV3", "10.0.0.8")
+	if _, err := rg.r.PairDevice(context.Background(), d3, 38002, "000000"); err == nil {
+		t.Error("expected an error")
+	}
+	if _, ok := rg.st.DeviceInfo(d3.ID); ok {
+		t.Error("nothing is recorded for a failed pairing")
 	}
 }
