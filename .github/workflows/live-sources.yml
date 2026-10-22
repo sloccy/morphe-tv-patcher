@@ -17,6 +17,14 @@ jobs:
           sudo chmod +x /usr/local/bin/apkeep
           sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends apksigner
           apkeep --version; apksigner --version
+      - name: XAPK layout
+        continue-on-error: true
+        run: |
+          mkdir -p lay && for spec in "com.amazon.amazonvideo.livingroom@6.23.23+v15.5.0.70-armv7a" "com.disney.disneyplus@26.16.0+rc2-2026.09.08"; do
+            rm -rf lay/*; apkeep -a "$spec" -d apk-pure -o 'acknowledge_dangers=true,arch=armeabi-v7a' lay >/dev/null 2>&1
+            f=$(ls lay/*.xapk); echo "=== $spec"; unzip -l "$f" | awk '{print $1, $4}' | grep -v "^ *$" | head -40
+            echo "--- manifest.json"; unzip -p "$f" manifest.json | head -c 1800; echo
+          done
       - name: APKPure download + verify
         run: |
           python - <<'PY'
