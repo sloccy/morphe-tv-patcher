@@ -35,6 +35,9 @@ echo bundle-contents > "$last/com.x@1.0@armeabi-v7a.xapk"
 	if filepath.Base(p) != "apkpure-com.x-1.0.xapk" {
 		t.Errorf("path %s", p)
 	}
+	if left, _ := filepath.Glob(filepath.Join(dest, ".apkeep-*")); len(left) != 0 {
+		t.Errorf("temp dir left behind: %v", left)
+	}
 	args, _ := os.ReadFile(filepath.Join(dir, "args")) //nolint:gosec // test temp dir
 	for _, want := range []string{"-a com.x@1.0", "-d apk-pure", "acknowledge_dangers=true", "arch=armeabi-v7a"} {
 		if !strings.Contains(string(args), want) {

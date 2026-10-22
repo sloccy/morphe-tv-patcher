@@ -43,7 +43,8 @@ func Download(ctx context.Context, pkg, version, destDir string) (string, error)
 	if !Available() {
 		return "", fmt.Errorf("%w: apkeep is not installed", ErrNotAvailable)
 	}
-	tmp, err := os.MkdirTemp("", "apkeep-*")
+	// inside destDir, not /tmp: the final rename must stay on one filesystem (the data volume)
+	tmp, err := os.MkdirTemp(destDir, ".apkeep-*")
 	if err != nil {
 		return "", err
 	}
