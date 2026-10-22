@@ -17,12 +17,51 @@ import (
 	"sync"
 )
 
+// DefaultSourceID is the patch source seeded from PATCHES_REPO; it cannot be removed.
+const DefaultSourceID = "default"
+
+// Source is a GitHub repository that publishes Morphe patch bundles (.mpp release assets).
+type Source struct {
+	ID         string `json:"id"`
+	Repo       string `json:"repo"` // owner/name
+	Prerelease bool   `json:"prerelease,omitempty"`
+	// AllowPhone accepts phone builds that have no Android TV launcher (they may install but
+	// not show in the TV launcher). Off unless the repository patches phone apps.
+	AllowPhone bool `json:"allow_phone,omitempty"`
+	Default    bool `json:"default,omitempty"`
+}
+
+// AppChoice is one app on a device and which patch source supplies its patches.
+type AppChoice struct {
+	Package string `json:"package"`
+	Source  string `json:"source"`
+}
+
+// UnmarshalJSON also accepts the older plain package-name string (meaning the default source).
+func (a *AppChoice) UnmarshalJSON(b []byte) error {
+	var s string
+	if json.Unmarshal(b, &s) == nil {
+		*a = AppChoice{Package: s, Source: DefaultSourceID}
+		return nil
+	}
+	type plain AppChoice
+	var p plain
+	if err := json.Unmarshal(b, &p); err != nil {
+		return err
+	}
+	if p.Source == "" {
+		p.Source = DefaultSourceID
+	}
+	*a = AppChoice(p)
+	return nil
+}
+
 // Device is a target Android TV / box.
 type Device struct {
-	ID   string   `json:"id"`
-	Name string   `json:"name"`
-	Host string   `json:"host"`
-	Apps []string `json:"apps"` // package names to keep installed
+	ID   string      `json:"id"`
+	Name string      `json:"name"`
+	Host string      `json:"host"`
+	Apps []AppChoice `json:"apps"` // apps to keep installed
 }
 
 // Override is a per-app tweak edited by hand in settings.json (the UI never touches it).
@@ -38,6 +77,7 @@ type Override struct {
 
 // Settings is settings.json.
 type Settings struct {
+	Sources   []Source            `json:"sources,omitempty"`
 	Devices   []Device            `json:"devices"`
 	Overrides map[string]Override `json:"overrides,omitempty"`
 }
@@ -55,6 +95,7 @@ type AppState struct {
 type Install struct {
 	APKVersion       string `json:"apk_version"`
 	PatchesVersion   string `json:"patches_version"`
+	PatchSource      string `json:"patch_source,omitempty"`      // which patch source built it (empty = default)
 	InstalledPackage string `json:"installed_package,omitempty"` // may differ from the app (Netflix clone)
 	Source           string `json:"source,omitempty"`
 	InstalledAt      string `json:"installed_at,omitempty"`
@@ -147,8 +188,9 @@ func (s *Store) Settings() Settings {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := Settings{Overrides: map[string]Override{}}
+	out.Sources = append([]Source{}, s.settings.Sources...)
 	for _, d := range s.settings.Devices {
-		d.Apps = append([]string{}, d.Apps...)
+		d.Apps = append([]AppChoice{}, d.Apps...)
 		out.Devices = append(out.Devices, d)
 	}
 	maps.Copy(out.Overrides, s.settings.Overrides)
@@ -188,7 +230,7 @@ func (s *Store) AddDevice(name, host string) (Device, error) {
 			return Device{}, fmt.Errorf("%s is already added as %q", host, d.Name)
 		}
 	}
-	d := Device{ID: id, Name: name, Host: host, Apps: []string{}}
+	d := Device{ID: id, Name: name, Host: host, Apps: []AppChoice{}}
 	s.settings.Devices = append(s.settings.Devices, d)
 	return d, s.write("settings.json", s.settings)
 }
@@ -227,8 +269,9 @@ func (s *Store) RemoveDevice(id string) error {
 	return s.write("settings.json", s.settings)
 }
 
-// SetApps replaces a device's app list (sorted, de-duplicated).
-func (s *Store) SetApps(id string, pkgs []string) error {
+// SetApps replaces a device's app list. An app appears once per device (the first choice for
+// a package wins); an empty source means the default one. The list is sorted by package.
+func (s *Store) SetApps(id string, choices []AppChoice) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	i := s.deviceIndex(id)
@@ -236,16 +279,123 @@ func (s *Store) SetApps(id string, pkgs []string) error {
 		return errors.New("no such device")
 	}
 	seen := map[string]bool{}
-	apps := []string{}
-	for _, p := range pkgs {
-		if !seen[p] {
-			seen[p] = true
-			apps = append(apps, p)
+	apps := []AppChoice{}
+	for _, c := range choices {
+		if c.Source == "" {
+			c.Source = DefaultSourceID
+		}
+		if s.sourceIndex(c.Source) < 0 {
+			return fmt.Errorf("unknown patch source %q", c.Source)
+		}
+		if !seen[c.Package] {
+			seen[c.Package] = true
+			apps = append(apps, c)
 		}
 	}
-	sort.Strings(apps)
+	sort.Slice(apps, func(a, b int) bool { return apps[a].Package < apps[b].Package })
 	s.settings.Devices[i].Apps = apps
 	return s.write("settings.json", s.settings)
+}
+
+// ---- patch sources ----
+
+var repoRE = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$`)
+
+// ValidRepo accepts an owner/name GitHub repository.
+func ValidRepo(r string) bool {
+	return repoRE.MatchString(r) && !strings.HasPrefix(r, ".") && !strings.Contains(r, "..")
+}
+
+// RepoOwner returns the owner part of owner/name.
+func RepoOwner(r string) string { o, _, _ := strings.Cut(r, "/"); return o }
+
+func (s *Store) sourceIndex(id string) int {
+	for i, src := range s.settings.Sources {
+		if src.ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// EnsureDefaultSource makes sure the first source is the default one, tracking the repository
+// configured in the environment.
+func (s *Store) EnsureDefaultSource(repo string, prerelease bool) error {
+	if !ValidRepo(repo) {
+		return fmt.Errorf("PATCHES_REPO must look like owner/name: %q", repo)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	def := Source{ID: DefaultSourceID, Repo: repo, Prerelease: prerelease, Default: true}
+	if i := s.sourceIndex(DefaultSourceID); i >= 0 {
+		def.AllowPhone = s.settings.Sources[i].AllowPhone
+		if s.settings.Sources[i] == def {
+			return nil
+		}
+		s.settings.Sources[i] = def
+	} else {
+		s.settings.Sources = append([]Source{def}, s.settings.Sources...)
+	}
+	return s.write("settings.json", s.settings)
+}
+
+// AddSource registers another patch repository.
+func (s *Store) AddSource(repo string, prerelease, allowPhone bool) (Source, error) {
+	if !ValidRepo(repo) {
+		return Source{}, errors.New("repository must look like owner/name")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, src := range s.settings.Sources {
+		if strings.EqualFold(src.Repo, repo) {
+			return Source{}, fmt.Errorf("%s is already added", repo)
+		}
+	}
+	base := strings.Trim(nonSlug.ReplaceAllString(strings.ToLower(repo), "-"), "-")
+	id := base
+	for n := 2; s.sourceIndex(id) >= 0; n++ {
+		id = fmt.Sprintf("%s-%d", base, n)
+	}
+	src := Source{ID: id, Repo: repo, Prerelease: prerelease, AllowPhone: allowPhone}
+	s.settings.Sources = append(s.settings.Sources, src)
+	return src, s.write("settings.json", s.settings)
+}
+
+// RemoveSource deletes a non-default source and drops its apps from every device. It returns
+// how many device app choices were removed.
+func (s *Store) RemoveSource(id string) (removed int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := s.sourceIndex(id)
+	if i < 0 {
+		return 0, errors.New("no such patch source")
+	}
+	if s.settings.Sources[i].Default {
+		return 0, errors.New("the default patch source cannot be removed")
+	}
+	s.settings.Sources = append(s.settings.Sources[:i], s.settings.Sources[i+1:]...)
+	for d := range s.settings.Devices {
+		kept := s.settings.Devices[d].Apps[:0]
+		for _, c := range s.settings.Devices[d].Apps {
+			if c.Source == id {
+				removed++
+				continue
+			}
+			kept = append(kept, c)
+		}
+		s.settings.Devices[d].Apps = kept
+	}
+	return removed, s.write("settings.json", s.settings)
+}
+
+// Source returns a configured patch source.
+func (s *Store) Source(id string) (Source, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if i := s.sourceIndex(id); i >= 0 {
+		return s.settings.Sources[i], true
+	}
+	return Source{}, false
 }
 
 // ---- state ----

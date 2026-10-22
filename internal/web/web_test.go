@@ -9,7 +9,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/sloccy/morphe-tv-patcher/internal/patches"
 	"github.com/sloccy/morphe-tv-patcher/internal/runner"
@@ -17,12 +19,15 @@ import (
 )
 
 type fakeBackend struct {
-	list      *patches.List
+	lists     map[string]*patches.List
 	status    runner.Status
 	triggered []runner.Options
 	queueFull bool
 	pairErr   error
 	paired    []string
+	checkErr  error
+	checked   []string
+	refreshed atomic.Int32 // written by the background refresh, read by the test
 }
 
 func (f *fakeBackend) Status() runner.Status { return f.status }
@@ -33,7 +38,12 @@ func (f *fakeBackend) Trigger(o runner.Options) bool {
 	f.triggered = append(f.triggered, o)
 	return true
 }
-func (f *fakeBackend) List() *patches.List { return f.list }
+func (f *fakeBackend) Lists() map[string]*patches.List { return f.lists }
+func (f *fakeBackend) CheckRepo(ctx context.Context, repo string, prerelease bool) error {
+	f.checked = append(f.checked, repo)
+	return f.checkErr
+}
+func (f *fakeBackend) RefreshLists(context.Context) { f.refreshed.Add(1) }
 func (f *fakeBackend) Pair(ctx context.Context, host string, port int, code string) error {
 	f.paired = append(f.paired, host+" "+code)
 	return f.pairErr
@@ -51,7 +61,8 @@ func setup(t *testing.T) (srv *httptest.Server, s *Server, fb *fakeBackend) {
 	}
 	data, _ := os.ReadFile("../patches/testdata/patches-list.json")
 	list, _ := patches.ParseList(data)
-	fb = &fakeBackend{list: list}
+	_ = st.EnsureDefaultSource("owner/default", false)
+	fb = &fakeBackend{lists: map[string]*patches.List{store.DefaultSourceID: list}}
 	s = &Server{Store: st, Backend: fb, Log: ring{[]string{"line one", "line two"}}, Version: "test"}
 	srv = httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
@@ -112,9 +123,9 @@ func TestDeviceLifecycleAndState(t *testing.T) {
 	var st struct {
 		Apps    []map[string]any `json:"apps"`
 		Devices []struct {
-			ID   string          `json:"id"`
-			Apps []string        `json:"apps"`
-			Last []runner.Result `json:"last"`
+			ID   string            `json:"id"`
+			Apps []store.AppChoice `json:"apps"`
+			Last []runner.Result   `json:"last"`
 		} `json:"devices"`
 	}
 	if err := json.Unmarshal([]byte(body), &st); err != nil || code != 200 {
@@ -246,7 +257,7 @@ func TestPairRunAndLog(t *testing.T) {
 
 func TestAppListNotLoadedYet(t *testing.T) {
 	srv, s, fb := setup(t)
-	fb.list = nil
+	fb.lists = nil
 	_, _ = s.Store.AddDevice("TV", "10.0.0.6")
 	if code, _ := do(t, srv, "PUT", "/api/devices/tv/apps", `{"apps":["com.netflix.ninja"]}`, nil); code != 503 {
 		t.Errorf("got %d", code)
@@ -285,5 +296,158 @@ func TestDeviceCardCarriesCPUInfo(t *testing.T) {
 	_, body = do(t, srv, "GET", "/api/state", "", nil)
 	if !strings.Contains(body, `"is64":false`) {
 		t.Errorf("a 32-bit box must not be reported as 64-bit: %s", body)
+	}
+}
+
+// ---- patch sources ----
+
+func twoSources(t *testing.T, s *Server, fb *fakeBackend) store.Source {
+	t.Helper()
+	src, err := s.Store.AddSource("MorpheApp/morphe-patches", false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := map[string][]string{"com.google.android.youtube": {"20.1.0"}, "com.netflix.ninja": {"1.0"}}
+	fb.lists[src.ID] = patches.FromCLI("v1.48.0", st, st, nil)
+	return src
+}
+
+func TestStateMergesAppsAcrossSourcesDefaultFirst(t *testing.T) {
+	srv, s, fb := setup(t)
+	src := twoSources(t, s, fb)
+	_, body := do(t, srv, "GET", "/api/state", "", nil)
+	var st struct {
+		Apps []struct {
+			Package string `json:"package"`
+			Name    string `json:"name"`
+			Sources []struct {
+				ID     string `json:"id"`
+				Newest string `json:"newest"`
+			} `json:"sources"`
+		} `json:"apps"`
+		Sources []map[string]any `json:"sources"`
+	}
+	if err := json.Unmarshal([]byte(body), &st); err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Apps) != 18 { // 17 from the default source + YouTube; Netflix appears once with two sources
+		t.Errorf("apps %d", len(st.Apps))
+	}
+	for _, a := range st.Apps {
+		switch a.Package {
+		case "com.netflix.ninja":
+			if len(a.Sources) != 2 || a.Sources[0].ID != store.DefaultSourceID || a.Sources[1].ID != src.ID || a.Name != "Netflix Android TV" {
+				t.Errorf("netflix %+v", a)
+			}
+		case "com.google.android.youtube":
+			if len(a.Sources) != 1 || a.Sources[0].ID != src.ID {
+				t.Errorf("youtube %+v", a)
+			}
+		}
+	}
+	if len(st.Sources) != 2 || st.Sources[0]["default"] != true || st.Sources[1]["allow_phone"] != true {
+		t.Errorf("sources %v", st.Sources)
+	}
+}
+
+func TestAddSourceFlow(t *testing.T) {
+	srv, s, fb := setup(t)
+	good := `{"repo":"MorpheApp/morphe-patches","trust":true}`
+	if code, _ := do(t, srv, "POST", "/api/sources", `{"repo":"MorpheApp/morphe-patches"}`, nil); code != 400 {
+		t.Errorf("without the trust confirmation: %d", code)
+	}
+	for _, bad := range []string{`{"repo":"nope","trust":true}`, `{"repo":"a/b/c","trust":true}`, `{"repo":"-x/y;z","trust":true}`, `{"repo":"","trust":true}`, `{"repo":"a/b","trust":true,"extra":1}`} {
+		if code, _ := do(t, srv, "POST", "/api/sources", bad, nil); code != 400 {
+			t.Errorf("%s: %d", bad, code)
+		}
+	}
+	if len(fb.checked) != 0 {
+		t.Error("invalid input must not cause GitHub lookups")
+	}
+	fb.checkErr = errors.New("no release with an .mpp asset")
+	if code, b := do(t, srv, "POST", "/api/sources", good, nil); code != http.StatusBadGateway || !strings.Contains(b, ".mpp") {
+		t.Errorf("a repo without a bundle: %d %s", code, b)
+	}
+	if len(s.Store.Settings().Sources) != 1 {
+		t.Error("a refused repository must not be saved")
+	}
+	fb.checkErr = nil
+	if code, b := do(t, srv, "POST", "/api/sources", `{"repo":"https://github.com/MorpheApp/morphe-patches/","trust":true,"allow_phone":true}`, nil); code != 201 || !strings.Contains(b, `"allow_phone":true`) {
+		t.Fatalf("a full GitHub URL is fine: %d %s", code, b)
+	}
+	if got := s.Store.Settings().Sources; len(got) != 2 || got[1].Repo != "MorpheApp/morphe-patches" || !got[1].AllowPhone {
+		t.Errorf("%+v", got)
+	}
+	for range 50 { // the refresh runs in the background
+		if fb.refreshed.Load() > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if fb.refreshed.Load() == 0 {
+		t.Error("adding a source should load its app list")
+	}
+	if code, _ := do(t, srv, "POST", "/api/sources", good, nil); code != 400 {
+		t.Errorf("duplicate: %d", code)
+	}
+}
+
+func TestOwnerAllowListWhenSet(t *testing.T) {
+	srv, s, fb := setup(t)
+	s.AllowedOwners = []string{"morpheapp"}
+	if code, b := do(t, srv, "POST", "/api/sources", `{"repo":"someone-else/patches","trust":true}`, nil); code != 403 || !strings.Contains(b, "PATCH_SOURCES_ALLOWED_OWNERS") {
+		t.Errorf("%d %s", code, b)
+	}
+	if len(fb.checked) != 0 {
+		t.Error("a disallowed owner is refused before any network call")
+	}
+	if code, _ := do(t, srv, "POST", "/api/sources", `{"repo":"MorpheApp/morphe-patches","trust":true}`, nil); code != 201 {
+		t.Errorf("allowed owner (any case): %d", code)
+	}
+}
+
+func TestRemoveSource(t *testing.T) {
+	srv, s, fb := setup(t)
+	src := twoSources(t, s, fb)
+	d, _ := s.Store.AddDevice("TV", "10.0.0.6")
+	_ = s.Store.SetApps(d.ID, []store.AppChoice{{Package: "com.google.android.youtube", Source: src.ID}, {Package: "com.netflix.ninja"}})
+	if code, _ := do(t, srv, "DELETE", "/api/sources/"+store.DefaultSourceID, "", nil); code != 400 {
+		t.Errorf("the default source: %d", code)
+	}
+	if code, _ := do(t, srv, "DELETE", "/api/sources/nope", "", nil); code != 404 {
+		t.Errorf("unknown: %d", code)
+	}
+	if code, b := do(t, srv, "DELETE", "/api/sources/"+src.ID, "", nil); code != 200 || !strings.Contains(b, `"apps_dropped":1`) {
+		t.Errorf("%d %s", code, b)
+	}
+	if apps := s.Store.Settings().Devices[0].Apps; len(apps) != 1 || apps[0].Package != "com.netflix.ninja" {
+		t.Errorf("%+v", apps)
+	}
+}
+
+func TestSetAppsWithSourceChoices(t *testing.T) {
+	srv, s, fb := setup(t)
+	src := twoSources(t, s, fb)
+	_, _ = s.Store.AddDevice("TV", "10.0.0.6")
+	ok := `{"apps":[{"package":"com.google.android.youtube","source":"` + src.ID + `"},{"package":"com.netflix.ninja","source":"default"},"com.disney.disneyplus"]}`
+	if code, b := do(t, srv, "PUT", "/api/devices/tv/apps", ok, nil); code != 200 {
+		t.Fatalf("%d %s", code, b)
+	}
+	if apps := s.Store.Settings().Devices[0].Apps; len(apps) != 3 || apps[0].Package != "com.disney.disneyplus" || apps[0].Source != store.DefaultSourceID {
+		t.Errorf("a plain package name means the default source: %+v", apps)
+	}
+	bad := map[string]int{
+		`{"apps":[{"package":"com.netflix.ninja","source":"ghost"}]}`:            400,
+		`{"apps":[{"package":"com.google.android.youtube","source":"default"}]}`: 400, // not in that source's bundle
+		`{"apps":[{"package":"com.not.real","source":"` + src.ID + `"}]}`:        400,
+	}
+	for body, want := range bad {
+		if code, _ := do(t, srv, "PUT", "/api/devices/tv/apps", body, nil); code != want {
+			t.Errorf("%s: %d", body, code)
+		}
+	}
+	delete(fb.lists, src.ID) // a source whose list has not loaded yet
+	if code, _ := do(t, srv, "PUT", "/api/devices/tv/apps", ok, nil); code != 503 {
+		t.Errorf("unloaded source: %d", code)
 	}
 }

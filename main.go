@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -99,18 +100,31 @@ func setup() (*app, error) {
 	env := sources.DefaultEnv()
 	env.InputDir, env.CacheDir, env.Store = cfg.Input(), cfg.Cache(), a.st
 	env.FlareURL, env.DirectOK, env.APKPureOK = cfg.FlareSolverrURL, cfg.DirectOK, cfg.APKPureOK
+	if err := a.st.EnsureDefaultSource(cfg.PatchesRepo, cfg.Prerelease); err != nil {
+		return nil, err
+	}
 	deps := runner.Deps{
-		Latest: func(ctx context.Context) (*patches.Release, error) {
-			return patches.LatestRelease(ctx, a.hc, cfg.PatchesRepo, cfg.GitHubToken, cfg.Prerelease)
+		Latest: func(ctx context.Context, src store.Source) (*patches.Release, error) {
+			return patches.LatestRelease(ctx, a.hc, src.Repo, cfg.GitHubToken, src.Prerelease)
 		},
-		Download: func(ctx context.Context, rel *patches.Release) (string, error) {
-			return patches.Download(ctx, a.hc, rel, cfg.Cache())
+		Download: func(ctx context.Context, src store.Source, rel *patches.Release) (string, error) {
+			return patches.Download(ctx, a.hc, rel, filepath.Join(cfg.Cache(), "patches", src.ID))
 		},
-		List: func(ctx context.Context, tag string) (*patches.List, error) {
-			return patches.FetchList(ctx, a.hc, cfg.PatchesRepo, tag, cfg.GitHubToken)
-		},
-		CLIVersions: func(ctx context.Context, mpp, pkg string) []string {
-			return morphe.ListVersions(ctx, cfg.MorpheJar, mpp, pkg)
+		Apps: func(ctx context.Context, src store.Source, rel *patches.Release, mpp string) (*patches.List, error) {
+			stable, err := morphe.ListPatches(ctx, cfg.MorpheJar, mpp, false)
+			if err != nil {
+				return nil, err
+			}
+			all, err := morphe.ListPatches(ctx, cfg.MorpheJar, mpp, true)
+			if err != nil {
+				return nil, err
+			}
+			// display names come from the repository's patches-list.json when it has one
+			var names map[string]string
+			if l, err := patches.FetchList(ctx, a.hc, src.Repo, rel.Tag, cfg.GitHubToken); err == nil {
+				names = l.Names()
+			}
+			return patches.FromCLI(rel.Tag, patches.ParseListPatches(stable), patches.ParseListPatches(all), names), nil
 		},
 		Fetch: func(ctx context.Context, x sources.App, sdk int) (*sources.Fetched, error) {
 			return sources.Fetch(ctx, &env, x, sdk)
@@ -134,7 +148,7 @@ func cmdRun() error {
 	srv := &http.Server{
 		Addr: fmt.Sprintf("%s:%d", a.cfg.WebBind, a.cfg.WebPort),
 		Handler: (&web.Server{Store: a.st, Backend: a.runner, Log: a.ring, Version: version,
-			AllowedHostSuffixes: a.cfg.AllowedHostSuffixes}).Handler(),
+			AllowedHostSuffixes: a.cfg.AllowedHostSuffixes, AllowedOwners: a.cfg.PatchSourcesAllowedOwners}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       2 * time.Minute,
 		WriteTimeout:      2 * time.Minute,
@@ -146,11 +160,7 @@ func cmdRun() error {
 			stop()
 		}
 	}()
-	go func() { // so the page can list apps before the first run finishes
-		if err := a.runner.RefreshList(ctx); err != nil {
-			slog.Warn("could not load the app list yet", "err", err)
-		}
-	}()
+	go a.runner.RefreshLists(ctx) // so the page can list apps before the first run finishes
 	a.runner.Loop(ctx)
 	shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -169,6 +179,7 @@ func cmdOnce(args []string) error {
 	dry := fs.Bool("dry-run", false, "patch but do not install")
 	noDev := fs.Bool("no-device", false, "do not use adb at all (patch only)")
 	abiList := fs.String("abi", "", "CPU list to build for with --no-device, in order of preference (default armeabi-v7a,armeabi)")
+	source := fs.String("source", "", "with --no-device: the patch source id (default: the default source)")
 	var apps listFlag
 	fs.Var(&apps, "app", "package to handle (repeatable, or comma separated)")
 	_ = fs.Parse(args)
@@ -178,7 +189,7 @@ func cmdOnce(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	o := runner.Options{DeviceID: *device, Force: *force, DryRun: *dry, NoDevice: *noDev, Packages: apps, ABIs: abi.Parse(*abiList)}
+	o := runner.Options{DeviceID: *device, Force: *force, DryRun: *dry, NoDevice: *noDev, Packages: apps, ABIs: abi.Parse(*abiList), Source: *source}
 	if len(apps) == 1 {
 		o.Package = apps[0]
 	}
@@ -232,6 +243,7 @@ func cmdFetch(args []string) error {
 	ver := fs.String("version", "", "version (default: newest the patches support)")
 	sdk := fs.Int("sdk", 31, "device API level")
 	abiList := fs.String("abi", "", "CPU list in order of preference (default armeabi-v7a,armeabi)")
+	source := fs.String("source", store.DefaultSourceID, "patch source id")
 	_ = fs.Parse(args)
 	if *pkg == "" {
 		return errors.New("usage: fetch --package com.example.app [--version V]")
@@ -242,17 +254,15 @@ func cmdFetch(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	rel, err := patches.LatestRelease(ctx, a.hc, a.cfg.PatchesRepo, a.cfg.GitHubToken, a.cfg.Prerelease)
-	if err != nil {
-		return err
-	}
-	list, err := patches.FetchList(ctx, a.hc, a.cfg.PatchesRepo, rel.Tag, a.cfg.GitHubToken)
-	if err != nil {
-		return err
+	a.runner.RefreshLists(ctx)
+	list := a.runner.Lists()[*source]
+	srcCfg, _ := a.st.Source(*source)
+	if list == nil {
+		return fmt.Errorf("patch source %q could not be loaded (see the messages above)", *source)
 	}
 	app, ok := list.App(*pkg)
 	if !ok {
-		return fmt.Errorf("%s is not supported by patches %s", *pkg, rel.Tag)
+		return fmt.Errorf("%s is not supported by %s %s", *pkg, srcCfg.Repo, list.Version)
 	}
 	if *ver == "" {
 		*ver = app.Newest
@@ -262,7 +272,7 @@ func cmdFetch(args []string) error {
 	env.FlareURL, env.DirectOK, env.APKPureOK = a.cfg.FlareSolverrURL, a.cfg.DirectOK, a.cfg.APKPureOK
 	ov := a.st.Override(*pkg)
 	f, err := sources.Fetch(ctx, &env, sources.App{Package: *pkg, Name: app.Name, Version: *ver, Sources: ov.Sources,
-		SignerPin: ov.SignerSHA256, SlugOverride: ov.APKMirror, ABIs: abi.Parse(*abiList)}, *sdk)
+		SignerPin: ov.SignerSHA256, SlugOverride: ov.APKMirror, ABIs: abi.Parse(*abiList), AllowPhone: srcCfg.AllowPhone}, *sdk)
 	if err != nil {
 		return err
 	}
@@ -303,6 +313,7 @@ func cmdHealth() error {
 func cmdResolve(args []string) error {
 	fs := flag.NewFlagSet("resolve", flag.ExitOnError)
 	pkg := fs.String("package", "", "only this package (default: every supported app)")
+	source := fs.String("source", "", "only this patch source id (default: every source)")
 	_ = fs.Parse(args)
 	a, err := setup()
 	if err != nil {
@@ -310,28 +321,33 @@ func cmdResolve(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	rel, err := patches.LatestRelease(ctx, a.hc, a.cfg.PatchesRepo, a.cfg.GitHubToken, a.cfg.Prerelease)
-	if err != nil {
-		return err
-	}
-	list, err := patches.FetchList(ctx, a.hc, a.cfg.PatchesRepo, rel.Tag, a.cfg.GitHubToken)
-	if err != nil {
-		return err
-	}
+	a.runner.RefreshLists(ctx)
+	lists := a.runner.Lists()
 	bad := false
-	for _, app := range list.Apps {
-		if *pkg != "" && app.Package != *pkg {
+	for _, src := range a.st.Settings().Sources {
+		if *source != "" && *source != src.ID {
 			continue
 		}
-		res, _, err := apkmirror.Download(ctx, apkmirror.AppRequest{Package: app.Package, Name: app.Name, Version: app.Newest,
-			Hint: apkmirror.Hints[app.Package], SDK: 31, DryRun: true}, apkmirror.Options{ProfileHint: a.st.LastProfile()})
-		if err != nil {
+		list := lists[src.ID]
+		if list == nil {
 			bad = true
-			fmt.Printf("MISS %-40s %-28s %v\n", app.Name, app.Newest, err)
-		} else {
-			fmt.Printf("ok   %-40s %-28s %s\n", app.Name, app.Newest, res.Slug)
+			fmt.Printf("MISS patch source %s could not be loaded\n", src.Repo)
+			continue
 		}
-		time.Sleep(8 * time.Second)
+		for _, app := range list.Apps {
+			if *pkg != "" && app.Package != *pkg {
+				continue
+			}
+			res, _, err := apkmirror.Download(ctx, apkmirror.AppRequest{Package: app.Package, Name: app.Name, Version: app.Newest,
+				Hint: apkmirror.Hints[app.Package], SDK: 31, AllowPhone: src.AllowPhone, DryRun: true}, apkmirror.Options{ProfileHint: a.st.LastProfile()})
+			if err != nil {
+				bad = true
+				fmt.Printf("MISS %-40s %-28s %v\n", app.Name, app.Newest, err)
+			} else {
+				fmt.Printf("ok   %-40s %-28s %s\n", app.Name, app.Newest, res.Slug)
+			}
+			time.Sleep(8 * time.Second)
+		}
 	}
 	if bad {
 		return errors.New("some apps could not be found")

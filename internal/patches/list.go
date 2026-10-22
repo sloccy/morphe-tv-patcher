@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 )
 
 // App is one app the patch bundle supports.
@@ -66,12 +67,16 @@ func ParseList(data []byte) (*List, error) {
 	}
 	l := &List{Version: f.Version, byPkg: map[string]*App{}}
 	for pkg, vs := range versions {
-		sorted := SortVersions(vs)
-		a := App{Package: pkg, Name: f.AppNames[pkg], Versions: sorted, Newest: Newest(sorted)}
-		if a.Name == "" {
+		stable := map[string]bool{}
+		for _, v := range vs {
+			if !experimental[pkg][v] {
+				stable[v] = true
+			}
+		}
+		a := buildApp(pkg, f.AppNames[pkg], vs, stable)
+		if f.AppNames[pkg] == "" {
 			a.Name = pkg
 		}
-		a.Experimental = experimental[pkg][a.Newest]
 		l.Apps = append(l.Apps, a)
 	}
 	sort.Slice(l.Apps, func(i, j int) bool { return l.Apps[i].Name < l.Apps[j].Name })
@@ -95,6 +100,9 @@ func FetchList(ctx context.Context, hc *http.Client, repo, tag, token string) (*
 	url := fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/patches-list.json", repo, tag)
 	body, err := get(ctx, hc, url, token, 8<<20)
 	if err != nil {
+		if strings.Contains(err.Error(), "HTTP 404") {
+			return nil, ErrNoList
+		}
 		return nil, err
 	}
 	return ParseList(body)

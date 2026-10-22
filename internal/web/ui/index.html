@@ -28,20 +28,25 @@
   button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
   button.danger { color: var(--bad); }
   button:disabled { opacity: .5; cursor: default; }
-  input[type=text], input[type=number] { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--text); min-width: 0; }
+  input[type=text], input[type=number], select { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--text); min-width: 0; }
+  select { padding: 3px 6px; font-size: 13px; }
   .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: var(--muted); margin-right: 6px; }
   .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
   .apps { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 6px 14px; margin: 12px 0; }
-  label.app { display: flex; gap: 8px; align-items: flex-start; padding: 6px 8px; border-radius: 7px; cursor: pointer; }
-  label.app:hover { background: var(--chip); }
-  label.app input { margin-top: 3px; }
+  .app { display: flex; gap: 8px; align-items: flex-start; padding: 6px 8px; border-radius: 7px; }
+  .app:hover { background: var(--chip); }
+  .app input { margin-top: 3px; }
+  .app label { cursor: pointer; display: block; }
   .meta { color: var(--muted); font-size: 12.5px; display: block; }
-  .chip { background: var(--chip); border-radius: 999px; padding: 1px 8px; font-size: 12px; color: var(--muted); margin-left: 6px; }
+  .chip { background: var(--chip); border-radius: 999px; padding: 1px 8px; font-size: 12px; color: var(--muted); margin-left: 6px; white-space: nowrap; }
   .chip.warn { color: var(--warn); }
   .msg { font-size: 13px; margin: 6px 0 0; }
   .msg.ok { color: var(--ok); } .msg.bad { color: var(--bad); }
   .results { font-size: 13px; color: var(--muted); margin: 4px 0 0; padding-left: 18px; }
   .results .bad { color: var(--bad); } .results .ok { color: var(--ok); }
+  .src { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 6px 0; border-top: 1px solid var(--line); }
+  .src:first-of-type { border-top: 0; }
+  .warnbox { border: 1px solid var(--warn); border-radius: 8px; padding: 8px 10px; margin-top: 10px; font-size: 13px; }
   pre { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; overflow: auto; max-height: 320px; font-size: 12px; }
   details summary { cursor: pointer; color: var(--muted); }
   .empty { color: var(--muted); text-align: center; padding: 24px 8px; }
@@ -61,6 +66,8 @@
   </header>
 
   <div id="devices"></div>
+
+  <section class="card" id="sources"></section>
 
   <section class="card">
     <strong>Add a device</strong>
@@ -82,9 +89,10 @@
 <script>
 "use strict";
 let state = null;
-const dirty = {};      // device id -> Set of selected packages not yet saved
+const dirty = {};      // device id -> Map(package -> patch source id), unsaved changes
 const openPair = {};   // device id -> true while the pairing form is open
 const notes = {};      // device id -> {text, ok}
+let sourceNote = null; // {text, ok}
 
 function h(tag, attrs, ...kids) {
   const el = document.createElement(tag);
@@ -117,7 +125,24 @@ function when(iso) {
   return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
-function selection(dev) { return dirty[dev.id] || new Set(dev.apps || []); }
+const sourceById = id => (state.sources || []).find(s => s.id === id);
+const defaultSource = () => (state.sources || []).find(s => s.default) || (state.sources || [])[0];
+
+// the device's current choice as a Map(package -> source id)
+function selection(dev) {
+  if (dirty[dev.id]) return dirty[dev.id];
+  const m = new Map();
+  for (const c of dev.apps || []) m.set(c.package, c.source);
+  return m;
+}
+
+// which source an app uses when ticked: keep the saved choice, else the default source if it has the app
+function pickSource(app, wanted) {
+  if (wanted && app.sources.some(s => s.id === wanted)) return wanted;
+  const def = defaultSource();
+  if (def && app.sources.some(s => s.id === def.id)) return def.id;
+  return app.sources[0].id;
+}
 
 function deviceCard(dev) {
   const sel = selection(dev);
@@ -127,17 +152,30 @@ function deviceCard(dev) {
   const note = notes[dev.id];
 
   const apps = h("div", { class: "apps" }, (state.apps || []).map(a => {
+    const chosen = sel.get(a.package);
+    const src = a.sources.find(s => s.id === pickSource(a, chosen)) || a.sources[0];
+    const srcInfo = sourceById(src.id) || {};
     const inst = (dev.installs || {})[a.package];
-    return h("label", { class: "app" },
-      h("input", { type: "checkbox", checked: sel.has(a.package), onchange: ev => {
-        const s = new Set(selection(dev));
-        ev.target.checked ? s.add(a.package) : s.delete(a.package);
-        dirty[dev.id] = s;
+    return h("div", { class: "app" },
+      h("input", { type: "checkbox", id: "c-" + dev.id + "-" + a.package, checked: sel.has(a.package), onchange: ev => {
+        const m = new Map(selection(dev));
+        ev.target.checked ? m.set(a.package, pickSource(a, chosen)) : m.delete(a.package);
+        dirty[dev.id] = m;
         render();
       } }),
       h("span", { class: "grow" },
-        h("span", {}, a.name, a.experimental ? h("span", { class: "chip warn" }, "experimental") : null),
-        h("span", { class: "meta" }, "newest supported " + a.newest + (inst ? " · installed " + inst.apk_version + " (" + when(inst.installed_at) + ")" : ""))));
+        h("label", { for: "c-" + dev.id + "-" + a.package },
+          a.name,
+          src.experimental ? h("span", { class: "chip warn" }, "experimental") : null,
+          srcInfo.allow_phone ? h("span", { class: "chip warn", title: "A phone app: it may install but not show in the TV launcher" }, "phone app") : null),
+        h("span", { class: "meta" }, "newest supported " + src.newest + (inst ? " · installed " + inst.apk_version + " (" + when(inst.installed_at) + ")" : "")),
+        a.sources.length > 1 ? h("span", { class: "meta" }, "patches from ",
+          h("select", { onchange: ev => {
+            const m = new Map(selection(dev));
+            m.set(a.package, ev.target.value);
+            dirty[dev.id] = m;
+            render();
+          } }, a.sources.map(s => h("option", { value: s.id, selected: s.id === src.id }, (sourceById(s.id) || {}).repo || s.id)))) : null));
   }));
 
   const pairForm = openPair[dev.id] ? h("div", { class: "row", style: "margin-top:8px" },
@@ -146,12 +184,17 @@ function deviceCard(dev) {
     h("input", { type: "text", id: "pc-" + dev.id, placeholder: "6-digit code", maxlength: 6, inputmode: "numeric", style: "width:120px" }),
     h("button", { onclick: () => doPair(dev) }, "Pair")) : null;
 
+  const cpu = dev.info
+    ? h("span", { class: "chip", title: "What the device reports; builds are chosen to match" },
+        (dev.is64 ? "64-bit capable" : "32-bit") + " · " + (dev.info.abis || []).join(", ") + " · Android API " + dev.info.sdk)
+    : null;
+
   return h("section", { class: "card" },
     h("div", { class: "row" },
       h("span", { class: "grow" },
         h("strong", {}, h("span", { class: "dot " + (last.length ? (offline ? "bad" : "ok") : "") }), dev.name),
         h("span", { class: "sub" }, "  " + dev.host),
-        dev.info ? h("span", { class: "chip" }, (dev.is64 ? "64-bit capable" : "32-bit") + " · " + (dev.info.abis || []).join(", ") + " · Android API " + dev.info.sdk) : null),
+        cpu),
       h("button", { onclick: () => { openPair[dev.id] = !openPair[dev.id]; render(); } }, "Pair…"),
       h("button", { onclick: () => doRun(dev.id) }, "Run now"),
       h("button", { class: "danger", onclick: () => doRemove(dev) }, "Remove")),
@@ -164,17 +207,50 @@ function deviceCard(dev) {
     last.length ? h("ul", { class: "results" }, last.map(r => h("li", { class: r.ok ? "ok" : "bad" }, r.message))) : null);
 }
 
+function sourcesCard() {
+  const rows = (state.sources || []).map(src => h("div", { class: "src" },
+    h("span", { class: "grow" },
+      h("strong", {}, src.repo),
+      src.default ? h("span", { class: "chip" }, "default") : null,
+      src.prerelease ? h("span", { class: "chip" }, "pre-releases") : null,
+      src.allow_phone ? h("span", { class: "chip warn" }, "allows phone apps") : null,
+      h("span", { class: "meta" }, src.error ? "problem: " + src.error : ((src.tag || "not loaded yet") + " · " + src.apps + " apps"))),
+    src.default ? null : h("button", { class: "danger", onclick: () => doRemoveSource(src) }, "Remove")));
+
+  const owners = (state.allowed_owners || []);
+  return [
+    h("strong", {}, "Patch sources"),
+    h("div", { class: "sub" }, "GitHub repositories that publish Morphe patch bundles. Each one adds the apps it can patch."),
+    h("div", { style: "margin-top:8px" }, rows),
+    h("div", { class: "row", style: "margin-top:10px" },
+      h("input", { type: "text", id: "newrepo", placeholder: "owner/repository", maxlength: 201, style: "min-width:220px" }),
+      h("label", { class: "sub" }, h("input", { type: "checkbox", id: "newpre" }), " include pre-releases"),
+      h("label", { class: "sub" }, h("input", { type: "checkbox", id: "newphone" }), " allow phone apps"),
+      h("button", { onclick: doAddSource }, "Add repository")),
+    h("div", { class: "warnbox" },
+      h("label", {}, h("input", { type: "checkbox", id: "newtrust" }),
+        " I trust this repository. Its patches run on this server (which holds your signing key) and the patched apps are installed on my TVs. Only add repositories you would run code from."),
+      owners.length ? h("div", { class: "sub" }, "Only these owners are allowed: " + owners.join(", ")) : null),
+    sourceNote ? h("div", { class: "msg " + (sourceNote.ok ? "ok" : "bad") }, sourceNote.text) : null,
+  ];
+}
+
 function render() {
   if (!state) return;
   const st = state.status || {};
+  const tags = (state.sources || []).map(s => s.tag).filter(Boolean);
   document.getElementById("sub").textContent =
-    "patches " + (st.patches_version || "?") + " · " + (st.running ? "running…" : (st.finished_at && !st.finished_at.startsWith("0001") ? "last run " + when(st.finished_at) : "no run yet")) +
+    "patches " + (tags.length ? tags.join(" · ") : (st.patches_version || "?")) + " · " + (st.running ? "running…" : (st.finished_at && !st.finished_at.startsWith("0001") ? "last run " + when(st.finished_at) : "no run yet")) +
     (state.version ? " · " + state.version : "");
   document.getElementById("runall").disabled = !!st.running;
   const box = document.getElementById("devices");
   box.replaceChildren(...((state.devices || []).length
     ? state.devices.map(deviceCard)
     : [h("div", { class: "card empty" }, "No devices yet. Add one below.")]));
+  // keep what is being typed in the add-repository form
+  const keep = ["newrepo", "newpre", "newphone", "newtrust"].map(id => { const e = document.getElementById(id); return e ? [id, e.type === "checkbox" ? e.checked : e.value] : null; }).filter(Boolean);
+  document.getElementById("sources").replaceChildren(...sourcesCard());
+  for (const [id, v] of keep) { const e = document.getElementById(id); if (e) { if (e.type === "checkbox") e.checked = v; else e.value = v; } }
 }
 
 async function refresh() {
@@ -189,8 +265,9 @@ async function loadLog() {
 }
 
 async function doSave(dev) {
+  const apps = [...selection(dev)].map(([pkg, src]) => ({ package: pkg, source: src }));
   try {
-    await api("PUT", "/api/devices/" + encodeURIComponent(dev.id) + "/apps", { apps: [...selection(dev)] });
+    await api("PUT", "/api/devices/" + encodeURIComponent(dev.id) + "/apps", { apps });
     delete dirty[dev.id];
     notes[dev.id] = { ok: true, text: "Saved." };
   } catch (e) { notes[dev.id] = { ok: false, text: e.message }; }
@@ -216,6 +293,33 @@ async function doPair(dev) {
 async function doRemove(dev) {
   if (!confirm("Remove " + dev.name + "? Nothing is uninstalled from the TV.")) return;
   try { await api("DELETE", "/api/devices/" + encodeURIComponent(dev.id)); delete dirty[dev.id]; } catch (e) { alert(e.message); }
+  await reload();
+}
+
+async function doAddSource() {
+  const body = {
+    repo: document.getElementById("newrepo").value,
+    prerelease: document.getElementById("newpre").checked,
+    allow_phone: document.getElementById("newphone").checked,
+    trust: document.getElementById("newtrust").checked,
+  };
+  sourceNote = { ok: true, text: "Checking the repository…" }; render();
+  try {
+    const s = await api("POST", "/api/sources", body);
+    sourceNote = { ok: true, text: "Added " + s.repo + ". Its apps appear on the device cards in a moment." };
+    for (const id of ["newrepo", "newpre", "newphone", "newtrust"]) { const e = document.getElementById(id); if (e) { if (e.type === "checkbox") e.checked = false; else e.value = ""; } }
+    setTimeout(reload, 4000);
+  } catch (e) { sourceNote = { ok: false, text: e.message }; }
+  await reload();
+}
+
+async function doRemoveSource(src) {
+  if (!confirm("Remove " + src.repo + "? Apps on your devices that use its patches are dropped from the lists (nothing is uninstalled).")) return;
+  try {
+    const r = await api("DELETE", "/api/sources/" + encodeURIComponent(src.id));
+    sourceNote = { ok: true, text: "Removed " + src.repo + (r.apps_dropped ? "; " + r.apps_dropped + " app choice(s) dropped." : ".") };
+    for (const k of Object.keys(dirty)) delete dirty[k];
+  } catch (e) { sourceNote = { ok: false, text: e.message }; }
   await reload();
 }
 

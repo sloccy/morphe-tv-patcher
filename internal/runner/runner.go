@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -37,15 +38,15 @@ type ADB interface {
 	Pair(ctx context.Context, host string, pairPort int, code string) error
 }
 
-// Deps are the outside world; tests replace them.
+// Deps are the outside world; tests replace them. Patch sources are passed in so each
+// repository gets its own release, bundle and app list.
 type Deps struct {
-	Latest      func(ctx context.Context) (*patches.Release, error)
-	Download    func(ctx context.Context, rel *patches.Release) (string, error)
-	List        func(ctx context.Context, tag string) (*patches.List, error)
-	CLIVersions func(ctx context.Context, mpp, pkg string) []string
-	Fetch       func(ctx context.Context, a sources.App, sdk int) (*sources.Fetched, error)
-	Patch       func(ctx context.Context, o morphe.Options) error
-	PackageOf   func(path string) (string, error)
+	Latest    func(ctx context.Context, src store.Source) (*patches.Release, error)
+	Download  func(ctx context.Context, src store.Source, rel *patches.Release) (string, error)
+	Apps      func(ctx context.Context, src store.Source, rel *patches.Release, mpp string) (*patches.List, error)
+	Fetch     func(ctx context.Context, a sources.App, sdk int) (*sources.Fetched, error)
+	Patch     func(ctx context.Context, o morphe.Options) error
+	PackageOf func(path string) (string, error)
 }
 
 // Options select what a run does.
@@ -57,6 +58,7 @@ type Options struct {
 	DryRun   bool     // patch but do not install
 	NoDevice bool     // do not touch adb at all (implies DryRun)
 	ABIs     []string // with NoDevice: the CPU list to build for (default 32-bit)
+	Source   string   // with NoDevice: the patch source id (default: the default source)
 }
 
 // Result is the outcome for one app on one device (or a device/run-level problem).
@@ -71,13 +73,22 @@ type Result struct {
 	At      time.Time `json:"at"`
 }
 
+// SourceStatus is the state of one patch source's latest release.
+type SourceStatus struct {
+	ID    string `json:"id"`
+	Repo  string `json:"repo"`
+	Tag   string `json:"tag"`
+	Error string `json:"error,omitempty"`
+}
+
 // Status is what the UI shows about runs.
 type Status struct {
-	Running        bool      `json:"running"`
-	StartedAt      time.Time `json:"started_at"`
-	FinishedAt     time.Time `json:"finished_at"`
-	PatchesVersion string    `json:"patches_version"`
-	Results        []Result  `json:"results"`
+	Running        bool           `json:"running"`
+	StartedAt      time.Time      `json:"started_at"`
+	FinishedAt     time.Time      `json:"finished_at"`
+	PatchesVersion string         `json:"patches_version"` // the default source's release
+	Sources        []SourceStatus `json:"sources"`
+	Results        []Result       `json:"results"`
 }
 
 // Runner holds the long-lived pieces.
@@ -89,15 +100,17 @@ type Runner struct {
 	Notify func(ctx context.Context, title, body string)
 	Now    func() time.Time
 
-	mu     sync.Mutex
-	status Status
-	list   *patches.List
-	wake   chan Options
+	mu        sync.Mutex
+	status    Status
+	lists     map[string]*patches.List // patch source id -> the apps its latest bundle supports
+	listCache map[string]*patches.List // "<id>@<tag>@<repo>" -> parsed list, so a release is read once
+	wake      chan Options
 }
 
 // New makes a Runner.
 func New(cfg config.Config, st *store.Store, a ADB, d Deps, notify func(context.Context, string, string)) *Runner {
-	return &Runner{Cfg: cfg, Store: st, ADB: a, Deps: d, Notify: notify, Now: time.Now, wake: make(chan Options, 1)}
+	return &Runner{Cfg: cfg, Store: st, ADB: a, Deps: d, Notify: notify, Now: time.Now, wake: make(chan Options, 1),
+		lists: map[string]*patches.List{}, listCache: map[string]*patches.List{}}
 }
 
 // Status returns a copy of the current status.
@@ -106,32 +119,103 @@ func (r *Runner) Status() Status {
 	defer r.mu.Unlock()
 	s := r.status
 	s.Results = append([]Result{}, s.Results...)
+	s.Sources = append([]SourceStatus{}, s.Sources...)
 	return s
 }
 
-// List returns the apps the current patch bundle supports (nil until first loaded).
-func (r *Runner) List() *patches.List {
+// Lists returns the apps each patch source supports (source id -> list); sources that have not
+// loaded yet are missing.
+func (r *Runner) Lists() map[string]*patches.List {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.list
+	out := make(map[string]*patches.List, len(r.lists))
+	maps.Copy(out, r.lists)
+	return out
 }
 
-// RefreshList loads the app list without doing a run, so the UI is useful straight away.
-func (r *Runner) RefreshList(ctx context.Context) error {
-	rel, err := r.Deps.Latest(ctx)
-	if err != nil {
-		return err
+// loaded is one patch source's latest release, bundle and app list.
+type loaded struct {
+	src  store.Source
+	rel  *patches.Release
+	mpp  string
+	list *patches.List
+	err  error
+}
+
+// loadSource resolves a source's latest release, downloads the bundle and reads its apps. The
+// parsed list is cached per release, so a release is read once however often this runs.
+func (r *Runner) loadSource(ctx context.Context, src store.Source) *loaded {
+	ld := &loaded{src: src}
+	setStatus := func() {
+		st := SourceStatus{ID: src.ID, Repo: src.Repo}
+		if ld.rel != nil {
+			st.Tag = ld.rel.Tag
+		}
+		if ld.err != nil {
+			st.Error = ld.err.Error()
+		}
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		replaced := false
+		for i := range r.status.Sources {
+			if r.status.Sources[i].ID == src.ID {
+				r.status.Sources[i], replaced = st, true
+			}
+		}
+		if !replaced {
+			r.status.Sources = append(r.status.Sources, st)
+		}
+		if src.Default && ld.rel != nil {
+			r.status.PatchesVersion = ld.rel.Tag
+		}
 	}
-	l, err := r.Deps.List(ctx, rel.Tag)
-	if err != nil {
-		return err
+	defer setStatus()
+	if ld.rel, ld.err = r.Deps.Latest(ctx, src); ld.err != nil {
+		ld.err = fmt.Errorf("could not look up the latest release: %w", ld.err)
+		return ld
 	}
+	if ld.mpp, ld.err = r.Deps.Download(ctx, src, ld.rel); ld.err != nil {
+		ld.err = fmt.Errorf("could not download the patches: %w", ld.err)
+		return ld
+	}
+	key := src.ID + "@" + ld.rel.Tag + "@" + src.Repo
 	r.mu.Lock()
-	r.list = l
-	if r.status.PatchesVersion == "" {
-		r.status.PatchesVersion = rel.Tag
-	}
+	cached := r.listCache[key]
 	r.mu.Unlock()
+	if cached == nil {
+		if cached, ld.err = r.Deps.Apps(ctx, src, ld.rel, ld.mpp); ld.err != nil {
+			ld.err = fmt.Errorf("could not read the patches: %w", ld.err)
+			return ld
+		}
+		r.mu.Lock()
+		r.listCache[key] = cached
+		r.mu.Unlock()
+	}
+	ld.list = cached
+	r.mu.Lock()
+	r.lists[src.ID] = cached
+	r.mu.Unlock()
+	return ld
+}
+
+// RefreshLists loads every configured source so the page can list their apps straight away.
+func (r *Runner) RefreshLists(ctx context.Context) {
+	for _, src := range r.Store.Settings().Sources {
+		if ld := r.loadSource(ctx, src); ld.err != nil {
+			slog.Warn("patch source not loaded", "repo", src.Repo, "err", ld.err)
+		}
+	}
+}
+
+// CheckRepo says whether a GitHub repository publishes a patch bundle, without saving anything.
+func (r *Runner) CheckRepo(ctx context.Context, repo string, prerelease bool) error {
+	rel, err := r.Deps.Latest(ctx, store.Source{Repo: repo, Prerelease: prerelease})
+	if err != nil {
+		return err
+	}
+	if rel.Size > patches.MaxBundleBytes {
+		return fmt.Errorf("its bundle is %d MB, over the %d MB limit", rel.Size>>20, patches.MaxBundleBytes>>20)
+	}
 	return nil
 }
 
@@ -206,51 +290,38 @@ type conn struct {
 	sdk    int
 }
 
+// appKey is one app from one patch source; devices that picked the same pair share the work.
+type appKey struct{ pkg, src string }
+
 func (r *Runner) pass(ctx context.Context, o Options) []Result {
 	var out []Result
 	fail := func(dev, msg string, alert bool) { out = append(out, Result{Device: dev, Message: msg, Alert: alert}) }
-
-	rel, err := r.Deps.Latest(ctx)
-	if err != nil {
-		fail("", "could not look up the patches release: "+err.Error(), true)
-		return out
-	}
-	mpp, err := r.Deps.Download(ctx, rel)
-	if err != nil {
-		fail("", "could not download the patches: "+err.Error(), true)
-		return out
-	}
-	r.mu.Lock()
-	r.status.PatchesVersion = rel.Tag
-	r.mu.Unlock()
-	list, err := r.Deps.List(ctx, rel.Tag)
-	if err != nil {
-		slog.Warn("patches-list.json unavailable; using the Morphe CLI's view only", "err", err)
-		list = nil
-	}
-	if list != nil {
-		r.mu.Lock()
-		r.list = list
-		r.mu.Unlock()
-	}
 
 	// connect
 	var conns []conn
 	settings := r.Store.Settings()
 	if o.NoDevice {
-		pkgs := o.Packages
-		if len(pkgs) == 0 {
+		src := o.Source
+		if src == "" {
+			src = store.DefaultSourceID
+		}
+		var choices []store.AppChoice
+		if len(o.Packages) > 0 {
+			for _, p := range o.Packages {
+				choices = append(choices, store.AppChoice{Package: p, Source: src})
+			}
+		} else {
 			seen := map[string]bool{}
 			for _, d := range settings.Devices {
-				for _, p := range d.Apps {
-					if !seen[p] {
-						seen[p] = true
-						pkgs = append(pkgs, p)
+				for _, c := range d.Apps {
+					if !seen[c.Package+"\x00"+c.Source] {
+						seen[c.Package+"\x00"+c.Source] = true
+						choices = append(choices, c)
 					}
 				}
 			}
 		}
-		conns = append(conns, conn{dev: store.Device{ID: "", Name: "(no device)", Apps: pkgs}, abis: abi.Normalize(o.ABIs)})
+		conns = append(conns, conn{dev: store.Device{ID: "", Name: "(no device)", Apps: choices}, abis: abi.Normalize(o.ABIs)})
 	} else {
 		for _, d := range settings.Devices {
 			if o.DeviceID != "" && d.ID != o.DeviceID {
@@ -270,23 +341,53 @@ func (r *Runner) pass(ctx context.Context, o Options) []Result {
 		}
 	}
 
-	// which apps, on which devices
-	byPkg := map[string][]*conn{}
+	// which apps, from which patch source, on which devices
+	byApp := map[appKey][]*conn{}
 	for i := range conns {
-		for _, p := range conns[i].dev.Apps {
-			if o.Package == "" || o.Package == p {
-				byPkg[p] = append(byPkg[p], &conns[i])
+		for _, c := range conns[i].dev.Apps {
+			if o.Package == "" || o.Package == c.Package {
+				k := appKey{c.Package, c.Source}
+				byApp[k] = append(byApp[k], &conns[i])
 			}
 		}
 	}
-	pkgs := make([]string, 0, len(byPkg))
-	for p := range byPkg {
-		pkgs = append(pkgs, p)
+	keys := make([]appKey, 0, len(byApp))
+	for k := range byApp {
+		keys = append(keys, k)
 	}
-	sort.Strings(pkgs)
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].pkg != keys[j].pkg {
+			return keys[i].pkg < keys[j].pkg
+		}
+		return keys[i].src < keys[j].src
+	})
 
-	for _, pkg := range pkgs {
-		out = append(out, r.app(ctx, o, rel, mpp, list, pkg, byPkg[pkg])...)
+	// load each patch source that is actually used, once
+	srcs := map[string]*loaded{}
+	for _, k := range keys {
+		if _, done := srcs[k.src]; done {
+			continue
+		}
+		src, ok := r.Store.Source(k.src)
+		if !ok {
+			srcs[k.src] = &loaded{src: store.Source{ID: k.src}, err: errors.New("this patch source was removed")}
+			continue
+		}
+		srcs[k.src] = r.loadSource(ctx, src)
+	}
+
+	for _, k := range keys {
+		ld := srcs[k.src]
+		if ld.err != nil {
+			alert := r.noteFailure("source:"+k.src, ld.err, false)
+			for i, c := range byApp[k] {
+				out = append(out, Result{Device: c.dev.Name, Package: k.pkg, Name: patches.PrettyName(k.pkg), OK: false, Alert: alert && i == 0,
+					Message: fmt.Sprintf("%s: patch source %s unavailable: %v", patches.PrettyName(k.pkg), ld.src.Repo, ld.err)})
+			}
+			continue
+		}
+		r.noteRecovered("source:" + k.src)
+		out = append(out, r.app(ctx, o, ld, k.pkg, byApp[k])...)
 	}
 	if len(out) == 0 {
 		out = append(out, Result{OK: true, Message: "nothing to do: no device has any apps selected"})
@@ -319,26 +420,20 @@ type patched struct {
 	err                error
 }
 
-func (r *Runner) app(ctx context.Context, o Options, rel *patches.Release, mpp string, list *patches.List,
-	pkg string, cs []*conn) []Result {
+func (r *Runner) app(ctx context.Context, o Options, ld *loaded, pkg string, cs []*conn) []Result {
+	rel, src := ld.rel, ld.src
 	var out []Result
 	name := pkg
-	var versions []string
-	if list != nil {
-		if a, ok := list.App(pkg); ok {
-			name, versions = a.Name, a.Versions
-		}
+	newest := ""
+	if a, ok := ld.list.App(pkg); ok {
+		name, newest = a.Name, a.Newest
 	}
-	if r.Deps.CLIVersions != nil {
-		versions = append(versions, r.Deps.CLIVersions(ctx, mpp, pkg)...)
-	}
-	newest := patches.Newest(versions)
 	res := func(c *conn, ok bool, msg string) Result {
 		return Result{Device: c.dev.Name, Package: pkg, Name: name, OK: ok, Message: msg}
 	}
 	if newest == "" {
 		for _, c := range cs {
-			out = append(out, res(c, false, fmt.Sprintf("%s: not supported by this patch bundle (%s)", name, rel.Tag)))
+			out = append(out, res(c, false, fmt.Sprintf("%s: not supported by %s %s", name, src.Repo, rel.Tag)))
 		}
 		return out
 	}
@@ -347,7 +442,8 @@ func (r *Runner) app(ctx context.Context, o Options, rel *patches.Release, mpp s
 	var need []*conn
 	for _, c := range cs {
 		in, has := r.Store.Install(c.dev.ID, pkg)
-		if !o.Force && has && in.APKVersion == newest && in.PatchesVersion == rel.Tag && !o.NoDevice {
+		if !o.Force && has && in.APKVersion == newest && in.PatchesVersion == rel.Tag && !o.NoDevice &&
+			(in.PatchSource == src.ID || (in.PatchSource == "" && src.ID == store.DefaultSourceID)) {
 			ip := in.InstalledPackage
 			if ip == "" {
 				ip = pkg
@@ -379,15 +475,16 @@ func (r *Runner) app(ctx context.Context, o Options, rel *patches.Release, mpp s
 	recovered := false
 	for _, key := range keys {
 		gc := groups[key]
-		out = append(out, r.appGroup(ctx, o, rel, mpp, pkg, name, newest, ov, gc, key, &recovered)...)
+		out = append(out, r.appGroup(ctx, o, ld, pkg, name, newest, ov, gc, key, &recovered)...)
 	}
 	r.prune(pkg)
 	return out
 }
 
 // appGroup fetches, patches and installs one app for devices that share a CPU list.
-func (r *Runner) appGroup(ctx context.Context, o Options, rel *patches.Release, mpp, pkg, name, newest string,
+func (r *Runner) appGroup(ctx context.Context, o Options, ld *loaded, pkg, name, newest string,
 	ov store.Override, gc []*conn, key string, recovered *bool) []Result {
+	rel, mpp, src := ld.rel, ld.mpp, ld.src
 	var out []Result
 	res := func(c *conn, ok bool, msg string) Result {
 		return Result{Device: c.dev.Name, Package: pkg, Name: name, OK: ok, Message: msg}
@@ -400,7 +497,7 @@ func (r *Runner) appGroup(ctx context.Context, o Options, rel *patches.Release, 
 		}
 	}
 	fetched, err := r.Deps.Fetch(ctx, sources.App{Package: pkg, Name: name, Version: newest, Sources: ov.Sources,
-		SignerPin: strings.ToLower(ov.SignerSHA256), SlugOverride: ov.APKMirror, ABIs: abis}, sdk)
+		SignerPin: strings.ToLower(ov.SignerSHA256), SlugOverride: ov.APKMirror, ABIs: abis, AllowPhone: src.AllowPhone}, sdk)
 	if err != nil {
 		fe, _ := errors.AsType[*sources.FetchError](err)
 		if fe != nil && fe.NoBuild {
@@ -432,7 +529,7 @@ func (r *Runner) appGroup(ctx context.Context, o Options, rel *patches.Release, 
 
 	// patch once for this CPU list
 	h := fnv.New32a()
-	_, _ = h.Write([]byte(key))
+	_, _ = h.Write([]byte(key + "|" + src.ID))
 	out2 := filepath.Join(r.Cfg.Output(), fmt.Sprintf("%s-%s-%s-%s.apk", pkg, safe(newest), rel.Tag, strconv.FormatUint(uint64(h.Sum32()), 16)))
 	patchErr := r.Deps.Patch(ctx, morphe.Options{Jar: r.Cfg.MorpheJar, MPP: mpp, Input: fetched.Path, Out: out2,
 		Keystore: r.Cfg.Keystore(), BytecodeMode: r.Cfg.BytecodeMode, StripLibs: abis,
@@ -468,7 +565,7 @@ func (r *Runner) appGroup(ctx context.Context, o Options, rel *patches.Release, 
 			out = append(out, x)
 			continue
 		}
-		_ = r.Store.SetInstall(c.dev.ID, pkg, store.Install{APKVersion: newest, PatchesVersion: rel.Tag,
+		_ = r.Store.SetInstall(c.dev.ID, pkg, store.Install{APKVersion: newest, PatchesVersion: rel.Tag, PatchSource: src.ID,
 			InstalledPackage: p.installedPkg, Source: fetched.Detail, InstalledAt: r.Now().Format(time.RFC3339)})
 		if prev == "" {
 			prev = "none"

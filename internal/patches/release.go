@@ -78,9 +78,18 @@ func LatestRelease(ctx context.Context, hc *http.Client, repo, token string, pre
 	return nil, fmt.Errorf("no release with an .mpp asset in %s", repo)
 }
 
+// MaxBundleBytes caps a patch bundle download.
+const MaxBundleBytes = 100 << 20
+
 // Download fetches the bundle into cacheDir (skipping it if already complete) and removes
-// older patches-*.mpp files. It returns the file path.
+// older .mpp files in that folder (give every patch source its own folder). It returns the path.
 func Download(ctx context.Context, hc *http.Client, rel *Release, cacheDir string) (string, error) {
+	if rel.Size > MaxBundleBytes {
+		return "", fmt.Errorf("bundle %s is %d MB, over the %d MB limit", rel.Name, rel.Size>>20, MaxBundleBytes>>20)
+	}
+	if rel.Name != filepath.Base(rel.Name) || !strings.HasSuffix(rel.Name, ".mpp") {
+		return "", fmt.Errorf("unexpected bundle name %q", rel.Name)
+	}
 	dest := filepath.Join(cacheDir, rel.Name)
 	if st, err := os.Stat(dest); err == nil && st.Size() == rel.Size {
 		return dest, nil
@@ -106,7 +115,7 @@ func Download(ctx context.Context, hc *http.Client, rel *Release, cacheDir strin
 	if err != nil {
 		return "", err
 	}
-	_, err = io.Copy(f, resp.Body)
+	_, err = io.Copy(f, io.LimitReader(resp.Body, MaxBundleBytes+1))
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
@@ -123,7 +132,7 @@ func Download(ctx context.Context, hc *http.Client, rel *Release, cacheDir strin
 	if err := os.Rename(tmp, dest); err != nil {
 		return "", err
 	}
-	old, _ := filepath.Glob(filepath.Join(cacheDir, "patches-*.mpp"))
+	old, _ := filepath.Glob(filepath.Join(cacheDir, "*.mpp"))
 	for _, o := range old {
 		if o != dest {
 			_ = os.Remove(o)

@@ -29,6 +29,9 @@ type Config struct {
 	// AllowedHostSuffixes lists extra Host header endings the web UI answers to (e.g. ".sloccy.com"),
 	// besides IP addresses and localhost. This stops DNS-rebinding from other web pages.
 	AllowedHostSuffixes []string
+	// PatchSourcesAllowedOwners limits which GitHub owners can be added as patch sources from the
+	// page. Empty (the default) allows any repository.
+	PatchSourcesAllowedOwners []string
 
 	TelegramToken string
 	TelegramChat  string
@@ -64,19 +67,20 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		return v == "1" || v == "true" || v == "yes"
 	}
 	c := Config{
-		DataDir:             def("DATA_DIR", "/data"),
-		MorpheJar:           def("MORPHE_JAR", "/opt/morphe/morphe.jar"),
-		PatchesRepo:         def("PATCHES_REPO", "ajstrick81/morphe-androidtv-patches"),
-		Prerelease:          flag("PATCHES_PRERELEASE"),
-		BytecodeMode:        def("BYTECODE_MODE", "STRIP_SAFE"),
-		FlareSolverrURL:     strings.TrimRight(def("FLARESOLVERR_URL", ""), "/"),
-		APKPureOK:           flag("APKPURE_ACKNOWLEDGE_DANGERS"),
-		DirectOK:            !flag("APKMIRROR_DIRECT_DISABLED"),
-		WebBind:             def("WEB_BIND", "0.0.0.0"),
-		AllowedHostSuffixes: splitList(def("ALLOWED_HOST_SUFFIXES", "")),
-		TelegramToken:       def("TELEGRAM_BOT_TOKEN", ""),
-		TelegramChat:        def("TELEGRAM_CHAT_ID", ""),
-		GitHubToken:         def("GITHUB_TOKEN", ""),
+		DataDir:                   def("DATA_DIR", "/data"),
+		MorpheJar:                 def("MORPHE_JAR", "/opt/morphe/morphe.jar"),
+		PatchesRepo:               def("PATCHES_REPO", "ajstrick81/morphe-androidtv-patches"),
+		Prerelease:                flag("PATCHES_PRERELEASE"),
+		BytecodeMode:              def("BYTECODE_MODE", "STRIP_SAFE"),
+		FlareSolverrURL:           strings.TrimRight(def("FLARESOLVERR_URL", ""), "/"),
+		APKPureOK:                 flag("APKPURE_ACKNOWLEDGE_DANGERS"),
+		DirectOK:                  !flag("APKMIRROR_DIRECT_DISABLED"),
+		WebBind:                   def("WEB_BIND", "0.0.0.0"),
+		AllowedHostSuffixes:       splitList(def("ALLOWED_HOST_SUFFIXES", "")),
+		PatchSourcesAllowedOwners: splitList(def("PATCH_SOURCES_ALLOWED_OWNERS", "")),
+		TelegramToken:             def("TELEGRAM_BOT_TOKEN", ""),
+		TelegramChat:              def("TELEGRAM_CHAT_ID", ""),
+		GitHubToken:               def("GITHUB_TOKEN", ""),
 	}
 	var err error
 	if c.Interval, err = time.ParseDuration(def("INTERVAL", "6h")); err != nil || c.Interval < time.Minute {

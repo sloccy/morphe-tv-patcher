@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -31,8 +32,10 @@ var ui embed.FS
 type Backend interface {
 	Status() runner.Status
 	Trigger(runner.Options) bool
-	List() *patches.List
+	Lists() map[string]*patches.List // patch source id -> the apps its latest bundle supports
 	Pair(ctx context.Context, host string, pairPort int, code string) error
+	CheckRepo(ctx context.Context, repo string, prerelease bool) error
+	RefreshLists(ctx context.Context)
 }
 
 // Server serves the API and the page.
@@ -42,6 +45,9 @@ type Server struct {
 	Log                 interface{ Lines() []string }
 	Version             string
 	AllowedHostSuffixes []string
+	// AllowedOwners restricts patch sources added from the page to these GitHub owners
+	// (lower case). Empty means any repository.
+	AllowedOwners []string
 }
 
 const maxBody = 64 << 10
@@ -56,6 +62,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/devices", s.addDevice)
 	mux.HandleFunc("DELETE /api/devices/{id}", s.removeDevice)
 	mux.HandleFunc("PUT /api/devices/{id}/apps", s.setApps)
+	mux.HandleFunc("POST /api/sources", s.addSource)
+	mux.HandleFunc("DELETE /api/sources/{id}", s.removeSource)
 	mux.HandleFunc("POST /api/devices/{id}/pair", s.pair)
 	mux.HandleFunc("POST /api/run", s.run)
 	return s.guard(mux)
@@ -140,11 +148,56 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
-type appRow struct {
-	Package      string `json:"package"`
-	Name         string `json:"name"`
+type appSource struct {
+	ID           string `json:"id"`
 	Newest       string `json:"newest"`
 	Experimental bool   `json:"experimental"`
+}
+
+type appRow struct {
+	Package string      `json:"package"`
+	Name    string      `json:"name"`
+	Sources []appSource `json:"sources"` // every patch source that supports it (the default first)
+}
+
+type sourceRow struct {
+	store.Source
+	Tag   string `json:"tag"`
+	Error string `json:"error,omitempty"`
+	Apps  int    `json:"apps"`
+}
+
+// mergedApps lists each package once, with the sources that support it.
+func mergedApps(sources []store.Source, lists map[string]*patches.List) []appRow {
+	byPkg := map[string]*appRow{}
+	for _, src := range sources { // settings order: the default source is first
+		l := lists[src.ID]
+		if l == nil {
+			continue
+		}
+		for _, a := range l.Apps {
+			if a.Newest == "" {
+				continue
+			}
+			row := byPkg[a.Package]
+			if row == nil {
+				row = &appRow{Package: a.Package, Name: a.Name}
+				byPkg[a.Package] = row
+			}
+			row.Sources = append(row.Sources, appSource{ID: src.ID, Newest: a.Newest, Experimental: a.Experimental})
+		}
+	}
+	rows := make([]appRow, 0, len(byPkg))
+	for _, r := range byPkg {
+		rows = append(rows, *r)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Name != rows[j].Name {
+			return rows[i].Name < rows[j].Name
+		}
+		return rows[i].Package < rows[j].Package
+	})
+	return rows
 }
 
 type deviceRow struct {
@@ -157,24 +210,33 @@ type deviceRow struct {
 
 func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 	st := s.Backend.Status()
-	out := map[string]any{"version": s.Version, "status": st, "apps": []appRow{}}
-	if l := s.Backend.List(); l != nil {
-		rows := make([]appRow, 0, len(l.Apps))
-		for _, a := range l.Apps {
-			rows = append(rows, appRow{a.Package, a.Name, a.Newest, a.Experimental})
-		}
-		out["apps"] = rows
-	}
 	settings := s.Store.Settings()
+	lists := s.Backend.Lists()
+	out := map[string]any{"version": s.Version, "status": st, "apps": mergedApps(settings.Sources, lists),
+		"allowed_owners": s.AllowedOwners}
+	srcRows := make([]sourceRow, 0, len(settings.Sources))
+	for _, src := range settings.Sources {
+		row := sourceRow{Source: src}
+		for _, ss := range st.Sources {
+			if ss.ID == src.ID {
+				row.Tag, row.Error = ss.Tag, ss.Error
+			}
+		}
+		if l := lists[src.ID]; l != nil {
+			row.Apps = len(l.Apps)
+		}
+		srcRows = append(srcRows, row)
+	}
+	out["sources"] = srcRows
 	devs := make([]deviceRow, 0, len(settings.Devices))
 	for _, d := range settings.Devices {
 		row := deviceRow{Device: d, Installs: map[string]store.Install{}}
 		if info, ok := s.Store.DeviceInfo(d.ID); ok {
 			row.Info, row.Is64 = &info, abi.Is64(info.ABIs)
 		}
-		for _, p := range d.Apps {
-			if in, ok := s.Store.Install(d.ID, p); ok {
-				row.Installs[p] = in
+		for _, c := range d.Apps {
+			if in, ok := s.Store.Install(d.ID, c.Package); ok {
+				row.Installs[c.Package] = in
 			}
 		}
 		for _, res := range st.Results {
@@ -221,19 +283,28 @@ func (s *Server) removeDevice(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) setApps(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Apps []string `json:"apps"`
+		Apps []store.AppChoice `json:"apps"`
 	}
 	if !decode(w, r, &in) {
 		return
 	}
-	l := s.Backend.List()
-	if l == nil {
-		fail(w, http.StatusServiceUnavailable, "the app list has not loaded yet; try again in a moment")
-		return
-	}
-	for _, p := range in.Apps {
-		if _, ok := l.App(p); !ok {
-			fail(w, http.StatusBadRequest, "unknown app: "+p)
+	lists := s.Backend.Lists()
+	for i := range in.Apps {
+		c := &in.Apps[i]
+		if c.Source == "" {
+			c.Source = store.DefaultSourceID
+		}
+		if _, ok := s.Store.Source(c.Source); !ok {
+			fail(w, http.StatusBadRequest, "unknown patch source: "+c.Source)
+			return
+		}
+		l := lists[c.Source]
+		if l == nil {
+			fail(w, http.StatusServiceUnavailable, "that patch source has not loaded yet; try again in a moment")
+			return
+		}
+		if _, ok := l.App(c.Package); !ok {
+			fail(w, http.StatusBadRequest, "unknown app for that patch source: "+c.Package)
 			return
 		}
 	}
@@ -241,9 +312,61 @@ func (s *Server) setApps(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusNotFound, err.Error())
 		return
 	}
-	apps := append([]string{}, in.Apps...)
-	sort.Strings(apps)
-	writeJSON(w, http.StatusOK, map[string]any{"apps": apps})
+	writeJSON(w, http.StatusOK, map[string]any{"apps": len(in.Apps)})
+}
+
+func (s *Server) addSource(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Repo       string `json:"repo"`
+		Prerelease bool   `json:"prerelease"`
+		AllowPhone bool   `json:"allow_phone"`
+		Trust      bool   `json:"trust"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	in.Repo = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(in.Repo, "https://github.com/"), "http://github.com/"))
+	in.Repo = strings.TrimSuffix(in.Repo, "/")
+	if !in.Trust {
+		fail(w, http.StatusBadRequest, "tick the box to confirm you trust this repository: its patches run on this server and are installed on your TVs")
+		return
+	}
+	if !store.ValidRepo(in.Repo) {
+		fail(w, http.StatusBadRequest, "enter the repository as owner/name")
+		return
+	}
+	if len(s.AllowedOwners) > 0 && !slices.Contains(s.AllowedOwners, strings.ToLower(store.RepoOwner(in.Repo))) {
+		fail(w, http.StatusForbidden, "that owner is not in PATCH_SOURCES_ALLOWED_OWNERS ("+strings.Join(s.AllowedOwners, ", ")+")")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if err := s.Backend.CheckRepo(ctx, in.Repo, in.Prerelease); err != nil {
+		fail(w, http.StatusBadGateway, "could not use that repository: "+err.Error())
+		return
+	}
+	src, err := s.Store.AddSource(in.Repo, in.Prerelease, in.AllowPhone)
+	if err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	slog.Warn("patch source added", "repo", src.Repo, "allow_phone", src.AllowPhone, "prerelease", src.Prerelease)
+	go s.Backend.RefreshLists(context.WithoutCancel(r.Context())) // keep going after the response is sent
+	writeJSON(w, http.StatusCreated, src)
+}
+
+func (s *Server) removeSource(w http.ResponseWriter, r *http.Request) {
+	removed, err := s.Store.RemoveSource(r.PathValue("id"))
+	if err != nil {
+		code := http.StatusNotFound
+		if strings.Contains(err.Error(), "default") {
+			code = http.StatusBadRequest
+		}
+		fail(w, code, err.Error())
+		return
+	}
+	slog.Warn("patch source removed", "id", r.PathValue("id"), "apps_dropped", removed)
+	writeJSON(w, http.StatusOK, map[string]int{"apps_dropped": removed})
 }
 
 var codeRE = regexp.MustCompile(`^\d{6}$`)

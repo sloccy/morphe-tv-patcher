@@ -161,6 +161,20 @@ func ParseListVersions(out []byte) []string {
 	return vs
 }
 
+// ListPatches runs `list-patches -p -v` (with -x to include experimental versions) and returns
+// its output; patches.ParseListPatches reads it.
+func ListPatches(ctx context.Context, jar, mpp string, experimental bool) ([]byte, error) {
+	args := []string{"-jar", jar, "list-patches", "--patches", mpp, "-p", "-v"}
+	if experimental {
+		args = append(args, "-x")
+	}
+	out, err := runJava(ctx, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list-patches: %w: %s", err, tail(out, 400))
+	}
+	return out, nil
+}
+
 // ListVersions asks the CLI which versions of pkg the bundle supports; nil on any problem.
 func ListVersions(ctx context.Context, jar, mpp, pkg string) []string {
 	out, err := runJava(ctx, "-jar", jar, "list-versions", "--patches", mpp, "-f", pkg)
