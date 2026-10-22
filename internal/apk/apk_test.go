@@ -3,19 +3,11 @@ package apk
 import (
 	"archive/zip"
 	"bytes"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/binary"
-	"encoding/hex"
-	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
+
+	"github.com/sloccy/morphe-tv-patcher/internal/apk/apktest"
 )
 
 // Values recorded from the real APKs (cross-checked with androguard and apksigner).
@@ -97,58 +89,12 @@ func TestSignerRealAPKs(t *testing.T) {
 	}
 }
 
-func lp(b ...[]byte) []byte { // concatenated u32-length-prefixed elements
-	var out []byte
-	for _, e := range b {
-		out = binary.LittleEndian.AppendUint32(out, uint32(len(e)))
-		out = append(out, e...)
-	}
-	return out
-}
-
-func syntheticAPK(t *testing.T, id uint32) ([]byte, string) {
-	t.Helper()
-	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test"},
-		NotBefore: time.Now(), NotAfter: time.Now().Add(time.Hour)}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	signed := lp(lp(), lp(der), lp())
-	signer := lp(signed, lp(), lp())
-	value := lp(lp(signer)) // signers sequence, each signer length-prefixed
-	pair := binary.LittleEndian.AppendUint64(nil, uint64(4+len(value)))
-	pair = binary.LittleEndian.AppendUint32(pair, id)
-	pair = append(pair, value...)
-	block := binary.LittleEndian.AppendUint64(nil, uint64(len(pair)+24))
-	block = append(block, pair...)
-	block = binary.LittleEndian.AppendUint64(block, uint64(len(pair)+24))
-	block = append(block, sigMagic...)
-
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
-	w, _ := zw.Create("AndroidManifest.xml")
-	w.Write([]byte("x"))
-	zw.Close()
-	z := buf.Bytes()
-	eocd := bytes.LastIndex(z, []byte{0x50, 0x4b, 0x05, 0x06})
-	cd := int(binary.LittleEndian.Uint32(z[eocd+16:]))
-	out := append([]byte{}, z[:cd]...)
-	out = append(out, block...)
-	out = append(out, z[cd:]...)
-	binary.LittleEndian.PutUint32(out[eocd+len(block)+16:], uint32(cd+len(block)))
-	sum := sha256.Sum256(der)
-	return out, hex.EncodeToString(sum[:])
-}
-
-func TestSignerSyntheticV2V3(t *testing.T) {
-	for _, id := range []uint32{idV2, idV3, idV31} {
-		apkBytes, want := syntheticAPK(t, id)
-		got, err := SignerSHA256(bytes.NewReader(apkBytes), int64(len(apkBytes)))
-		if err != nil || got != want {
-			t.Errorf("id %#x: got %q err %v, want %q", id, got, err, want)
-		}
+func TestSignerSynthetic(t *testing.T) {
+	der, want := apktest.Cert("t")
+	b := apktest.SignedAPK(map[string][]byte{"AndroidManifest.xml": []byte("x")}, der)
+	got, err := SignerSHA256(bytes.NewReader(b), int64(len(b)))
+	if err != nil || got != want {
+		t.Errorf("got %q err %v, want %q", got, err, want)
 	}
 }
 
