@@ -61,6 +61,16 @@ class Client:
         return soup
 
     def file(self, url, referer, dest: Path):
+        if self.flare_url:
+            # the file URL can have its own Cloudflare challenge; let the browser solve it
+            # first so we hold the clearance cookie for the same IP + user agent
+            try:
+                sol = flaresolverr.solve(self.flare_url, url)
+                self.cookies.update(sol["cookies"])
+                self.ua = sol["user_agent"] or self.ua
+                log.info("flaresolverr visited file url; cookies: %s", sorted(sol["cookies"]))
+            except Blocked as e:
+                log.info("flaresolverr could not open the file url: %s", e)
         headers = {"Referer": referer}
         if self.ua:
             headers["User-Agent"] = self.ua
@@ -165,7 +175,12 @@ def download(slug: str, version: str, device_sdk: int, dest_dir: Path,
     last = None
     for n, prof in enumerate(order):
         try:
-            return _run(Client(prof), slug, version, device_sdk, dest_dir), prof
+            client = Client(prof)
+        except Exception as e:  # noqa: BLE001  (profile unsupported by the installed curl_cffi)
+            log.warning("skipping profile %s: %s", prof, e)
+            continue
+        try:
+            return _run(client, slug, version, device_sdk, dest_dir), prof
         except Blocked as e:
             last = e
             wait = BACKOFF_S[min(n, len(BACKOFF_S) - 1)] * random.uniform(0.8, 1.3)
@@ -173,4 +188,4 @@ def download(slug: str, version: str, device_sdk: int, dest_dir: Path,
                         f"; waiting {wait:.0f}s" if n < len(order) - 1 else "")
             if n < len(order) - 1:
                 time.sleep(wait)
-    raise last
+    raise last or Blocked("no usable browser profile")

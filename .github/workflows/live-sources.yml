@@ -124,7 +124,14 @@ jobs:
           probe("A fs-cookies+ua+referer (chrome tls)", cr.Session(impersonate="chrome"), headers={"Referer": dl_page, "User-Agent": c.ua}, cookies=c.cookies)
           probe("B fs-cookies+referer, impersonate UA", cr.Session(impersonate="chrome"), headers={"Referer": dl_page}, cookies=c.cookies)
           probe("C no cookies, chrome", cr.Session(impersonate="chrome"), headers={"Referer": dl_page})
-          probe("D no cookies, firefox", cr.Session(impersonate="firefox"), headers={"Referer": dl_page})
+          from patcher import flaresolverr
+          try:
+              sol = flaresolverr.solve("http://localhost:8191", url)
+              print("E solve(file url): status", sol["status"], "cookies", sorted(sol["cookies"]), "html len", len(sol["html"]), "title-ish", sol["html"][:80].replace("\n", " "))
+              c.cookies.update(sol["cookies"]); c.ua = sol["user_agent"] or c.ua
+              probe("F after solving the file url", cr.Session(impersonate="chrome"), headers={"Referer": dl_page, "User-Agent": c.ua}, cookies=c.cookies)
+          except Exception as e:
+              print("E solve(file url) failed:", type(e).__name__, e)
           PY
       - name: APKMirror through FlareSolverr (Prime Video)
         run: |
