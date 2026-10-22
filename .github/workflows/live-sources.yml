@@ -48,3 +48,27 @@ jobs:
                   print("FAIL", pkg, type(e).__name__, e)
           raise SystemExit(1 if bad else 0)
           PY
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "21" }
+      - name: Whole pipeline with APKPure as the only source
+        env:
+          APKMIRROR_DISABLED: "1"
+          DATA_DIR: ${{ runner.temp }}/data
+          MORPHE_JAR: ${{ runner.temp }}/morphe.jar
+        run: |
+          v=$(cat morphe-cli.version)
+          curl -fsSL -o "$MORPHE_JAR" "https://github.com/MorpheApp/morphe-cli/releases/download/$v/morphe-desktop-${v#v}-all.jar"
+          mkdir -p "$DATA_DIR"
+          cat > "$DATA_DIR/state.json" <<'JSON'
+          {"com.amazon.amazonvideo.livingroom": {"signer_sha256": "2f19adeb284eb36f7f07786152b9a1d14b21653203ad0b04ebbf9c73ab6d7625"},
+           "com.disney.disneyplus": {"signer_sha256": "b4d251e979ea974d8f070feb5ab69fc4c2873f4e8add421ff63ad5f2789d63d4"}}
+          JSON
+          cat > cfg.yaml <<'YAML'
+          device: { host: "10.0.0.1" }
+          apkpure: { acknowledge_dangers: true }
+          apps:
+            - { package: com.amazon.amazonvideo.livingroom, apkmirror: x/y }
+            - { package: com.disney.disneyplus, apkmirror: x/y }
+          YAML
+          python -m patcher once --no-device --config cfg.yaml 2>&1 | grep -E "WARNING|ERROR|patched|Traceback|via " | cut -c1-250
+          ls -la "$DATA_DIR/work/output"
