@@ -76,14 +76,13 @@ class Client:
         tmp.replace(dest)
 
 
-def find_release_url(c: Client, slug: str, version: str) -> str:
+def find_release(c: Client, slug: str, version: str) -> tuple:
     """Guess the release URL; otherwise look the version up on the app's own page."""
     tail = slug.rstrip("/").split("/")[-1]
     vs = version_slug(version)
     guess = f"{BASE}/apk/{slug}/{tail}-{vs}-release/"
     try:
-        c.html(guess, referer=BASE + "/")
-        return guess
+        return guess, c.html(guess, referer=BASE + "/")
     except NotFound:
         pass
     for page in (1, 2, 3):
@@ -93,7 +92,9 @@ def find_release_url(c: Client, slug: str, version: str) -> str:
         for a in soup.select("a[href*='-release/']"):
             h = a["href"].split("#")[0]
             if h.rstrip("/").endswith(f"{vs}-release") and f"/{slug}/" in h:
-                return urljoin(BASE, h)
+                url = urljoin(BASE, h)
+                _sleep()
+                return url, c.html(url, referer=BASE + "/")
     raise NotFound(f"{version} not on APKMirror for {slug}")
 
 
@@ -112,7 +113,9 @@ def pick_variant(soup, device_sdk: int) -> str:
         if m and int(m.group(1)) > 16:
             continue
         return urljoin(BASE, link["href"])
-    raise NotFound("no compatible BUNDLE variant on release page")
+    title = soup.title.get_text(strip=True)[:80] if soup.title else "no <title>"
+    rows = [r.get_text(" ", strip=True)[:70] for r in soup.select("div.table-row.headerFont")][:3]
+    raise NotFound(f"no compatible BUNDLE variant on release page (title={title!r}, rows={rows})")
 
 
 def final_link(soup) -> str:
@@ -132,10 +135,10 @@ def file_link(soup) -> str:
 def _run(c: Client, slug, version, device_sdk, dest_dir: Path) -> Path:
     c.html(BASE + "/")  # warm-up: cookies before deep pages
     _sleep()
-    rel = find_release_url(c, slug, version)
+    rel, rsoup = find_release(c, slug, version)
     log.info("release page %s", rel)
     _sleep()
-    variant = pick_variant(c.html(rel, referer=rel), device_sdk)
+    variant = pick_variant(rsoup, device_sdk)
     _sleep()
     vsoup = c.html(variant, referer=rel)
     dl_page = final_link(vsoup)

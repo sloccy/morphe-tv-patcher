@@ -50,14 +50,14 @@ def test_release_lookup_falls_back_to_app_page(monkeypatch):
     m = re.search(r"prime-video-android-tv-([a-z0-9-]+)-release/", html)
     slug = "amazon-mobile-llc/prime-video-android-tv-android-tv"
     c = FakeClient()
-    found = A.find_release_url(c, slug, "6.24.8+v16.0.0.361-allabis")
+    found, _ = A.find_release(c, slug, "6.24.8+v16.0.0.361-allabis")
     assert found.endswith("6-24-8v16-0-0-361-allabis-release/")
 
 
 def test_release_lookup_not_found(monkeypatch):
     monkeypatch.setattr(A, "_sleep", lambda *a: None)
     with pytest.raises(NotFound):
-        A.find_release_url(FakeClient(), "amazon-mobile-llc/prime-video-android-tv-android-tv", "0.0.1")
+        A.find_release(FakeClient(), "amazon-mobile-llc/prime-video-android-tv-android-tv", "0.0.1")
 
 
 def test_flaresolverr_ok_and_error(monkeypatch):
