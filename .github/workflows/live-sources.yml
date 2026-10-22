@@ -84,6 +84,24 @@ jobs:
         run: |
           docker run -d --name fs -p 8191:8191 ghcr.io/flaresolverr/flaresolverr:latest
           for i in $(seq 1 30); do curl -sf localhost:8191/health && break; sleep 3; done
+      - name: Debug rendered release page
+        continue-on-error: true
+        run: |
+          python - <<'PY'
+          from bs4 import BeautifulSoup
+          from patcher import flaresolverr
+          u = "https://www.apkmirror.com/apk/amazon-mobile-llc/prime-video-android-tv-android-tv/prime-video-android-tv-6-23-23v15-5-0-70-armv7a-release/"
+          s = flaresolverr.solve("http://localhost:8191", u)
+          print("status", s["status"], "len", len(s["html"]), "ua", s["user_agent"][:60])
+          soup = BeautifulSoup(s["html"], "html.parser")
+          print("title:", soup.title.string if soup.title else None)
+          rows = soup.select("div.table-row.headerFont")
+          print("rows:", len(rows))
+          for r in rows[:5]: print("ROW:", r.get_text(" ", strip=True)[:200])
+          print("BUNDLE mentions:", s["html"].upper().count("BUNDLE"), "| 'variants' mentions:", s["html"].lower().count("variant"))
+          import re
+          print("table-ish classes:", sorted(set(re.findall(r'class="(table[^"]{0,60})"', s["html"])))[:12])
+          PY
       - name: APKMirror through FlareSolverr (Prime Video)
         run: |
           python - <<'PY'
