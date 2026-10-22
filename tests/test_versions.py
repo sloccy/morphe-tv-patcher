@@ -3,7 +3,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from patcher import apkmirror, versions  # noqa: E402
 
 
@@ -52,3 +51,15 @@ def test_check_result():
         morphe._check_result(fx / "result-fail.json")
     with pytest.raises(RuntimeError):
         morphe._check_result(fx / "missing.json")
+
+
+def test_xapk_manifest_and_state_merge(tmp_path):
+    from patcher import apkm
+    from patcher.state import State
+    i = apkm.parse_xapk_manifest({"package_name": "a.b", "version_name": "1.2", "version_code": "5",
+                                  "native_code": ["armeabi-v7a"]})
+    assert (i["package"], i["version"], i["arches"]) == ("a.b", "1.2", ["armeabi-v7a"])
+    st = State(tmp_path / "s.json")
+    st.set("a", signer_sha256="x", fetch_failures=2)
+    st.set("a", apk_version="1", fetch_failures=None)
+    assert State(tmp_path / "s.json").get("a") == {"signer_sha256": "x", "apk_version": "1"}

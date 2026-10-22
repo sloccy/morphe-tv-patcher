@@ -14,9 +14,15 @@ class App:
     enable: list = field(default_factory=list)
     disable: list = field(default_factory=list)
     allow_uninstall: bool = False
+    sources: list = None          # order matters; default depends on the app
+    signer_sha256: str = ""       # optional pin; otherwise learned from the first APKMirror download
 
     def __post_init__(self):
         self.installed_package = self.installed_package or self.package
+        if self.sources is None:
+            # APKPure's Netflix TV builds stop at 11.x, so Netflix is APKMirror-only
+            self.sources = ["apkmirror"] if self.package == "com.netflix.ninja" else ["apkmirror", "apkpure"]
+        self.signer_sha256 = self.signer_sha256.lower().replace(":", "")
 
 
 @dataclass
@@ -31,7 +37,10 @@ class Config:
     data: Path
     morphe_jar: str
     apkmirror_enabled: bool
+    apkmirror_direct: bool
     github_token: str
+    flaresolverr_url: str
+    fetch_failures_before_alert: int
 
     @property
     def cache(self): return self.data / "work" / "cache"
@@ -79,7 +88,10 @@ def load(path: str) -> Config:
         data=Path(os.environ.get("DATA_DIR", "/data")),
         morphe_jar=os.environ.get("MORPHE_JAR", "/opt/morphe/morphe.jar"),
         apkmirror_enabled=os.environ.get("APKMIRROR_DISABLED", "") not in ("1", "true"),
+        apkmirror_direct=os.environ.get("APKMIRROR_DIRECT_DISABLED", "") not in ("1", "true"),
         github_token=os.environ.get("GITHUB_TOKEN", ""),
+        flaresolverr_url=os.environ.get("FLARESOLVERR_URL", "").rstrip("/"),
+        fetch_failures_before_alert=int(raw.get("alerts", {}).get("fetch_failures_before_alert", 3)),
     )
     for d in (cfg.cache, cfg.inputs, cfg.output, cfg.keystore.parent):
         d.mkdir(parents=True, exist_ok=True)

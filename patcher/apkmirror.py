@@ -1,4 +1,5 @@
-"""Best-effort APKMirror scraper. Cloudflare may block it; callers fall back to the drop folder."""
+"""APKMirror scraper: direct (curl_cffi, rotating browser profiles) or through FlareSolverr."""
+import random
 import re
 import time
 from pathlib import Path
@@ -7,115 +8,162 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from curl_cffi import requests as cr
 
-from .util import log, retry
+from . import flaresolverr
+from .errors import Blocked, NotFound
+from .util import log
 
 BASE = "https://www.apkmirror.com"
 ARCH_OK = ("armeabi-v7a", "universal", "noarch")
-# Cloudflare fingerprints the TLS client; try several browser profiles before giving up.
-PROFILES = ("chrome", "safari", "firefox")
+PROFILES = ("chrome", "chrome_android", "safari", "firefox")
+BACKOFF_S = (30, 90)
+BLOCK_CODES = (403, 429, 503)
 
 
-class Blocked(RuntimeError):
-    pass
+def _sleep(a=2.0, b=6.0):
+    time.sleep(random.uniform(a, b))
 
 
 def version_slug(v: str) -> str:
     s = v.lower().replace("+", "")
-    s = re.sub(r"[^a-z0-9]+", "-", s)
-    return s.strip("-")
+    return re.sub(r"[^a-z0-9]+", "-", s).strip("-")
 
 
-def _get(sess, url, **kw):
-    time.sleep(1.5)
-    r = sess.get(url, timeout=60, **kw)
-    return r
+class Client:
+    """Fetch pages. mode 'direct' uses curl_cffi; 'flare' loads pages in FlareSolverr's browser
+    and reuses its cookies + user agent for the file download."""
+
+    def __init__(self, profile="chrome", flare_url=""):
+        self.profile, self.flare_url = profile, flare_url
+        self.cookies, self.ua = {}, None
+        self.sess = cr.Session(impersonate=profile)
+        self.last = None
+
+    def html(self, url, referer=None) -> BeautifulSoup:
+        if self.flare_url:
+            sol = flaresolverr.solve(self.flare_url, url)
+            self.cookies.update(sol["cookies"])
+            self.ua = sol["user_agent"] or self.ua
+            status, text = sol["status"], sol["html"]
+        else:
+            r = self.sess.get(url, timeout=60, headers={"Referer": referer} if referer else None)
+            status, text = r.status_code, r.text
+        self.last = url
+        if status in BLOCK_CODES or "Just a moment..." in text[:2000]:
+            raise Blocked(f"{url} -> HTTP {status} (Cloudflare)")
+        if status == 404:
+            raise NotFound(url)
+        if status != 200:
+            raise RuntimeError(f"{url} -> HTTP {status}")
+        return BeautifulSoup(text, "html.parser")
+
+    def file(self, url, referer, dest: Path):
+        headers = {"Referer": referer}
+        if self.ua:
+            headers["User-Agent"] = self.ua
+        r = self.sess.get(url, timeout=900, stream=True, headers=headers, cookies=self.cookies or None)
+        if r.status_code in BLOCK_CODES:
+            raise Blocked(f"download HTTP {r.status_code}")
+        if r.status_code != 200:
+            raise RuntimeError(f"download HTTP {r.status_code}")
+        tmp = dest.with_suffix(".part")
+        with open(tmp, "wb") as f:
+            for chunk in r.iter_content(1 << 20):
+                f.write(chunk)
+        with open(tmp, "rb") as f:
+            if f.read(2) != b"PK":  # HTML interstitial instead of the bundle
+                tmp.unlink()
+                raise Blocked("download was not a zip (interstitial page?)")
+        tmp.replace(dest)
 
 
-def _soup(sess, url):
-    r = _get(sess, url)
-    if r.status_code in (403, 429, 503):
-        raise Blocked(f"{url} -> HTTP {r.status_code} (Cloudflare?)")
-    if r.status_code != 200:
-        raise RuntimeError(f"{url} -> HTTP {r.status_code}")
-    return BeautifulSoup(r.text, "html.parser"), r
-
-
-def release_url(sess, slug: str, version: str) -> str:
-    """Guess the release URL, else look through the app's release list."""
+def find_release_url(c: Client, slug: str, version: str) -> str:
+    """Guess the release URL; otherwise look the version up on the app's own page."""
     tail = slug.rstrip("/").split("/")[-1]
     vs = version_slug(version)
     guess = f"{BASE}/apk/{slug}/{tail}-{vs}-release/"
-    r = _get(sess, guess)
-    if r.status_code in (403, 429, 503):
-        raise Blocked(f"{guess} -> HTTP {r.status_code} (Cloudflare?)")
-    if r.status_code == 200:
+    try:
+        c.html(guess, referer=BASE + "/")
         return guess
-    for page in range(1, 4):
-        soup, _ = _soup(sess, f"{BASE}/uploads/page/{page}/?appcategory={tail}")
+    except NotFound:
+        pass
+    for page in (1, 2, 3):
+        _sleep()
+        url = f"{BASE}/apk/{slug}/" + (f"page/{page}/" if page > 1 else "")
+        soup = c.html(url, referer=BASE + "/")
         for a in soup.select("a[href*='-release/']"):
-            h = a["href"]
+            h = a["href"].split("#")[0]
             if h.rstrip("/").endswith(f"{vs}-release") and f"/{slug}/" in h:
                 return urljoin(BASE, h)
-    raise LookupError(f"{version} not found on APKMirror for {slug}")
+    raise NotFound(f"{version} not on APKMirror for {slug}")
 
 
 def pick_variant(soup, device_sdk: int) -> str:
-    """Return variant page URL: BUNDLE row, compatible arch, minSdk <= device."""
+    """Variant page URL: a BUNDLE row with a compatible arch and minSdk <= device."""
     for row in soup.select("div.table-row.headerFont"):
         text = row.get_text(" ", strip=True)
         if "BUNDLE" not in text.upper():
             continue
         link = row.select_one("a.accent_color")
-        if not link:
-            continue
         low = text.lower()
-        if not any(a in low for a in ARCH_OK):
+        if not link or not any(a in low for a in ARCH_OK):
             continue
-        m = re.search(r"android\s*(\d+)", low)  # "Android 5.0+" style; loose check only
+        m = re.search(r"android\s*(\d+)", low)
+        # "Android 7.0+" is the minimum API level's marketing version; be loose, only reject the absurd
         if m and int(m.group(1)) > 16:
             continue
         return urljoin(BASE, link["href"])
-    raise LookupError("no compatible BUNDLE variant on release page")
+    raise NotFound("no compatible BUNDLE variant on release page")
 
 
-def download(slug: str, version: str, device_sdk: int, dest_dir: Path) -> Path:
-    """Try each browser profile only when the previous one was blocked."""
-    last = None
-    for prof in PROFILES:
-        try:
-            return _download(cr.Session(impersonate=prof), slug, version, device_sdk, dest_dir)
-        except Blocked as e:
-            log.warning("blocked with profile %s: %s", prof, e)
-            last = e
-    raise last
-
-
-def _download(sess, slug: str, version: str, device_sdk: int, dest_dir: Path) -> Path:
-    rel = retry(lambda: release_url(sess, slug, version), what="apkmirror release")
-    log.info("release page %s", rel)
-    soup, _ = _soup(sess, rel)
-    variant = pick_variant(soup, device_sdk)
-    soup, _ = _soup(sess, variant)
+def final_link(soup) -> str:
     btn = soup.select_one("a.downloadButton[href*='/download/']") or soup.select_one("a.downloadButton")
     if not btn:
-        raise LookupError("download button missing")
-    soup, _ = _soup(sess, urljoin(BASE, btn["href"]))
-    final = soup.select_one("a[href*='download.php']") or soup.select_one("a[rel='nofollow'][href*='key=']")
-    if not final:
-        raise LookupError("final download link missing (blocked?)")
-    url = urljoin(BASE, final["href"])
+        raise NotFound("download button missing")
+    return urljoin(BASE, btn["href"])
+
+
+def file_link(soup) -> str:
+    a = soup.select_one("a[href*='download.php']") or soup.select_one("a[rel='nofollow'][href*='key=']")
+    if not a:
+        raise Blocked("final download link missing (blocked?)")
+    return urljoin(BASE, a["href"])
+
+
+def _run(c: Client, slug, version, device_sdk, dest_dir: Path) -> Path:
+    c.html(BASE + "/")  # warm-up: cookies before deep pages
+    _sleep()
+    rel = find_release_url(c, slug, version)
+    log.info("release page %s", rel)
+    _sleep()
+    variant = pick_variant(c.html(rel, referer=rel), device_sdk)
+    _sleep()
+    vsoup = c.html(variant, referer=rel)
+    dl_page = final_link(vsoup)
+    _sleep()
+    dsoup = c.html(dl_page, referer=variant)
+    url = file_link(dsoup)
+    _sleep(2, 4)
     dest = dest_dir / f"{slug.split('/')[-1]}-{version_slug(version)}.apkm"
-    tmp = dest.with_suffix(".part")
-    time.sleep(2)
-    r = sess.get(url, timeout=600, stream=True)
-    if r.status_code != 200:
-        raise RuntimeError(f"download HTTP {r.status_code}")
-    with open(tmp, "wb") as f:
-        for chunk in r.iter_content(1 << 20):
-            f.write(chunk)
-    with open(tmp, "rb") as f:
-        if f.read(2) != b"PK":  # an HTML interstitial instead of the bundle
-            tmp.unlink()
-            raise Blocked("download was not a zip (interstitial page?)")
-    tmp.replace(dest)
+    c.file(url, dl_page, dest)
     return dest
+
+
+def download(slug: str, version: str, device_sdk: int, dest_dir: Path,
+             flare_url: str = "", profile_hint: str = "") -> tuple:
+    """(path, detail). Direct mode tries each browser profile (last good first) with backoff;
+    with flare_url set, uses FlareSolverr once instead. Raises Blocked / NotFound."""
+    if flare_url:
+        return _run(Client("chrome", flare_url), slug, version, device_sdk, dest_dir), "flaresolverr"
+    order = sorted(PROFILES, key=lambda p: p != profile_hint)
+    last = None
+    for n, prof in enumerate(order):
+        try:
+            return _run(Client(prof), slug, version, device_sdk, dest_dir), prof
+        except Blocked as e:
+            last = e
+            wait = BACKOFF_S[min(n, len(BACKOFF_S) - 1)] * random.uniform(0.8, 1.3)
+            log.warning("blocked with profile %s (%s)%s", prof, e,
+                        f"; waiting {wait:.0f}s" if n < len(order) - 1 else "")
+            if n < len(order) - 1:
+                time.sleep(wait)
+    raise last

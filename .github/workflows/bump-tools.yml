@@ -1,0 +1,28 @@
+name: bump-tools
+on:
+  schedule: [{ cron: "17 5 * * *" }]
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: write
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bump pinned tool versions
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          changed=""
+          bump() {  # file repo
+            new=$(gh api "repos/$2/releases/latest" --jq .tag_name)
+            if [ -n "$new" ] && [ "$(cat "$1")" != "$new" ]; then echo "$new" > "$1"; changed="$changed $1=$new"; fi
+          }
+          bump morphe-cli.version MorpheApp/morphe-cli
+          bump apkeep.version EFForg/apkeep
+          if [ -n "$changed" ]; then
+            git config user.name github-actions; git config user.email github-actions@users.noreply.github.com
+            git commit -am "chore: bump$changed"
+            git push
+            gh workflow run build.yml   # pushes made with GITHUB_TOKEN do not trigger workflows
+          fi

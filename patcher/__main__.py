@@ -2,56 +2,71 @@ import argparse
 import logging
 import sys
 import time
+from dataclasses import dataclass
 
-from . import apkm, apkmirror, config, ghrelease, morphe, notify, versions
+from . import config, ghrelease, morphe, notify, sources, versions
 from .adb import Adb
+from .sources import FetchError
 from .state import State
 from .util import log
 
-
-def find_apkm(cfg, app, version):
-    """Drop folder first, then cache."""
-    for d in (cfg.inputs / app.package, cfg.cache):
-        if d.is_dir():
-            for f in sorted(d.glob("*.apkm")):
-                if apkm.matches(f, app.package, version):
-                    return f
-    return None
+DAY = 86400
 
 
-def process(cfg, app, adb, mpp, rel, patches_list, state, args) -> str:
-    """Returns a status string; raises on failure."""
+@dataclass
+class Result:
+    ok: bool
+    msg: str
+    alert: bool = False     # send a notification for this
+    changed: bool = False   # something was installed / patched
+
+
+def _prune(directory, patterns, keep):
+    files = sorted((f for pat in patterns for f in directory.glob(pat) if f.is_file()),
+                   key=lambda f: f.stat().st_mtime, reverse=True)
+    for old in files[keep:]:
+        old.unlink(missing_ok=True)
+
+
+def fetch_failed(cfg, app, state, target, err: FetchError, now=None) -> Result:
+    """Temporary problems wait for N failed cycles; wrong/tampered builds alert at once.
+    Either way at most one alert per 24 h per app."""
+    now = now or time.time()
+    st = state.get(app.package)
+    n = st.get("fetch_failures", 0) + 1
+    cooled = now - st.get("last_fetch_alert", 0) > DAY
+    alert = cooled and (err.fatal or n >= cfg.fetch_failures_before_alert)
+    state.set(app.package, fetch_failures=n, last_fetch_error=str(err)[:500],
+              **({"last_fetch_alert": now} if alert else {}))
+    msg = (f"{app.package}: cannot get {target} ({n} cycle{'s' if n != 1 else ''}): {err}. "
+           f"Drop the .apkm into {cfg.inputs / app.package}/ (newest supported version; "
+           f"no fallback to older)")
+    return Result(ok=False, msg=msg, alert=alert)
+
+
+def process(cfg, app, adb, mpp, rel, patches_list, state, args) -> Result:
     vs = versions.supported(cfg.morphe_jar, mpp, app.package, patches_list)
     if not vs:
-        return f"{app.package}: no supported versions in bundle"
+        return Result(False, f"{app.package}: no supported versions in bundle", alert=True)
     target = versions.newest(vs)
     patches_ver = rel["tag_name"]
     prev = state.get(app.package)
     installed = adb.installed_version(app.installed_package) if adb else None
-    # installed versionName can't be compared 1:1 with the clone/patched apk, so state is primary
     if (not args.force and prev.get("apk_version") == target
             and prev.get("patches_version") == patches_ver and installed):
-        return f"{app.package}: up to date ({target}, patches {patches_ver})"
+        return Result(True, f"{app.package}: up to date ({target}, patches {patches_ver})")
 
-    src = find_apkm(cfg, app, target)
-    if not src and cfg.apkmirror_enabled:
-        try:
-            sdk = adb.sdk() if adb else 28
-            src = apkmirror.download(app.apkmirror, target, sdk, cfg.cache)
-            if not apkm.matches(src, app.package, target):
-                src.unlink(missing_ok=True)
-                raise RuntimeError("downloaded file does not match package/version")
-        except Exception as e:  # noqa: BLE001
-            log.warning("apkmirror failed for %s %s: %s", app.package, target, e)
-    if not src:
-        return (f"{app.package}: need {target}. Drop the .apkm into "
-                f"{cfg.inputs / app.package}/ (newest supported version; not falling back)")
+    try:
+        fetched = sources.fetch(cfg, app, target, adb.sdk() if adb else 28, state)
+    except FetchError as e:
+        return fetch_failed(cfg, app, state, target, e)
 
     out = cfg.output / f"{app.package}-{target.replace(' ', '_')}-{patches_ver}.apk"
-    abis = adb.abis() if adb else []
-    morphe.patch(cfg, app, mpp, src, out, abis, patches_ver)
+    morphe.patch(cfg, app, mpp, fetched.verified.path, out, adb.abis() if adb else [], patches_ver)
+    via = f"via {fetched.detail}"
     if args.dry_run or not adb:
-        return f"{app.package}: patched {target} (dry run, not installed) -> {out.name}"
+        return Result(True, f"{app.package}: patched {target} {via} (dry run, not installed) -> {out.name}",
+                      changed=True)
 
     ok, msg = adb.install(out)
     if not ok:
@@ -63,13 +78,19 @@ def process(cfg, app, adb, mpp, rel, patches_list, state, args) -> str:
                                f"{app.installed_package} (loses login) or set allow_uninstall: true")
     if not ok:
         raise RuntimeError(f"install failed: {msg[-300:]}")
-    state.set(app.package, apk_version=target, patches_version=patches_ver,
-              installed_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
-    return f"{app.package}: {prev.get('apk_version', installed or 'none')} -> {target} (patches {patches_ver})"
+
+    recovered = bool(prev.get("last_fetch_alert"))
+    state.set(app.package, apk_version=target, patches_version=patches_ver, source=fetched.detail,
+              installed_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+              fetch_failures=None, last_fetch_error=None, last_fetch_alert=None)
+    _prune(cfg.output, [f"{app.package}-*.apk", f"{app.package}-*.result.json"], keep=4)
+    _prune(cfg.cache, ["*.apkm", "*.xapk", "*.apks"], keep=6)
+    text = f"{app.package}: {prev.get('apk_version', installed or 'none')} -> {target} (patches {patches_ver}) {via}"
+    return Result(True, ("recovered, " if recovered else "") + text, alert=True, changed=True)
 
 
 def cycle(cfg, args) -> int:
-    failures, updates = [], []
+    alerts, failed = [], False
     rel = ghrelease.latest_release(cfg.patches_repo, cfg.github_token, cfg.prerelease)
     mpp = ghrelease.download_mpp(rel, cfg.cache, cfg.github_token)
     try:
@@ -86,18 +107,17 @@ def cycle(cfg, args) -> int:
         if args.app and app.package != args.app:
             continue
         try:
-            msg = process(cfg, app, adb, mpp, rel, patches_list, state, args)
-            log.info(msg)
-            if "->" in msg or "need " in msg:
-                updates.append(msg)
+            res = process(cfg, app, adb, mpp, rel, patches_list, state, args)
         except Exception as e:  # noqa: BLE001
             log.exception("%s failed", app.package)
-            failures.append(f"{app.package}: {e}")
-    if failures:
-        notify.send("Morphe patcher: FAILURES", "\n".join(failures + updates))
-    elif updates:
-        notify.send("Morphe patcher", "\n".join(updates))
-    return 1 if failures else 0
+            res = Result(False, f"{app.package}: {e}", alert=True)
+        log.info(res.msg)
+        failed |= not res.ok
+        if res.alert:
+            alerts.append(res.msg)
+    if alerts:
+        notify.send("Morphe patcher: " + ("PROBLEMS" if failed else "updated"), "\n".join(alerts))
+    return 1 if failed else 0
 
 
 def main():

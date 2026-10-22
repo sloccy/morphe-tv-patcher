@@ -25,6 +25,16 @@ Uses the homelab Telegram bot: the compose file loads `/srv/secrets/telegram.env
 `docker compose run --rm patcher once --dry-run` patches without installing (still needs the TV for ABI/SDK; add `--no-device` to skip).
 `--app <package>`, `--force` supported. If APKMirror blocks scraping, drop the `.apkm` in `/data/work/input/<package>/` (the `work` volume); the log/notification names the exact version.
 
+## Where APKs come from
+In order, first verified file wins: drop folder, cache, APKMirror (direct, rotating browser profiles with
+backoff), APKMirror through a FlareSolverr sidecar (set `FLARESOLVERR_URL`), then APKPure via `apkeep`
+(not for Netflix: APKPure's TV builds stop at 11.x). Every file is checked before use: right package and
+version, an Android TV launcher (rejects phone builds), armeabi-v7a, and the publisher's signing
+certificate (learned from the first APKMirror download, or pinned with `signer_sha256`; `apksigner`
+verifies it cryptographically). APKPure files are refused until a signer is on record.
+Temporary failures alert only after `alerts.fetch_failures_before_alert` cycles in a row (default 3), then at
+most once per 24 h; a signature mismatch or phone build alerts at once. A "recovered" message follows.
+
 ## Policy
 Always the newest app version the current patch bundle supports. No pinning, no silent fallback to older.
 
