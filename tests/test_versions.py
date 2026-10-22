@@ -27,3 +27,17 @@ def test_version_slug():
     assert apkmirror.version_slug("6.23.23+v15.5.0.70-armv7a") == "6-23-23v15-5-0-70-armv7a"
     assert apkmirror.version_slug("13.0.1 build 25028") == "13-0-1-build-25028"
     assert apkmirror.version_slug("26.16.0+rc2-2026.09.08") == "26-16-0rc2-2026-09-08"
+
+
+def test_apkm_info_real_fixtures():
+    from patcher import apkm
+    fx = Path(__file__).parent / "fixtures"
+    want = {
+        "com.amazon.amazonvideo.livingroom": "6.23.23+v15.5.0.70-armv7a",
+        "com.netflix.ninja": "13.0.1 build 25028",
+        "com.disney.disneyplus": "26.16.0+rc2-2026.09.08",
+    }
+    for pkg, ver in want.items():
+        i = apkm.parse_info(json.loads((fx / f"info-{pkg}.json").read_text()))
+        assert (i["package"], i["version"]) == (pkg, ver)
+        assert "armeabi-v7a" in i["arches"]

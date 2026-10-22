@@ -11,6 +11,12 @@ from .util import log, retry
 
 BASE = "https://www.apkmirror.com"
 ARCH_OK = ("armeabi-v7a", "universal", "noarch")
+# Cloudflare fingerprints the TLS client; try several browser profiles before giving up.
+PROFILES = ("chrome", "safari", "firefox")
+
+
+class Blocked(RuntimeError):
+    pass
 
 
 def version_slug(v: str) -> str:
@@ -27,6 +33,8 @@ def _get(sess, url, **kw):
 
 def _soup(sess, url):
     r = _get(sess, url)
+    if r.status_code in (403, 429, 503):
+        raise Blocked(f"{url} -> HTTP {r.status_code} (Cloudflare?)")
     if r.status_code != 200:
         raise RuntimeError(f"{url} -> HTTP {r.status_code}")
     return BeautifulSoup(r.text, "html.parser"), r
@@ -38,6 +46,8 @@ def release_url(sess, slug: str, version: str) -> str:
     vs = version_slug(version)
     guess = f"{BASE}/apk/{slug}/{tail}-{vs}-release/"
     r = _get(sess, guess)
+    if r.status_code in (403, 429, 503):
+        raise Blocked(f"{guess} -> HTTP {r.status_code} (Cloudflare?)")
     if r.status_code == 200:
         return guess
     for page in range(1, 4):
@@ -69,7 +79,18 @@ def pick_variant(soup, device_sdk: int) -> str:
 
 
 def download(slug: str, version: str, device_sdk: int, dest_dir: Path) -> Path:
-    sess = cr.Session(impersonate="chrome")
+    """Try each browser profile only when the previous one was blocked."""
+    last = None
+    for prof in PROFILES:
+        try:
+            return _download(cr.Session(impersonate=prof), slug, version, device_sdk, dest_dir)
+        except Blocked as e:
+            log.warning("blocked with profile %s: %s", prof, e)
+            last = e
+    raise last
+
+
+def _download(sess, slug: str, version: str, device_sdk: int, dest_dir: Path) -> Path:
     rel = retry(lambda: release_url(sess, slug, version), what="apkmirror release")
     log.info("release page %s", rel)
     soup, _ = _soup(sess, rel)
@@ -92,5 +113,9 @@ def download(slug: str, version: str, device_sdk: int, dest_dir: Path) -> Path:
     with open(tmp, "wb") as f:
         for chunk in r.iter_content(1 << 20):
             f.write(chunk)
+    with open(tmp, "rb") as f:
+        if f.read(2) != b"PK":  # an HTML interstitial instead of the bundle
+            tmp.unlink()
+            raise Blocked("download was not a zip (interstitial page?)")
     tmp.replace(dest)
     return dest
