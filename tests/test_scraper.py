@@ -31,27 +31,37 @@ def test_file_link_missing_means_blocked():
 
 
 class FakeClient:
-    """Serves saved pages; 404 for the guessed release URL to force the app-page lookup."""
+    """Serves saved pages; the first (guessed) release URL 404s to force the app-page lookup."""
     def __init__(self):
         self.seen = []
 
     def html(self, url, referer=None):
         self.seen.append(url)
-        if url.endswith("-release/") and "/apk/amazon-mobile-llc/prime-video-android-tv-android-tv/prime-video" in url:
+        if len(self.seen) == 1:
             raise NotFound(url)
         return soup("app")
 
 
 def test_release_lookup_falls_back_to_app_page(monkeypatch):
     monkeypatch.setattr(A, "_sleep", lambda *a: None)
-    # a version that exists on the saved app page but whose guessed URL we force to 404
-    html = (FX / "apkmirror-app.html").read_text()
-    import re
-    m = re.search(r"prime-video-android-tv-([a-z0-9-]+)-release/", html)
     slug = "amazon-mobile-llc/prime-video-android-tv-android-tv"
-    c = FakeClient()
-    found, _ = A.find_release(c, slug, "6.24.8+v16.0.0.361-allabis")
-    assert found.endswith("6-24-8v16-0-0-361-allabis-release/")
+    found, page = A.find_release(FakeClient(), slug, "6.24.8+v16.0.0.361-allabis")
+    assert found.endswith("6-24-8v16-0-0-361-allabis-release/") and page is not None
+
+
+def test_not_found_page_served_as_200_is_detected():
+    html = "<html><head><title>Page Not Found - APKMirror</title></head></html>"
+
+    class C(A.Client):
+        def __init__(self): self.flare_url, self.cookies, self.ua, self.sess = "x", {}, None, None
+    import patcher.apkmirror as mod
+    orig = mod.flaresolverr.solve
+    mod.flaresolverr.solve = lambda *a, **k: {"html": html, "status": 200, "cookies": {}, "user_agent": ""}
+    try:
+        with pytest.raises(NotFound):
+            C().html("https://www.apkmirror.com/x")
+    finally:
+        mod.flaresolverr.solve = orig
 
 
 def test_release_lookup_not_found(monkeypatch):

@@ -54,7 +54,11 @@ class Client:
             raise NotFound(url)
         if status != 200:
             raise RuntimeError(f"{url} -> HTTP {status}")
-        return BeautifulSoup(text, "html.parser")
+        soup = BeautifulSoup(text, "html.parser")
+        # through a real browser the 404 page can arrive as a 200
+        if soup.title and "Page Not Found" in soup.title.get_text():
+            raise NotFound(url)
+        return soup
 
     def file(self, url, referer, dest: Path):
         headers = {"Referer": referer}
