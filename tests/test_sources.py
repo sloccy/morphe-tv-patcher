@@ -163,3 +163,38 @@ def test_apkpure_is_off_without_opt_in(tmp_path, monkeypatch):
     with pytest.raises(sources.FetchError) as e:
         sources.fetch(cfg, app, "1.0", 28, st)
     assert any("acknowledge_dangers" in a for a in e.value.attempts)
+
+
+def _zip(path, files):
+    import io
+    import zipfile
+    with zipfile.ZipFile(path, "w") as z:
+        for n, data in files.items():
+            z.writestr(n, data)
+
+
+def _inner(*names):
+    import io
+    import zipfile
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w") as z:
+        for n in names:
+            z.writestr(n, "x")
+    return b.getvalue()
+
+
+def test_extract_base_apkpure_xapk_layout(tmp_path):
+    # APKPure: main apk is <pkg>.apk; the biggest file is an ABI split named config.*.apk
+    f = tmp_path / "a.xapk"
+    _zip(f, {"manifest.json": '{"package_name":"com.x"}', "com.x.apk": _inner("lib/armeabi-v7a/a.so"),
+             "config.armeabi_v7a.apk": _inner("a") * 50, "config.en.apk": b"e"})
+    base, abis = verify._extract_base(f, tmp_path)
+    assert base.name == "com.x.apk" and abis == {"armeabi-v7a"}
+
+
+def test_extract_base_apkmirror_layout(tmp_path):
+    f = tmp_path / "a.apkm"
+    _zip(f, {"info.json": "{}", "base.apk": _inner("x"), "split_config.arm64_v8a.apk": b"1",
+             "split_config.armeabi_v7a.apk": b"2"})
+    base, abis = verify._extract_base(f, tmp_path)
+    assert base.name == "base.apk" and abis == {"arm64-v8a", "armeabi-v7a"}

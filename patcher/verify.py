@@ -1,4 +1,5 @@
 """One set of checks every candidate APK bundle must pass, whatever its source."""
+import json
 import logging
 import re
 import shutil
@@ -19,7 +20,8 @@ except Exception:  # noqa: BLE001
     pass
 
 BUNDLE_EXTS = (".apkm", ".xapk", ".apks", ".apk")
-ABI_SPLIT = re.compile(r"split_config\.(armeabi_v7a|arm64_v8a|x86_64|x86)\.apk$")
+ABI_SPLIT = re.compile(r"(?:split_)?config\.(armeabi_v7a|arm64_v8a|x86_64|x86)\.apk$")
+SPLIT_NAME = re.compile(r"^(?:split_)?config\.")
 TARGET_ABI = "armeabi-v7a"
 
 
@@ -36,6 +38,21 @@ def _norm_abi(a: str) -> str:
     return a.replace("_", "-")
 
 
+def pick_base(z, cands) -> str:
+    """APKMirror: base.apk. APKPure XAPK: <package_name>.apk (splits are config.*.apk)."""
+    if "base.apk" in cands:
+        return "base.apk"
+    if "manifest.json" in z.namelist():
+        try:
+            pkg = json.loads(z.read("manifest.json")).get("package_name")
+        except Exception:  # noqa: BLE001
+            pkg = None
+        if pkg and f"{pkg}.apk" in cands:
+            return f"{pkg}.apk"
+    rest = [n for n in cands if not SPLIT_NAME.match(n)]
+    return max(rest, key=lambda n: z.getinfo(n).file_size) if rest else None
+
+
 def _extract_base(path: Path, tmp: Path) -> tuple:
     """Return (base_apk_path, set_of_native_abis)."""
     if not zipfile.is_zipfile(path):
@@ -48,9 +65,7 @@ def _extract_base(path: Path, tmp: Path) -> tuple:
             members = None
         else:
             cands = [n for n in names if "/" not in n and n.endswith(".apk")]
-            base_name = "base.apk" if "base.apk" in cands else next(
-                (n for n in sorted(cands, key=lambda n: -z.getinfo(n).file_size)
-                 if not n.startswith("split_config.")), None)
+            base_name = pick_base(z, cands)
             if not base_name:
                 raise VerifyError("format", "no base apk inside bundle")
             z.extract(base_name, tmp)
