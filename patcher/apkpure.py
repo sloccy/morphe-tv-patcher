@@ -14,12 +14,17 @@ def available() -> bool:
     return shutil.which("apkeep") is not None
 
 
+OPTIONS = "acknowledge_dangers=true,arch=armeabi-v7a"
+
+
 def download(package: str, version: str, dest_dir: Path) -> Path:
+    """Only call this when the user opted in: apkeep's docs warn APKPure has been found
+    modifying apps to distribute malware. The signer pin in verify() is what makes it safe."""
     exe = shutil.which("apkeep")
     if not exe:
         raise NotFound("apkeep not installed")
     with tempfile.TemporaryDirectory() as t:
-        res = subprocess.run([exe, "-a", f"{package}@{version}", "-d", "apk-pure", "-s", "3000", t],
+        res = subprocess.run([exe, "-a", f"{package}@{version}", "-d", "apk-pure", "-o", OPTIONS, "-s", "3000", t],
                              capture_output=True, text=True, timeout=1200)
         files = [f for f in Path(t).iterdir() if f.suffix in EXTS]
         if res.returncode != 0 or not files:

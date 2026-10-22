@@ -12,7 +12,7 @@ from patcher.state import State
 
 def make(tmp_path, **kw):
     cfg = SimpleNamespace(inputs=tmp_path / "input", cache=tmp_path / "cache", output=tmp_path / "out",
-                          apkmirror_enabled=True, apkmirror_direct=True, flaresolverr_url="",
+                          apkmirror_enabled=True, apkmirror_direct=True, apkpure_ok=True, flaresolverr_url="",
                           fetch_failures_before_alert=3)
     for d in (cfg.inputs, cfg.cache, cfg.output):
         d.mkdir()
@@ -153,3 +153,13 @@ def test_fatal_alerts_immediately(tmp_path):
     cfg, app, st = make(tmp_path)
     r = M.fetch_failed(cfg, app, st, "1.0", sources.FetchError(["signature: x"], fatal=True), now=5_000_000.0)
     assert r.alert and not r.ok
+
+
+def test_apkpure_is_off_without_opt_in(tmp_path, monkeypatch):
+    cfg, app, st = make(tmp_path, apkpure_ok=False)
+    monkeypatch.setattr(sources.apkmirror, "download", lambda *a, **k: (_ for _ in ()).throw(Blocked("cf")))
+    monkeypatch.setattr(sources.apkpure, "available", lambda: True)
+    monkeypatch.setattr(sources.apkpure, "download", lambda *a: pytest.fail("must not download"))
+    with pytest.raises(sources.FetchError) as e:
+        sources.fetch(cfg, app, "1.0", 28, st)
+    assert any("acknowledge_dangers" in a for a in e.value.attempts)

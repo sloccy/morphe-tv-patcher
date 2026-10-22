@@ -41,6 +41,7 @@ class Config:
     github_token: str
     flaresolverr_url: str
     fetch_failures_before_alert: int
+    apkpure_ok: bool
 
     @property
     def cache(self): return self.data / "work" / "cache"
@@ -91,6 +92,7 @@ def load(path: str) -> Config:
         apkmirror_direct=os.environ.get("APKMIRROR_DIRECT_DISABLED", "") not in ("1", "true"),
         github_token=os.environ.get("GITHUB_TOKEN", ""),
         flaresolverr_url=os.environ.get("FLARESOLVERR_URL", "").rstrip("/"),
+        apkpure_ok=bool(raw.get("apkpure", {}).get("acknowledge_dangers", False)),
         fetch_failures_before_alert=int(raw.get("alerts", {}).get("fetch_failures_before_alert", 3)),
     )
     for d in (cfg.cache, cfg.inputs, cfg.output, cfg.keystore.parent):

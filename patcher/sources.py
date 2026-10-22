@@ -97,6 +97,9 @@ def fetch(cfg, app, version, device_sdk, state) -> Fetched:
                 if r:
                     return done(r[0], "apkmirror (flaresolverr)")
         elif src == "apkpure":
+            if not cfg.apkpure_ok:
+                attempts.append("apkpure: off (needs apkpure.acknowledge_dangers: true in config)")
+                continue
             if not apkpure.available():
                 attempts.append("apkpure: apkeep not installed")
                 continue

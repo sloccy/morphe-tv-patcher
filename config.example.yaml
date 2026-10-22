@@ -3,6 +3,10 @@ schedule: { interval: "6h" }
 patches: { repo: ajstrick81/morphe-androidtv-patches, prerelease: false }
 morphe: { bytecode_mode: STRIP_SAFE }
 alerts: { fetch_failures_before_alert: 3 }   # temporary download problems alert after N failed cycles
+# APKPure is a second source, but apkeep's docs warn that APKPure has modified apps to spread malware.
+# Files from it are only used if their signer matches the publisher's (learned from APKMirror), and
+# are also verified with apksigner. Turn on only if you accept that; off by default.
+apkpure: { acknowledge_dangers: false }
 apps:
   - package: com.amazon.amazonvideo.livingroom
     apkmirror: amazon-mobile-llc/prime-video-android-tv-android-tv
