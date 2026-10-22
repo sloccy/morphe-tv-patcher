@@ -34,3 +34,17 @@ func TestOverridesAndValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestPatchesRepoIsAFirstRunSeedList(t *testing.T) {
+	c, _ := FromEnv(env(nil))
+	if len(c.PatchesRepos) != 1 || c.PatchesRepos[0] != "ajstrick81/morphe-androidtv-patches" {
+		t.Errorf("the built-in seed is the Android TV patches: %v", c.PatchesRepos)
+	}
+	c, _ = FromEnv(env(map[string]string{"PATCHES_REPO": "a/b, c/d e/f\ng/h", "DATA_DIR": "/d"}))
+	if len(c.PatchesRepos) != 4 || c.PatchesRepos[1] != "c/d" || c.PatchesRepos[3] != "g/h" {
+		t.Errorf("%v", c.PatchesRepos)
+	}
+	if c.PatchBundles() != "/d/patches" {
+		t.Errorf("bundles live in the backed-up state volume, not the cache: %s", c.PatchBundles())
+	}
+}

@@ -18,6 +18,8 @@ import (
 	"github.com/sloccy/morphe-tv-patcher/internal/store"
 )
 
+const defSrc = "owner-default" // the repository seeded on the first run
+
 type fakeBackend struct {
 	lists     map[string]*patches.List
 	status    runner.Status
@@ -61,8 +63,8 @@ func setup(t *testing.T) (srv *httptest.Server, s *Server, fb *fakeBackend) {
 	}
 	data, _ := os.ReadFile("../patches/testdata/patches-list.json")
 	list, _ := patches.ParseList(data)
-	_ = st.EnsureDefaultSource("owner/default", false)
-	fb = &fakeBackend{lists: map[string]*patches.List{store.DefaultSourceID: list}}
+	_ = st.SeedSources([]string{"owner/default"}, false)
+	fb = &fakeBackend{lists: map[string]*patches.List{defSrc: list}}
 	s = &Server{Store: st, Backend: fb, Log: ring{[]string{"line one", "line two"}}, Version: "test"}
 	srv = httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
@@ -118,7 +120,7 @@ func TestDeviceLifecycleAndState(t *testing.T) {
 	if code, body = do(t, srv, "PUT", "/api/devices/living-room/apps", `{"apps":["com.netflix.ninja","com.amazon.amazonvideo.livingroom"]}`, nil); code != 200 {
 		t.Fatalf("%d %s", code, body)
 	}
-	fb.status = runner.Status{PatchesVersion: "v1.42.2", Results: []runner.Result{{Device: "Living room", Message: "ok", OK: true}}}
+	fb.status = runner.Status{Results: []runner.Result{{Device: "Living room", Message: "ok", OK: true}}}
 	code, body = do(t, srv, "GET", "/api/state", "", nil)
 	var st struct {
 		Apps    []map[string]any `json:"apps"`
@@ -336,7 +338,7 @@ func TestStateMergesAppsAcrossSourcesDefaultFirst(t *testing.T) {
 	for _, a := range st.Apps {
 		switch a.Package {
 		case "com.netflix.ninja":
-			if len(a.Sources) != 2 || a.Sources[0].ID != store.DefaultSourceID || a.Sources[1].ID != src.ID || a.Name != "Netflix Android TV" {
+			if len(a.Sources) != 2 || a.Sources[0].ID != defSrc || a.Sources[1].ID != src.ID || a.Name != "Netflix Android TV" {
 				t.Errorf("netflix %+v", a)
 			}
 		case "com.google.android.youtube":
@@ -345,7 +347,7 @@ func TestStateMergesAppsAcrossSourcesDefaultFirst(t *testing.T) {
 			}
 		}
 	}
-	if len(st.Sources) != 2 || st.Sources[0]["default"] != true || st.Sources[1]["allow_phone"] != true {
+	if len(st.Sources) != 2 || st.Sources[1]["allow_phone"] != true {
 		t.Errorf("sources %v", st.Sources)
 	}
 }
@@ -411,9 +413,6 @@ func TestRemoveSource(t *testing.T) {
 	src := twoSources(t, s, fb)
 	d, _ := s.Store.AddDevice("TV", "10.0.0.6")
 	_ = s.Store.SetApps(d.ID, []store.AppChoice{{Package: "com.google.android.youtube", Source: src.ID}, {Package: "com.netflix.ninja"}})
-	if code, _ := do(t, srv, "DELETE", "/api/sources/"+store.DefaultSourceID, "", nil); code != 400 {
-		t.Errorf("the default source: %d", code)
-	}
 	if code, _ := do(t, srv, "DELETE", "/api/sources/nope", "", nil); code != 404 {
 		t.Errorf("unknown: %d", code)
 	}
@@ -429,17 +428,17 @@ func TestSetAppsWithSourceChoices(t *testing.T) {
 	srv, s, fb := setup(t)
 	src := twoSources(t, s, fb)
 	_, _ = s.Store.AddDevice("TV", "10.0.0.6")
-	ok := `{"apps":[{"package":"com.google.android.youtube","source":"` + src.ID + `"},{"package":"com.netflix.ninja","source":"default"},"com.disney.disneyplus"]}`
+	ok := `{"apps":[{"package":"com.google.android.youtube","source":"` + src.ID + `"},{"package":"com.netflix.ninja","source":"owner-default"},"com.disney.disneyplus"]}`
 	if code, b := do(t, srv, "PUT", "/api/devices/tv/apps", ok, nil); code != 200 {
 		t.Fatalf("%d %s", code, b)
 	}
-	if apps := s.Store.Settings().Devices[0].Apps; len(apps) != 3 || apps[0].Package != "com.disney.disneyplus" || apps[0].Source != store.DefaultSourceID {
+	if apps := s.Store.Settings().Devices[0].Apps; len(apps) != 3 || apps[0].Package != "com.disney.disneyplus" || apps[0].Source != defSrc {
 		t.Errorf("a plain package name means the default source: %+v", apps)
 	}
 	bad := map[string]int{
-		`{"apps":[{"package":"com.netflix.ninja","source":"ghost"}]}`:            400,
-		`{"apps":[{"package":"com.google.android.youtube","source":"default"}]}`: 400, // not in that source's bundle
-		`{"apps":[{"package":"com.not.real","source":"` + src.ID + `"}]}`:        400,
+		`{"apps":[{"package":"com.netflix.ninja","source":"ghost"}]}`:                  400,
+		`{"apps":[{"package":"com.google.android.youtube","source":"owner-default"}]}`: 400, // not in that source's bundle
+		`{"apps":[{"package":"com.not.real","source":"` + src.ID + `"}]}`:              400,
 	}
 	for body, want := range bad {
 		if code, _ := do(t, srv, "PUT", "/api/devices/tv/apps", body, nil); code != want {
@@ -449,5 +448,28 @@ func TestSetAppsWithSourceChoices(t *testing.T) {
 	delete(fb.lists, src.ID) // a source whose list has not loaded yet
 	if code, _ := do(t, srv, "PUT", "/api/devices/tv/apps", ok, nil); code != 503 {
 		t.Errorf("unloaded source: %d", code)
+	}
+}
+
+func TestTheFirstRepositoryCanBeRemovedToo(t *testing.T) {
+	srv, s, _ := setup(t)
+	if code, _ := do(t, srv, "DELETE", "/api/sources/"+defSrc, "", nil); code != 200 {
+		t.Fatalf("every patch source is removable: %d", code)
+	}
+	if len(s.Store.Settings().Sources) != 0 {
+		t.Error("source still there")
+	}
+	_, body := do(t, srv, "GET", "/api/state", "", nil)
+	if !strings.Contains(body, `"sources":[]`) || !strings.Contains(body, `"apps":[]`) {
+		t.Errorf("an empty configuration should render, not crash: %s", body)
+	}
+}
+
+func TestStateShowsAnUnreachableSourcesWarning(t *testing.T) {
+	srv, _, fb := setup(t)
+	fb.status = runner.Status{Sources: []runner.SourceStatus{{ID: defSrc, Repo: "owner/default", Tag: "v1", Warning: "HTTP 404. Using the last good bundle (v1)"}}}
+	_, body := do(t, srv, "GET", "/api/state", "", nil)
+	if !strings.Contains(body, `"warning":"HTTP 404. Using the last good bundle (v1)"`) {
+		t.Errorf("%s", body)
 	}
 }

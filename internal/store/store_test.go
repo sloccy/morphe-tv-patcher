@@ -25,7 +25,7 @@ func TestDevicesPersistAndIDsAreUnique(t *testing.T) {
 	if _, err := s.AddDevice("Dup", "10.0.0.6"); err == nil {
 		t.Error("the same host twice should be refused")
 	}
-	_ = s.EnsureDefaultSource("o/default", false)
+	_ = s.SeedSources([]string{"o/default"}, false)
 	if err := s.SetApps(a.ID, []AppChoice{{"com.b", ""}, {"com.a", ""}, {"com.b", ""}}); err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestDevicesPersistAndIDsAreUnique(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := s2.Settings().Devices[0]
-	if got.Host != "10.0.0.6" || len(got.Apps) != 2 || got.Apps[0] != (AppChoice{"com.a", DefaultSourceID}) || got.Apps[1].Package != "com.b" {
+	if got.Host != "10.0.0.6" || len(got.Apps) != 2 || got.Apps[0] != (AppChoice{"com.a", "o-default"}) || got.Apps[1].Package != "com.b" {
 		t.Errorf("%+v", got)
 	}
 	if in, ok := s2.Install(a.ID, "com.a"); !ok || in.APKVersion != "1.0" {
@@ -130,42 +130,78 @@ func TestOverridesAreReadFromSettings(t *testing.T) {
 	}
 }
 
-func TestPatchSourcesLifecycle(t *testing.T) {
-	s, _ := Open(t.TempDir())
-	if err := s.EnsureDefaultSource("owner/default-patches", true); err != nil {
+func TestFirstRunSeedingIsOnceAndEverySourceIsRemovable(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := Open(dir)
+	if err := s.SeedSources([]string{"ajstrick81/morphe-androidtv-patches", "MorpheApp/morphe-patches"}, true); err != nil {
 		t.Fatal(err)
 	}
-	if got := s.Settings().Sources; len(got) != 1 || !got[0].Default || got[0].ID != DefaultSourceID || !got[0].Prerelease {
+	got := s.Settings()
+	if !got.SourcesSeeded || len(got.Sources) != 2 || got.Sources[0].ID != "ajstrick81-morphe-androidtv-patches" || !got.Sources[0].Prerelease {
 		t.Fatalf("%+v", got)
 	}
-	// the environment decides the default repository, and a restart picks up a change
-	_ = s.EnsureDefaultSource("owner/other", false)
-	if got := s.Settings().Sources; len(got) != 1 || got[0].Repo != "owner/other" || got[0].Prerelease {
-		t.Errorf("%+v", got)
+	// seeding again (a restart, or a different PATCHES_REPO) changes nothing
+	_ = s.SeedSources([]string{"someone/else"}, false)
+	if len(s.Settings().Sources) != 2 {
+		t.Error("seeding must happen only once")
 	}
+	// any source can be removed, including the first one; removing all is respected on restart
+	d, _ := s.AddDevice("TV", "10.0.0.6")
+	_ = s.SetApps(d.ID, []AppChoice{{"com.a", ""}, {"com.b", "morpheapp-morphe-patches"}})
+	if apps := s.Settings().Devices[0].Apps; apps[0].Source != "ajstrick81-morphe-androidtv-patches" {
+		t.Errorf("an empty source means the first one: %+v", apps)
+	}
+	n, err := s.RemoveSource("ajstrick81-morphe-androidtv-patches")
+	if err != nil || n != 1 {
+		t.Fatalf("removed %d %v", n, err)
+	}
+	if _, err := s.RemoveSource("morpheapp-morphe-patches"); err != nil {
+		t.Fatal(err)
+	}
+	s2, _ := Open(dir)
+	_ = s2.SeedSources([]string{"ajstrick81/morphe-androidtv-patches"}, false)
+	if got := s2.Settings(); len(got.Sources) != 0 || !got.SourcesSeeded {
+		t.Errorf("a removed repository must not come back after a restart: %+v", got)
+	}
+	if err := s2.SetApps(d.ID, []AppChoice{{"com.a", ""}}); err == nil {
+		t.Error("with no patch sources, choosing an app should explain that one is needed")
+	}
+	// and a repository can be added back by hand
+	if _, err := s2.AddSource("ajstrick81/morphe-androidtv-patches", false, false); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestSeedingRejectsBadRepos(t *testing.T) {
+	s, _ := Open(t.TempDir())
+	if err := s.SeedSources([]string{"ok/repo", "not a repo"}, false); err == nil {
+		t.Error("an invalid PATCHES_REPO entry should be reported")
+	}
+}
+
+func TestPatchSourcesLifecycle(t *testing.T) {
+	s, _ := Open(t.TempDir())
+	_ = s.SeedSources([]string{"owner/first"}, false)
 	m, err := s.AddSource("MorpheApp/morphe-patches", false, true)
-	if err != nil || m.ID != "morpheapp-morphe-patches" || !m.AllowPhone || m.Default {
+	if err != nil || m.ID != "morpheapp-morphe-patches" || !m.AllowPhone {
 		t.Fatalf("%+v %v", m, err)
 	}
 	if _, err := s.AddSource("morpheapp/MORPHE-PATCHES", false, false); err == nil {
 		t.Error("the same repository twice (any case) should be refused")
 	}
-	if _, err := s.AddSource("owner/other", false, false); err == nil {
-		t.Error("the default repository cannot be added again")
+	if _, err := s.AddSource("owner/first", false, false); err == nil {
+		t.Error("a seeded repository cannot be added again")
 	}
 	for _, bad := range []string{"", "noslash", "a/b/c", "../x/y", "a b/c", "-rf/x;y", "owner/", "/name", "a/..", "a/b c"} {
 		if _, err := s.AddSource(bad, false, false); err == nil {
 			t.Errorf("%q should be refused", bad)
 		}
 	}
-	if _, err := s.RemoveSource(DefaultSourceID); err == nil {
-		t.Error("the default source must not be removable")
-	}
 	if _, err := s.RemoveSource("nope"); err == nil {
 		t.Error("unknown source")
 	}
 	d, _ := s.AddDevice("TV", "10.0.0.6")
-	if err := s.SetApps(d.ID, []AppChoice{{"com.a", DefaultSourceID}, {"com.yt", m.ID}, {"com.yt", DefaultSourceID}}); err != nil {
+	if err := s.SetApps(d.ID, []AppChoice{{"com.a", "owner-first"}, {"com.yt", m.ID}, {"com.yt", "owner-first"}}); err != nil {
 		t.Fatal(err)
 	}
 	apps := s.Settings().Devices[0].Apps
@@ -187,13 +223,13 @@ func TestPatchSourcesLifecycle(t *testing.T) {
 func TestOlderPlainStringAppsStillLoad(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, "settings.json"),
-		[]byte(`{"devices":[{"id":"tv","name":"TV","host":"10.0.0.6","apps":["com.a",{"package":"com.b","source":"x"},{"package":"com.c"}]}]}`), 0o600)
+		[]byte(`{"sources":[{"id":"x","repo":"o/x"}],"devices":[{"id":"tv","name":"TV","host":"10.0.0.6","apps":["com.a",{"package":"com.b","source":"x"},{"package":"com.c"}]}]}`), 0o600)
 	s, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := s.Settings().Devices[0].Apps
-	want := []AppChoice{{"com.a", DefaultSourceID}, {"com.b", "x"}, {"com.c", DefaultSourceID}}
+	want := []AppChoice{{"com.a", ""}, {"com.b", "x"}, {"com.c", ""}} // an empty source means the first one
 	if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
 		t.Errorf("%+v", got)
 	}

@@ -231,9 +231,9 @@ jobs:
           docker run --rm --entrypoint apkeep "$IMG" --version
           docker run --rm --entrypoint apksigner "$IMG" --version
           docker run --rm --entrypoint adb "$IMG" version
-          # the real Morphe call the patcher makes, against the real patches
+          # the real Morphe call the patcher makes, against the official patches (no single maintainer to rely on)
           docker run --rm --entrypoint java "$IMG" -jar /opt/morphe/morphe.jar \
-            list-versions --patches https://github.com/ajstrick81/morphe-androidtv-patches -f com.netflix.ninja
+            list-versions --patches https://github.com/MorpheApp/morphe-patches -f com.google.android.youtube
 
       - name: Starts, serves the page and reports healthy
         run: |

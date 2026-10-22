@@ -78,6 +78,39 @@ func LatestRelease(ctx context.Context, hc *http.Client, repo, token string, pre
 	return nil, fmt.Errorf("no release with an .mpp asset in %s", repo)
 }
 
+const metaFile = "release.json"
+
+type releaseMeta struct {
+	Tag  string `json:"tag"`
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+}
+
+func writeMeta(dir string, rel *Release) {
+	b, err := json.Marshal(releaseMeta{Tag: rel.Tag, Name: rel.Name, Size: rel.Size})
+	if err == nil {
+		_ = os.WriteFile(filepath.Join(dir, metaFile), b, 0o600)
+	}
+}
+
+// Cached returns the last bundle downloaded into dir (its release and path), so a patch source
+// that has gone away or cannot be reached still works with the last good bundle.
+func Cached(dir string) (rel *Release, path string, ok bool) {
+	b, err := os.ReadFile(filepath.Join(dir, metaFile)) //nolint:gosec // our own cache directory
+	if err != nil {
+		return nil, "", false
+	}
+	var m releaseMeta
+	if json.Unmarshal(b, &m) != nil || m.Name == "" || m.Name != filepath.Base(m.Name) {
+		return nil, "", false
+	}
+	p := filepath.Join(dir, m.Name)
+	if st, err := os.Stat(p); err != nil || (m.Size > 0 && st.Size() != m.Size) {
+		return nil, "", false
+	}
+	return &Release{Tag: m.Tag, Name: m.Name, Size: m.Size}, p, true
+}
+
 // MaxBundleBytes caps a patch bundle download.
 const MaxBundleBytes = 100 << 20
 
@@ -92,6 +125,7 @@ func Download(ctx context.Context, hc *http.Client, rel *Release, cacheDir strin
 	}
 	dest := filepath.Join(cacheDir, rel.Name)
 	if st, err := os.Stat(dest); err == nil && st.Size() == rel.Size {
+		writeMeta(cacheDir, rel)
 		return dest, nil
 	}
 	if err := os.MkdirAll(cacheDir, 0o750); err != nil {
@@ -132,6 +166,7 @@ func Download(ctx context.Context, hc *http.Client, rel *Release, cacheDir strin
 	if err := os.Rename(tmp, dest); err != nil {
 		return "", err
 	}
+	writeMeta(cacheDir, rel)
 	old, _ := filepath.Glob(filepath.Join(cacheDir, "*.mpp"))
 	for _, o := range old {
 		if o != dest {

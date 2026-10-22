@@ -162,9 +162,10 @@ type appRow struct {
 
 type sourceRow struct {
 	store.Source
-	Tag   string `json:"tag"`
-	Error string `json:"error,omitempty"`
-	Apps  int    `json:"apps"`
+	Tag     string `json:"tag"`
+	Error   string `json:"error,omitempty"`
+	Warning string `json:"warning,omitempty"`
+	Apps    int    `json:"apps"`
 }
 
 // mergedApps lists each package once, with the sources that support it.
@@ -219,7 +220,7 @@ func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 		row := sourceRow{Source: src}
 		for _, ss := range st.Sources {
 			if ss.ID == src.ID {
-				row.Tag, row.Error = ss.Tag, ss.Error
+				row.Tag, row.Error, row.Warning = ss.Tag, ss.Error, ss.Warning
 			}
 		}
 		if l := lists[src.ID]; l != nil {
@@ -291,13 +292,12 @@ func (s *Server) setApps(w http.ResponseWriter, r *http.Request) {
 	lists := s.Backend.Lists()
 	for i := range in.Apps {
 		c := &in.Apps[i]
-		if c.Source == "" {
-			c.Source = store.DefaultSourceID
-		}
-		if _, ok := s.Store.Source(c.Source); !ok {
+		src, ok := s.Store.Source(c.Source) // an empty source means the first one
+		if !ok {
 			fail(w, http.StatusBadRequest, "unknown patch source: "+c.Source)
 			return
 		}
+		c.Source = src.ID
 		l := lists[c.Source]
 		if l == nil {
 			fail(w, http.StatusServiceUnavailable, "that patch source has not loaded yet; try again in a moment")
@@ -358,11 +358,7 @@ func (s *Server) addSource(w http.ResponseWriter, r *http.Request) {
 func (s *Server) removeSource(w http.ResponseWriter, r *http.Request) {
 	removed, err := s.Store.RemoveSource(r.PathValue("id"))
 	if err != nil {
-		code := http.StatusNotFound
-		if strings.Contains(err.Error(), "default") {
-			code = http.StatusBadRequest
-		}
-		fail(w, code, err.Error())
+		fail(w, http.StatusNotFound, err.Error())
 		return
 	}
 	slog.Warn("patch source removed", "id", r.PathValue("id"), "apps_dropped", removed)

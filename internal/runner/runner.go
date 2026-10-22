@@ -41,9 +41,12 @@ type ADB interface {
 // Deps are the outside world; tests replace them. Patch sources are passed in so each
 // repository gets its own release, bundle and app list.
 type Deps struct {
-	Latest    func(ctx context.Context, src store.Source) (*patches.Release, error)
-	Download  func(ctx context.Context, src store.Source, rel *patches.Release) (string, error)
-	Apps      func(ctx context.Context, src store.Source, rel *patches.Release, mpp string) (*patches.List, error)
+	Latest   func(ctx context.Context, src store.Source) (*patches.Release, error)
+	Download func(ctx context.Context, src store.Source, rel *patches.Release) (string, error)
+	Apps     func(ctx context.Context, src store.Source, rel *patches.Release, mpp string) (*patches.List, error)
+	// Cached returns the last bundle downloaded for a source, used when the repository cannot be
+	// reached (or is gone) so existing setups keep working.
+	Cached    func(src store.Source) (*patches.Release, string, bool)
 	Fetch     func(ctx context.Context, a sources.App, sdk int) (*sources.Fetched, error)
 	Patch     func(ctx context.Context, o morphe.Options) error
 	PackageOf func(path string) (string, error)
@@ -75,20 +78,20 @@ type Result struct {
 
 // SourceStatus is the state of one patch source's latest release.
 type SourceStatus struct {
-	ID    string `json:"id"`
-	Repo  string `json:"repo"`
-	Tag   string `json:"tag"`
-	Error string `json:"error,omitempty"`
+	ID      string `json:"id"`
+	Repo    string `json:"repo"`
+	Tag     string `json:"tag"`
+	Error   string `json:"error,omitempty"`   // the source cannot be used at all
+	Warning string `json:"warning,omitempty"` // unreachable, running on its last good bundle
 }
 
 // Status is what the UI shows about runs.
 type Status struct {
-	Running        bool           `json:"running"`
-	StartedAt      time.Time      `json:"started_at"`
-	FinishedAt     time.Time      `json:"finished_at"`
-	PatchesVersion string         `json:"patches_version"` // the default source's release
-	Sources        []SourceStatus `json:"sources"`
-	Results        []Result       `json:"results"`
+	Running    bool           `json:"running"`
+	StartedAt  time.Time      `json:"started_at"`
+	FinishedAt time.Time      `json:"finished_at"`
+	Sources    []SourceStatus `json:"sources"`
+	Results    []Result       `json:"results"`
 }
 
 // Runner holds the long-lived pieces.
@@ -140,6 +143,7 @@ type loaded struct {
 	mpp  string
 	list *patches.List
 	err  error
+	warn string // set when the repository was unreachable and the last good bundle is used
 }
 
 // loadSource resolves a source's latest release, downloads the bundle and reads its apps. The
@@ -154,6 +158,7 @@ func (r *Runner) loadSource(ctx context.Context, src store.Source) *loaded {
 		if ld.err != nil {
 			st.Error = ld.err.Error()
 		}
+		st.Warning = ld.warn
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		replaced := false
@@ -165,18 +170,26 @@ func (r *Runner) loadSource(ctx context.Context, src store.Source) *loaded {
 		if !replaced {
 			r.status.Sources = append(r.status.Sources, st)
 		}
-		if src.Default && ld.rel != nil {
-			r.status.PatchesVersion = ld.rel.Tag
-		}
 	}
 	defer setStatus()
-	if ld.rel, ld.err = r.Deps.Latest(ctx, src); ld.err != nil {
-		ld.err = fmt.Errorf("could not look up the latest release: %w", ld.err)
-		return ld
+	var fetchErr error
+	if ld.rel, fetchErr = r.Deps.Latest(ctx, src); fetchErr != nil {
+		fetchErr = fmt.Errorf("could not look up the latest release: %w", fetchErr)
+	} else if ld.mpp, fetchErr = r.Deps.Download(ctx, src, ld.rel); fetchErr != nil {
+		fetchErr = fmt.Errorf("could not download the patches: %w", fetchErr)
 	}
-	if ld.mpp, ld.err = r.Deps.Download(ctx, src, ld.rel); ld.err != nil {
-		ld.err = fmt.Errorf("could not download the patches: %w", ld.err)
-		return ld
+	if fetchErr != nil {
+		// the repository may be down, renamed or gone: keep working with the last good bundle
+		cached, path, ok := (*patches.Release)(nil), "", false
+		if r.Deps.Cached != nil {
+			cached, path, ok = r.Deps.Cached(src)
+		}
+		if !ok {
+			ld.rel, ld.err = nil, fetchErr
+			return ld
+		}
+		ld.rel, ld.mpp = cached, path
+		ld.warn = fmt.Sprintf("%v. Using the last good bundle (%s)", fetchErr, cached.Tag)
 	}
 	key := src.ID + "@" + ld.rel.Tag + "@" + src.Repo
 	r.mu.Lock()
@@ -301,10 +314,7 @@ func (r *Runner) pass(ctx context.Context, o Options) []Result {
 	var conns []conn
 	settings := r.Store.Settings()
 	if o.NoDevice {
-		src := o.Source
-		if src == "" {
-			src = store.DefaultSourceID
-		}
+		src := o.Source // empty means the first patch source
 		var choices []store.AppChoice
 		if len(o.Packages) > 0 {
 			for _, p := range o.Packages {
@@ -346,7 +356,11 @@ func (r *Runner) pass(ctx context.Context, o Options) []Result {
 	for i := range conns {
 		for _, c := range conns[i].dev.Apps {
 			if o.Package == "" || o.Package == c.Package {
-				k := appKey{c.Package, c.Source}
+				id := c.Source
+				if src, ok := r.Store.Source(id); ok {
+					id = src.ID // an empty source means the first one
+				}
+				k := appKey{c.Package, id}
 				byApp[k] = append(byApp[k], &conns[i])
 			}
 		}
@@ -376,6 +390,7 @@ func (r *Runner) pass(ctx context.Context, o Options) []Result {
 		srcs[k.src] = r.loadSource(ctx, src)
 	}
 
+	warned := map[string]bool{}
 	for _, k := range keys {
 		ld := srcs[k.src]
 		if ld.err != nil {
@@ -386,7 +401,15 @@ func (r *Runner) pass(ctx context.Context, o Options) []Result {
 			}
 			continue
 		}
-		r.noteRecovered("source:" + k.src)
+		if ld.warn != "" {
+			// running on the cached bundle: say so (once the failure repeats), then carry on
+			if r.noteFailure("source:"+k.src, errors.New(ld.warn), false) && !warned[k.src] {
+				warned[k.src] = true
+				out = append(out, Result{OK: false, Alert: true, Message: fmt.Sprintf("patch source %s is unreachable and its apps are running on a cached bundle: %s. If the repository is gone for good, remove it on the page.", ld.src.Repo, ld.warn)})
+			}
+		} else {
+			r.noteRecovered("source:" + k.src)
+		}
 		out = append(out, r.app(ctx, o, ld, k.pkg, byApp[k])...)
 	}
 	if len(out) == 0 {
@@ -443,7 +466,7 @@ func (r *Runner) app(ctx context.Context, o Options, ld *loaded, pkg string, cs 
 	for _, c := range cs {
 		in, has := r.Store.Install(c.dev.ID, pkg)
 		if !o.Force && has && in.APKVersion == newest && in.PatchesVersion == rel.Tag && !o.NoDevice &&
-			(in.PatchSource == src.ID || (in.PatchSource == "" && src.ID == store.DefaultSourceID)) {
+			in.PatchSource == src.ID {
 			ip := in.InstalledPackage
 			if ip == "" {
 				ip = pkg

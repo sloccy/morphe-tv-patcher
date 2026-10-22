@@ -51,9 +51,19 @@ them: uninstall them once (the page tells you), or set `allow_uninstall` for tha
 
 ## More patch repositories
 
-The default repository is `PATCHES_REPO`. The **Patch sources** card on the page adds any other GitHub
+No repository is built in as a requirement. On the very first run the **Patch sources** list is seeded
+from `PATCHES_REPO` (default `ajstrick81/morphe-androidtv-patches`, the Android TV patches; a comma
+separated list is fine). After that the list lives in `settings.json`, every source can be removed
+or added from the page, and a removed one stays removed across restarts. The page adds any GitHub
 repository that publishes Morphe bundles (`.mpp` release assets), for example `MorpheApp/morphe-patches`
-(YouTube, YouTube Music, Reddit). Its apps then appear on every device card. If two repositories
+(YouTube, YouTube Music, Reddit). Its apps then appear on every device card.
+
+**If a repository disappears** (renamed, deleted, down), nothing breaks: each source's last good bundle
+is kept in `/data/patches/<source>/` and used while the repository is unreachable. The page shows a
+warning on that source, you get one Telegram message after the failure repeats, and you can remove it.
+Apps already on the TVs keep working; only updates from that repository stop. Because `/data` is the
+small state volume that is backed up, `settings.json` (your repositories, devices and apps), the signing
+keystore and those last good bundles all come back from a restore. If two repositories
 support the same app, a dropdown on that app picks which repository's patches a device uses (one per
 app per device; bundles are never combined). Apps from a repository that is marked "allow phone apps"
 skip the Android TV check (they may install but not show in the TV launcher); everything else keeps it.
@@ -106,7 +116,7 @@ wrong signature or a phone build alerts at once; a message follows when it recov
 | `ALLOWED_HOST_SUFFIXES` | | extra `Host` names the page answers to |
 | `FLARESOLVERR_URL` | | e.g. `http://127.0.0.1:8191` |
 | `APKPURE_ACKNOWLEDGE_DANGERS` | `false` | allow APKPure (signer-checked) |
-| `PATCHES_REPO` / `PATCHES_PRERELEASE` | `ajstrick81/morphe-androidtv-patches` / `false` | the default patch source |
+| `PATCHES_REPO` / `PATCHES_PRERELEASE` | `ajstrick81/morphe-androidtv-patches` / `false` | seeds the patch sources on the first run only |
 | `PATCH_SOURCES_ALLOWED_OWNERS` | | limit repositories added from the page to these GitHub owners |
 | `BYTECODE_MODE` | `STRIP_SAFE` | Morphe `--bytecode-mode` |
 | `FETCH_FAILURES_BEFORE_ALERT` | `3` | |

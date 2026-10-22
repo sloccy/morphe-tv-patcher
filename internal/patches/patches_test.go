@@ -116,3 +116,33 @@ func TestLatestReleaseAndDownload(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+func TestCachedRemembersTheLastGoodRelease(t *testing.T) {
+	dir := t.TempDir()
+	if _, _, ok := Cached(dir); ok {
+		t.Fatal("nothing cached yet")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("abc")) }))
+	defer srv.Close()
+	rel := &Release{Tag: "v7", Name: "patches-7.mpp", Size: 3, AssetURL: srv.URL}
+	if _, err := Download(context.Background(), srv.Client(), rel, dir); err != nil {
+		t.Fatal(err)
+	}
+	got, path, ok := Cached(dir)
+	if !ok || got.Tag != "v7" || filepath.Base(path) != "patches-7.mpp" {
+		t.Fatalf("%+v %q %v", got, path, ok)
+	}
+	// the upstream repository vanishes: the cached bundle is still there
+	if b, _ := os.ReadFile(path); string(b) != "abc" { //nolint:gosec // test temp dir
+		t.Error("cached bundle content")
+	}
+	// a damaged or truncated cache is not trusted
+	_ = os.WriteFile(path, []byte("ab"), 0o600)
+	if _, _, ok := Cached(dir); ok {
+		t.Error("a truncated bundle must not be used")
+	}
+	_ = os.WriteFile(filepath.Join(dir, "release.json"), []byte(`{"tag":"v","name":"../../etc/passwd"}`), 0o600)
+	if _, _, ok := Cached(dir); ok {
+		t.Error("a metadata file naming a path outside the folder must be refused")
+	}
+}

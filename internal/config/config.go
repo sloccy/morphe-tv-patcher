@@ -12,9 +12,11 @@ import (
 
 // Config is everything set by the environment.
 type Config struct {
-	DataDir      string
-	MorpheJar    string
-	PatchesRepo  string
+	DataDir   string
+	MorpheJar string
+	// PatchesRepos seeds the patch sources on the very first run only; after that the list lives in
+	// settings.json (edited from the page) and every source can be removed.
+	PatchesRepos []string
 	Prerelease   bool
 	BytecodeMode string
 	Interval     time.Duration
@@ -44,9 +46,13 @@ func (c Config) Input() string    { return filepath.Join(c.DataDir, "work", "inp
 func (c Config) Output() string   { return filepath.Join(c.DataDir, "work", "output") }
 func (c Config) Keystore() string { return filepath.Join(c.DataDir, "keystore", "morphe.keystore") }
 
+// PatchBundles holds each patch source's latest bundle. It lives in the small state volume (not the
+// cache) so the last good bundles are in the weekly backup and survive a repository disappearing.
+func (c Config) PatchBundles() string { return filepath.Join(c.DataDir, "patches") }
+
 // Ensure creates the working directories.
 func (c Config) Ensure() error {
-	for _, d := range []string{c.Cache(), c.Input(), c.Output(), filepath.Dir(c.Keystore())} {
+	for _, d := range []string{c.Cache(), c.Input(), c.Output(), filepath.Dir(c.Keystore()), c.PatchBundles()} {
 		if err := os.MkdirAll(d, 0o750); err != nil {
 			return err
 		}
@@ -69,7 +75,7 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	c := Config{
 		DataDir:                   def("DATA_DIR", "/data"),
 		MorpheJar:                 def("MORPHE_JAR", "/opt/morphe/morphe.jar"),
-		PatchesRepo:               def("PATCHES_REPO", "ajstrick81/morphe-androidtv-patches"),
+		PatchesRepos:              splitRepos(def("PATCHES_REPO", "ajstrick81/morphe-androidtv-patches")),
 		Prerelease:                flag("PATCHES_PRERELEASE"),
 		BytecodeMode:              def("BYTECODE_MODE", "STRIP_SAFE"),
 		FlareSolverrURL:           strings.TrimRight(def("FLARESOLVERR_URL", ""), "/"),
@@ -99,6 +105,17 @@ func splitList(s string) []string {
 	var out []string
 	for p := range strings.SplitSeq(s, ",") {
 		if p = strings.ToLower(strings.TrimSpace(p)); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// splitRepos reads a comma or space separated list of owner/name repositories.
+func splitRepos(s string) []string {
+	var out []string
+	for _, p := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' || r == '\n' }) {
+		if p = strings.TrimSpace(p); p != "" {
 			out = append(out, p)
 		}
 	}

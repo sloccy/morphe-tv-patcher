@@ -126,7 +126,7 @@ function when(iso) {
 }
 
 const sourceById = id => (state.sources || []).find(s => s.id === id);
-const defaultSource = () => (state.sources || []).find(s => s.default) || (state.sources || [])[0];
+const defaultSource = () => (state.sources || [])[0]; // the first source is preferred when an app is in several
 
 // the device's current choice as a Map(package -> source id)
 function selection(dev) {
@@ -211,17 +211,17 @@ function sourcesCard() {
   const rows = (state.sources || []).map(src => h("div", { class: "src" },
     h("span", { class: "grow" },
       h("strong", {}, src.repo),
-      src.default ? h("span", { class: "chip" }, "default") : null,
       src.prerelease ? h("span", { class: "chip" }, "pre-releases") : null,
       src.allow_phone ? h("span", { class: "chip warn" }, "allows phone apps") : null,
-      h("span", { class: "meta" }, src.error ? "problem: " + src.error : ((src.tag || "not loaded yet") + " · " + src.apps + " apps"))),
-    src.default ? null : h("button", { class: "danger", onclick: () => doRemoveSource(src) }, "Remove")));
+      h("span", { class: "meta" }, src.error ? "problem: " + src.error : ((src.tag || "not loaded yet") + " · " + src.apps + " apps")),
+      src.warning ? h("span", { class: "meta msg bad" }, "unreachable, using its last good bundle. If it is gone for good, remove it. (" + src.warning + ")") : null),
+    h("button", { class: "danger", onclick: () => doRemoveSource(src) }, "Remove")));
 
   const owners = (state.allowed_owners || []);
   return [
     h("strong", {}, "Patch sources"),
     h("div", { class: "sub" }, "GitHub repositories that publish Morphe patch bundles. Each one adds the apps it can patch."),
-    h("div", { style: "margin-top:8px" }, rows),
+    h("div", { style: "margin-top:8px" }, rows.length ? rows : h("div", { class: "sub" }, "No patch repositories yet. Add one below to see which apps you can patch.")),
     h("div", { class: "row", style: "margin-top:10px" },
       h("input", { type: "text", id: "newrepo", placeholder: "owner/repository", maxlength: 201, style: "min-width:220px" }),
       h("label", { class: "sub" }, h("input", { type: "checkbox", id: "newpre" }), " include pre-releases"),

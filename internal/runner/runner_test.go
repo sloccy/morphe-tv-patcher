@@ -87,12 +87,16 @@ type rig struct {
 	tags        map[string]string
 	sourceErr   map[string]error
 	sourceLists map[string]*patches.List
+	cached      map[string]*patches.Release // last good bundle per source (what Deps.Cached returns)
 	appsCalls   []string
 	notes       []string
 	now         time.Time
 }
 
-const tag = "v1.42.2"
+const (
+	tag    = "v1.42.2"
+	defSrc = "o-default" // the repository seeded on the first run
+)
 
 func newRig(t *testing.T) *rig {
 	t.Helper()
@@ -103,9 +107,9 @@ func newRig(t *testing.T) *rig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = st.EnsureDefaultSource("o/default", false)
+	_ = st.SeedSources([]string{"o/default"}, false)
 	rg := &rig{st: st, adb: newADB(), now: time.Unix(1_700_000_000, 0),
-		tags: map[string]string{}, sourceErr: map[string]error{}, sourceLists: map[string]*patches.List{}}
+		tags: map[string]string{}, sourceErr: map[string]error{}, sourceLists: map[string]*patches.List{}, cached: map[string]*patches.Release{}}
 	data, _ := os.ReadFile("../patches/testdata/patches-list.json")
 	list, err := patches.ParseList(data)
 	if err != nil {
@@ -132,6 +136,12 @@ func newRig(t *testing.T) *rig {
 		Patch: func(ctx context.Context, o morphe.Options) error {
 			rg.patches++
 			return os.WriteFile(o.Out, []byte("apk"), 0o600)
+		},
+		Cached: func(src store.Source) (*patches.Release, string, bool) {
+			if rel := rg.cached[src.ID]; rel != nil {
+				return rel, "cached.mpp", true
+			}
+			return nil, "", false
 		},
 		PackageOf: func(path string) (string, error) {
 			if rg.pkgName != nil {
@@ -164,7 +174,7 @@ func (rg *rig) device(t *testing.T, name, host string, apps ...string) store.Dev
 	}
 	choices := make([]store.AppChoice, 0, len(apps))
 	for _, a := range apps {
-		choices = append(choices, store.AppChoice{Package: a, Source: store.DefaultSourceID})
+		choices = append(choices, store.AppChoice{Package: a, Source: defSrc})
 	}
 	_ = rg.st.SetApps(d.ID, choices)
 	return d
@@ -241,7 +251,7 @@ func TestUpToDateSkipsAndForceReinstalls(t *testing.T) {
 	}
 	// a newer patches release triggers a reinstall
 	rg.adb.installed[d.Host+":40000/"+prime] = "x"
-	rg.tags[store.DefaultSourceID] = "v9"
+	rg.tags[defSrc] = "v9"
 	rg.adb.installs = nil
 	rg.r.Run(context.Background(), Options{})
 	if len(rg.adb.installs) != 1 {
@@ -328,7 +338,7 @@ func TestSignatureConflictGuidanceAndAllowUninstall(t *testing.T) {
 	// with allow_uninstall it removes the old copy and retries
 	dir := filepath.Dir(rg.r.Cfg.Cache())
 	_ = dir
-	settings := `{"sources":[{"id":"default","repo":"o/default","default":true}],"devices":[{"id":"` + d.ID + `","name":"TV","host":"10.0.0.6","apps":["` + prime + `"]}],"overrides":{"` + prime + `":{"allow_uninstall":true}}}`
+	settings := `{"sources":[{"id":"o-default","repo":"o/default"}],"devices":[{"id":"` + d.ID + `","name":"TV","host":"10.0.0.6","apps":["` + prime + `"]}],"overrides":{"` + prime + `":{"allow_uninstall":true}}}`
 	_ = os.WriteFile(filepath.Join(rg.r.Cfg.DataDir, "state", "settings.json"), []byte(settings), 0o600)
 	st, _ := store.Open(filepath.Join(rg.r.Cfg.DataDir, "state"))
 	rg.r.Store = st
@@ -342,7 +352,7 @@ func TestSignatureConflictGuidanceAndAllowUninstall(t *testing.T) {
 func TestStockNetflixIsNeverUninstalled(t *testing.T) {
 	rg := newRig(t)
 	d := rg.device(t, "TV", "10.0.0.6", netflix)
-	settings := `{"sources":[{"id":"default","repo":"o/default","default":true}],"devices":[{"id":"` + d.ID + `","name":"TV","host":"10.0.0.6","apps":["` + netflix + `"]}],"overrides":{"` + netflix + `":{"allow_uninstall":true}}}`
+	settings := `{"sources":[{"id":"o-default","repo":"o/default"}],"devices":[{"id":"` + d.ID + `","name":"TV","host":"10.0.0.6","apps":["` + netflix + `"]}],"overrides":{"` + netflix + `":{"allow_uninstall":true}}}`
 	_ = os.WriteFile(filepath.Join(rg.r.Cfg.DataDir, "state", "settings.json"), []byte(settings), 0o600)
 	rg.r.Store, _ = store.Open(filepath.Join(rg.r.Cfg.DataDir, "state"))
 	rg.pkgName = func(string) string { return "com.netflix.ninja" } // pretend the clone patch did not rename it
@@ -446,7 +456,7 @@ func TestLoopRunsOnStartThenOnTriggerAndStops(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("loop did not stop")
 	}
-	if s := rg.r.Status(); s.Running || s.PatchesVersion != tag {
+	if s := rg.r.Status(); s.Running || len(s.Sources) == 0 || s.Sources[0].Tag != tag {
 		t.Errorf("%+v", s)
 	}
 }
@@ -571,7 +581,7 @@ func (rg *rig) deviceWith(t *testing.T, name, host string, choices ...store.AppC
 func TestAppFromASecondPatchSourceUsesThatSourcesBundleAndPhonePolicy(t *testing.T) {
 	rg := newRig(t)
 	src := rg.secondSource(t, true)
-	d := rg.deviceWith(t, "TV", "10.0.0.6", store.AppChoice{Package: yt, Source: src.ID}, store.AppChoice{Package: prime, Source: store.DefaultSourceID})
+	d := rg.deviceWith(t, "TV", "10.0.0.6", store.AppChoice{Package: yt, Source: src.ID}, store.AppChoice{Package: prime, Source: defSrc})
 	var gotApps []sources.App
 	orig := rg.r.Deps.Fetch
 	rg.r.Deps.Fetch = func(ctx context.Context, a sources.App, sdk int) (*sources.Fetched, error) {
@@ -598,11 +608,11 @@ func TestAppFromASecondPatchSourceUsesThatSourcesBundleAndPhonePolicy(t *testing
 	if in.PatchSource != src.ID || in.PatchesVersion != "v1.48.0" || in.APKVersion != "20.2.0" {
 		t.Errorf("install record %+v", in)
 	}
-	if got := rg.r.Lists(); len(got) != 2 || got[src.ID] == nil || got[store.DefaultSourceID] == nil {
+	if got := rg.r.Lists(); len(got) != 2 || got[src.ID] == nil || got[defSrc] == nil {
 		t.Errorf("lists %v", got)
 	}
 	st := rg.r.Status()
-	if len(st.Sources) != 2 || st.PatchesVersion != tag {
+	if len(st.Sources) != 2 || st.Sources[0].Tag != tag || st.Sources[1].Tag != "v1.48.0" {
 		t.Errorf("status %+v", st)
 	}
 }
@@ -610,7 +620,7 @@ func TestAppFromASecondPatchSourceUsesThatSourcesBundleAndPhonePolicy(t *testing
 func TestSameAppFromTwoSourcesOnTwoDevicesIsPatchedSeparately(t *testing.T) {
 	rg := newRig(t)
 	src := rg.secondSource(t, false)
-	rg.deviceWith(t, "A", "10.0.0.1", store.AppChoice{Package: prime, Source: store.DefaultSourceID})
+	rg.deviceWith(t, "A", "10.0.0.1", store.AppChoice{Package: prime, Source: defSrc})
 	rg.deviceWith(t, "B", "10.0.0.2", store.AppChoice{Package: prime, Source: src.ID})
 	rg.r.Run(context.Background(), Options{})
 	if rg.fetches != 2 || rg.patches != 2 || len(rg.adb.installs) != 2 || rg.adb.installs[0] == rg.adb.installs[1] {
@@ -621,7 +631,7 @@ func TestSameAppFromTwoSourcesOnTwoDevicesIsPatchedSeparately(t *testing.T) {
 func TestSwitchingAnAppsPatchSourceReinstallsIt(t *testing.T) {
 	rg := newRig(t)
 	src := rg.secondSource(t, false)
-	d := rg.deviceWith(t, "TV", "10.0.0.6", store.AppChoice{Package: prime, Source: store.DefaultSourceID})
+	d := rg.deviceWith(t, "TV", "10.0.0.6", store.AppChoice{Package: prime, Source: defSrc})
 	rg.r.Run(context.Background(), Options{})
 	rg.adb.installed[d.Host+":40000/"+prime] = "6.23.23+v15.5.0.70-armv7a"
 	rg.adb.installs = nil
@@ -641,7 +651,7 @@ func TestUnreachablePatchSourceDoesNotStopTheOthers(t *testing.T) {
 	rg := newRig(t)
 	src := rg.secondSource(t, false)
 	rg.sourceErr[src.ID] = errors.New("HTTP 404")
-	rg.deviceWith(t, "TV", "10.0.0.6", store.AppChoice{Package: yt, Source: src.ID}, store.AppChoice{Package: prime, Source: store.DefaultSourceID})
+	rg.deviceWith(t, "TV", "10.0.0.6", store.AppChoice{Package: yt, Source: src.ID}, store.AppChoice{Package: prime, Source: defSrc})
 	res := rg.r.Run(context.Background(), Options{})
 	var bad, good bool
 	for _, x := range res {
@@ -674,7 +684,7 @@ func TestRemovedPatchSourceIsReportedNotCrashed(t *testing.T) {
 	src := rg.secondSource(t, false)
 	d := rg.deviceWith(t, "TV", "10.0.0.6", store.AppChoice{Package: yt, Source: src.ID})
 	// simulate settings.json edited by hand so the choice points at a source that no longer exists
-	settings := `{"sources":[{"id":"default","repo":"o/default","default":true}],"devices":[{"id":"` + d.ID + `","name":"TV","host":"10.0.0.6","apps":[{"package":"` + yt + `","source":"gone"}]}]}`
+	settings := `{"sources":[{"id":"o-default","repo":"o/default"}],"devices":[{"id":"` + d.ID + `","name":"TV","host":"10.0.0.6","apps":[{"package":"` + yt + `","source":"gone"}]}]}`
 	_ = os.WriteFile(filepath.Join(rg.r.Cfg.DataDir, "state", "settings.json"), []byte(settings), 0o600)
 	rg.r.Store, _ = store.Open(filepath.Join(rg.r.Cfg.DataDir, "state"))
 	res := rg.r.Run(context.Background(), Options{})
@@ -691,7 +701,7 @@ func TestRefreshListsReadsEachReleaseOnce(t *testing.T) {
 	if len(rg.appsCalls) != 2 {
 		t.Errorf("each source's release is parsed once, got %v", rg.appsCalls)
 	}
-	rg.tags[store.DefaultSourceID] = "v2"
+	rg.tags[defSrc] = "v2"
 	rg.r.RefreshLists(context.Background())
 	if len(rg.appsCalls) != 3 {
 		t.Errorf("a new release is parsed again: %v", rg.appsCalls)
@@ -723,5 +733,107 @@ func TestNoDeviceRunsUseTheChosenSource(t *testing.T) {
 	res := rg.r.Run(context.Background(), Options{NoDevice: true, Packages: []string{yt}, Source: src.ID})
 	if len(res) != 1 || !res[0].OK || !strings.Contains(res[0].Message, "dry run") {
 		t.Errorf("%+v", res)
+	}
+}
+
+func TestVanishedRepositoryKeepsWorkingOnItsLastGoodBundle(t *testing.T) {
+	rg := newRig(t)
+	d := rg.device(t, "TV", "10.0.0.6", prime)
+	rg.cached[defSrc] = &patches.Release{Tag: "v1.42.2", Name: "patches-1.42.2.mpp"}
+	rg.sourceErr[defSrc] = errors.New("HTTP 404: repository deleted")
+
+	res := rg.r.Run(context.Background(), Options{})
+	var installed bool
+	for _, x := range res {
+		installed = installed || (x.OK && x.Changed && x.Package == prime)
+	}
+	if !installed {
+		t.Fatalf("with the repository gone, the cached bundle must still be used: %+v", res)
+	}
+	if in, _ := rg.st.Install(d.ID, prime); in.PatchesVersion != "v1.42.2" {
+		t.Errorf("%+v", in)
+	}
+	st := rg.r.Status()
+	if len(st.Sources) != 1 || st.Sources[0].Warning == "" || st.Sources[0].Error != "" || st.Sources[0].Tag != "v1.42.2" {
+		t.Errorf("the page should show a warning, not an error: %+v", st.Sources)
+	}
+	// quiet at first; after repeated cycles one message says the repository is gone
+	alerts := 0
+	for range 4 {
+		rg.now = rg.now.Add(6 * time.Hour)
+		for _, x := range rg.r.Run(context.Background(), Options{}) {
+			if x.Alert && !x.OK {
+				alerts++
+				if !strings.Contains(x.Message, "remove it on the page") {
+					t.Errorf("message should say what to do: %q", x.Message)
+				}
+			}
+		}
+	}
+	if alerts != 1 {
+		t.Errorf("one alert after the failure repeats, got %d", alerts)
+	}
+	// it comes back: the warning clears
+	delete(rg.sourceErr, defSrc)
+	rg.r.Run(context.Background(), Options{})
+	if st := rg.r.Status(); st.Sources[0].Warning != "" {
+		t.Errorf("warning should clear: %+v", st.Sources)
+	}
+}
+
+func TestNoCachedBundleAndNoRepositoryIsAnErrorNotACrash(t *testing.T) {
+	rg := newRig(t)
+	rg.device(t, "TV", "10.0.0.6", prime)
+	rg.sourceErr[defSrc] = errors.New("HTTP 404")
+	res := rg.r.Run(context.Background(), Options{})
+	if res[0].OK || !strings.Contains(res[0].Message, "unavailable") {
+		t.Errorf("%+v", res)
+	}
+	if st := rg.r.Status(); st.Sources[0].Error == "" {
+		t.Errorf("%+v", st.Sources)
+	}
+}
+
+func TestRemovingTheFirstRepositoryLeavesTheAppRunningForOthers(t *testing.T) {
+	rg := newRig(t)
+	src := rg.secondSource(t, false)
+	rg.deviceWith(t, "TV", "10.0.0.6", store.AppChoice{Package: prime, Source: defSrc}, store.AppChoice{Package: yt, Source: src.ID})
+	if _, err := rg.st.RemoveSource(defSrc); err != nil {
+		t.Fatal(err)
+	}
+	res := rg.r.Run(context.Background(), Options{})
+	for _, x := range res {
+		if !x.OK || x.Package == prime {
+			t.Fatalf("only the other repository's app should run: %+v", res)
+		}
+	}
+	if len(rg.adb.installs) != 1 || !strings.Contains(rg.adb.installs[0], yt) {
+		t.Errorf("%v", rg.adb.installs)
+	}
+}
+
+func TestAppsWithNoSourceUseTheFirstOne(t *testing.T) {
+	rg := newRig(t)
+	d := rg.device(t, "TV", "10.0.0.6", prime)
+	settings := `{"sources_seeded":true,"sources":[{"id":"o-default","repo":"o/default"}],"devices":[{"id":"` + d.ID + `","name":"TV","host":"10.0.0.6","apps":["` + prime + `"]}]}`
+	_ = os.WriteFile(filepath.Join(rg.r.Cfg.DataDir, "state", "settings.json"), []byte(settings), 0o600)
+	rg.r.Store, _ = store.Open(filepath.Join(rg.r.Cfg.DataDir, "state"))
+	rg.r.Run(context.Background(), Options{})
+	if in, _ := rg.r.Store.Install(d.ID, prime); in.PatchSource != defSrc {
+		t.Errorf("a plain package name uses the first source: %+v", in)
+	}
+}
+
+func TestNoPatchSourcesAtAllIsHandled(t *testing.T) {
+	rg := newRig(t)
+	rg.device(t, "TV", "10.0.0.6")
+	_, _ = rg.st.RemoveSource(defSrc)
+	res := rg.r.Run(context.Background(), Options{})
+	if len(res) != 1 || !res[0].OK || !strings.Contains(res[0].Message, "nothing to do") {
+		t.Errorf("%+v", res)
+	}
+	rg.r.RefreshLists(context.Background()) // must not panic with no sources
+	if len(rg.r.Lists()) != 1 {             // the list loaded earlier is not invented or lost
+		t.Logf("lists: %v", rg.r.Lists())
 	}
 }

@@ -17,9 +17,6 @@ import (
 	"sync"
 )
 
-// DefaultSourceID is the patch source seeded from PATCHES_REPO; it cannot be removed.
-const DefaultSourceID = "default"
-
 // Source is a GitHub repository that publishes Morphe patch bundles (.mpp release assets).
 type Source struct {
 	ID         string `json:"id"`
@@ -28,7 +25,6 @@ type Source struct {
 	// AllowPhone accepts phone builds that have no Android TV launcher (they may install but
 	// not show in the TV launcher). Off unless the repository patches phone apps.
 	AllowPhone bool `json:"allow_phone,omitempty"`
-	Default    bool `json:"default,omitempty"`
 }
 
 // AppChoice is one app on a device and which patch source supplies its patches.
@@ -37,20 +33,17 @@ type AppChoice struct {
 	Source  string `json:"source"`
 }
 
-// UnmarshalJSON also accepts the older plain package-name string (meaning the default source).
+// UnmarshalJSON also accepts a plain package-name string (the first patch source is used).
 func (a *AppChoice) UnmarshalJSON(b []byte) error {
 	var s string
 	if json.Unmarshal(b, &s) == nil {
-		*a = AppChoice{Package: s, Source: DefaultSourceID}
+		*a = AppChoice{Package: s}
 		return nil
 	}
 	type plain AppChoice
 	var p plain
 	if err := json.Unmarshal(b, &p); err != nil {
 		return err
-	}
-	if p.Source == "" {
-		p.Source = DefaultSourceID
 	}
 	*a = AppChoice(p)
 	return nil
@@ -77,9 +70,12 @@ type Override struct {
 
 // Settings is settings.json.
 type Settings struct {
-	Sources   []Source            `json:"sources,omitempty"`
-	Devices   []Device            `json:"devices"`
-	Overrides map[string]Override `json:"overrides,omitempty"`
+	// SourcesSeeded is set once the first-run patch repositories have been added, so removing
+	// every source later is respected (they are not added again on the next start).
+	SourcesSeeded bool                `json:"sources_seeded,omitempty"`
+	Sources       []Source            `json:"sources"`
+	Devices       []Device            `json:"devices"`
+	Overrides     map[string]Override `json:"overrides,omitempty"`
 }
 
 // AppState is what we remember about an app across all devices.
@@ -187,7 +183,7 @@ var numeric = regexp.MustCompile(`^[0-9.]+$`)
 func (s *Store) Settings() Settings {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := Settings{Overrides: map[string]Override{}}
+	out := Settings{Overrides: map[string]Override{}, SourcesSeeded: s.settings.SourcesSeeded}
 	out.Sources = append([]Source{}, s.settings.Sources...)
 	for _, d := range s.settings.Devices {
 		d.Apps = append([]AppChoice{}, d.Apps...)
@@ -270,7 +266,7 @@ func (s *Store) RemoveDevice(id string) error {
 }
 
 // SetApps replaces a device's app list. An app appears once per device (the first choice for
-// a package wins); an empty source means the default one. The list is sorted by package.
+// a package wins); an empty source means the first configured one. The list is sorted by package.
 func (s *Store) SetApps(id string, choices []AppChoice) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -281,11 +277,11 @@ func (s *Store) SetApps(id string, choices []AppChoice) error {
 	seen := map[string]bool{}
 	apps := []AppChoice{}
 	for _, c := range choices {
-		if c.Source == "" {
-			c.Source = DefaultSourceID
+		if c.Source == "" && len(s.settings.Sources) > 0 {
+			c.Source = s.settings.Sources[0].ID
 		}
 		if s.sourceIndex(c.Source) < 0 {
-			return fmt.Errorf("unknown patch source %q", c.Source)
+			return fmt.Errorf("unknown patch source %q (add a patch repository first)", c.Source)
 		}
 		if !seen[c.Package] {
 			seen[c.Package] = true
@@ -318,24 +314,24 @@ func (s *Store) sourceIndex(id string) int {
 	return -1
 }
 
-// EnsureDefaultSource makes sure the first source is the default one, tracking the repository
-// configured in the environment.
-func (s *Store) EnsureDefaultSource(repo string, prerelease bool) error {
-	if !ValidRepo(repo) {
-		return fmt.Errorf("PATCHES_REPO must look like owner/name: %q", repo)
-	}
+// SeedSources adds the first-run patch repositories (the environment's PATCHES_REPO list). It
+// does nothing once it has run, so a repository you remove stays removed and a repository that
+// disappears upstream never blocks anything.
+func (s *Store) SeedSources(repos []string, prerelease bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	def := Source{ID: DefaultSourceID, Repo: repo, Prerelease: prerelease, Default: true}
-	if i := s.sourceIndex(DefaultSourceID); i >= 0 {
-		def.AllowPhone = s.settings.Sources[i].AllowPhone
-		if s.settings.Sources[i] == def {
-			return nil
-		}
-		s.settings.Sources[i] = def
-	} else {
-		s.settings.Sources = append([]Source{def}, s.settings.Sources...)
+	if s.settings.SourcesSeeded {
+		return nil
 	}
+	for _, repo := range repos {
+		if !ValidRepo(repo) {
+			return fmt.Errorf("PATCHES_REPO must list owner/name repositories: %q", repo)
+		}
+		if _, err := s.addSourceLocked(repo, prerelease, false); err != nil {
+			return err
+		}
+	}
+	s.settings.SourcesSeeded = true
 	return s.write("settings.json", s.settings)
 }
 
@@ -346,6 +342,14 @@ func (s *Store) AddSource(repo string, prerelease, allowPhone bool) (Source, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	src, err := s.addSourceLocked(repo, prerelease, allowPhone)
+	if err != nil {
+		return Source{}, err
+	}
+	return src, s.write("settings.json", s.settings)
+}
+
+func (s *Store) addSourceLocked(repo string, prerelease, allowPhone bool) (Source, error) {
 	for _, src := range s.settings.Sources {
 		if strings.EqualFold(src.Repo, repo) {
 			return Source{}, fmt.Errorf("%s is already added", repo)
@@ -358,20 +362,17 @@ func (s *Store) AddSource(repo string, prerelease, allowPhone bool) (Source, err
 	}
 	src := Source{ID: id, Repo: repo, Prerelease: prerelease, AllowPhone: allowPhone}
 	s.settings.Sources = append(s.settings.Sources, src)
-	return src, s.write("settings.json", s.settings)
+	return src, nil
 }
 
-// RemoveSource deletes a non-default source and drops its apps from every device. It returns
-// how many device app choices were removed.
+// RemoveSource deletes a patch source and drops its apps from every device (nothing is
+// uninstalled from the TVs). It returns how many device app choices were removed.
 func (s *Store) RemoveSource(id string) (removed int, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	i := s.sourceIndex(id)
 	if i < 0 {
 		return 0, errors.New("no such patch source")
-	}
-	if s.settings.Sources[i].Default {
-		return 0, errors.New("the default patch source cannot be removed")
 	}
 	s.settings.Sources = append(s.settings.Sources[:i], s.settings.Sources[i+1:]...)
 	for d := range s.settings.Devices {
@@ -388,10 +389,13 @@ func (s *Store) RemoveSource(id string) (removed int, err error) {
 	return removed, s.write("settings.json", s.settings)
 }
 
-// Source returns a configured patch source.
+// Source returns a configured patch source; an empty id means the first one.
 func (s *Store) Source(id string) (Source, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if id == "" && len(s.settings.Sources) > 0 {
+		return s.settings.Sources[0], true
+	}
 	if i := s.sourceIndex(id); i >= 0 {
 		return s.settings.Sources[i], true
 	}

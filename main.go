@@ -100,7 +100,9 @@ func setup() (*app, error) {
 	env := sources.DefaultEnv()
 	env.InputDir, env.CacheDir, env.Store = cfg.Input(), cfg.Cache(), a.st
 	env.FlareURL, env.DirectOK, env.APKPureOK = cfg.FlareSolverrURL, cfg.DirectOK, cfg.APKPureOK
-	if err := a.st.EnsureDefaultSource(cfg.PatchesRepo, cfg.Prerelease); err != nil {
+	// First run only: seed the patch repositories from PATCHES_REPO. After that the list lives in
+	// settings.json (backed up with the state volume) and every source can be removed.
+	if err := a.st.SeedSources(cfg.PatchesRepos, cfg.Prerelease); err != nil {
 		return nil, err
 	}
 	deps := runner.Deps{
@@ -108,7 +110,10 @@ func setup() (*app, error) {
 			return patches.LatestRelease(ctx, a.hc, src.Repo, cfg.GitHubToken, src.Prerelease)
 		},
 		Download: func(ctx context.Context, src store.Source, rel *patches.Release) (string, error) {
-			return patches.Download(ctx, a.hc, rel, filepath.Join(cfg.Cache(), "patches", src.ID))
+			return patches.Download(ctx, a.hc, rel, filepath.Join(cfg.PatchBundles(), src.ID))
+		},
+		Cached: func(src store.Source) (*patches.Release, string, bool) {
+			return patches.Cached(filepath.Join(cfg.PatchBundles(), src.ID))
 		},
 		Apps: func(ctx context.Context, src store.Source, rel *patches.Release, mpp string) (*patches.List, error) {
 			stable, err := morphe.ListPatches(ctx, cfg.MorpheJar, mpp, false)
@@ -243,7 +248,7 @@ func cmdFetch(args []string) error {
 	ver := fs.String("version", "", "version (default: newest the patches support)")
 	sdk := fs.Int("sdk", 31, "device API level")
 	abiList := fs.String("abi", "", "CPU list in order of preference (default armeabi-v7a,armeabi)")
-	source := fs.String("source", store.DefaultSourceID, "patch source id")
+	source := fs.String("source", "", "patch source id (default: the first one)")
 	_ = fs.Parse(args)
 	if *pkg == "" {
 		return errors.New("usage: fetch --package com.example.app [--version V]")
@@ -255,10 +260,13 @@ func cmdFetch(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	a.runner.RefreshLists(ctx)
-	list := a.runner.Lists()[*source]
-	srcCfg, _ := a.st.Source(*source)
+	srcCfg, ok := a.st.Source(*source)
+	if !ok {
+		return errors.New("no patch source is configured: add one on the page or set PATCHES_REPO before the first run")
+	}
+	list := a.runner.Lists()[srcCfg.ID]
 	if list == nil {
-		return fmt.Errorf("patch source %q could not be loaded (see the messages above)", *source)
+		return fmt.Errorf("patch source %q could not be loaded (see the messages above)", srcCfg.Repo)
 	}
 	app, ok := list.App(*pkg)
 	if !ok {
