@@ -41,3 +41,14 @@ def test_apkm_info_real_fixtures():
         i = apkm.parse_info(json.loads((fx / f"info-{pkg}.json").read_text()))
         assert (i["package"], i["version"]) == (pkg, ver)
         assert "armeabi-v7a" in i["arches"]
+
+
+def test_check_result():
+    import pytest
+    from patcher import morphe
+    fx = Path(__file__).parent / "fixtures"
+    morphe._check_result(fx / "result-ok.json")
+    with pytest.raises(RuntimeError, match="Keystore file not found"):
+        morphe._check_result(fx / "result-fail.json")
+    with pytest.raises(RuntimeError):
+        morphe._check_result(fx / "missing.json")
