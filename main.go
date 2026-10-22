@@ -4,6 +4,7 @@
 //	tv-patcher once         one pass now, print the results
 //	tv-patcher pair         register a device (command-line alternative to the web page)
 //	tv-patcher fetch        download and verify one app (debugging / CI)
+//	tv-patcher resolve      find the APKMirror page for apps without downloading (CI)
 //	tv-patcher healthcheck  for the Docker HEALTHCHECK
 package main
 
@@ -23,6 +24,7 @@ import (
 	"time"
 
 	"github.com/sloccy/morphe-tv-patcher/internal/adb"
+	"github.com/sloccy/morphe-tv-patcher/internal/apkmirror"
 	"github.com/sloccy/morphe-tv-patcher/internal/config"
 	"github.com/sloccy/morphe-tv-patcher/internal/morphe"
 	"github.com/sloccy/morphe-tv-patcher/internal/notify"
@@ -56,6 +58,8 @@ func main() {
 		err = cmdPair(args)
 	case "fetch":
 		err = cmdFetch(args)
+	case "resolve":
+		err = cmdResolve(args)
 	case "healthcheck":
 		err = cmdHealth()
 	case "version":
@@ -288,6 +292,46 @@ func cmdHealth() error {
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 16))
 	if resp.StatusCode != http.StatusOK || string(b) != "ok" {
 		return fmt.Errorf("unhealthy: HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// cmdResolve checks that every supported app can be found on APKMirror, without downloading.
+func cmdResolve(args []string) error {
+	fs := flag.NewFlagSet("resolve", flag.ExitOnError)
+	pkg := fs.String("package", "", "only this package (default: every supported app)")
+	_ = fs.Parse(args)
+	a, err := setup()
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	rel, err := patches.LatestRelease(ctx, a.hc, a.cfg.PatchesRepo, a.cfg.GitHubToken, a.cfg.Prerelease)
+	if err != nil {
+		return err
+	}
+	list, err := patches.FetchList(ctx, a.hc, a.cfg.PatchesRepo, rel.Tag, a.cfg.GitHubToken)
+	if err != nil {
+		return err
+	}
+	bad := false
+	for _, app := range list.Apps {
+		if *pkg != "" && app.Package != *pkg {
+			continue
+		}
+		res, _, err := apkmirror.Download(ctx, apkmirror.AppRequest{Package: app.Package, Name: app.Name, Version: app.Newest,
+			Hint: apkmirror.Hints[app.Package], SDK: 31, DryRun: true}, apkmirror.Options{ProfileHint: a.st.LastProfile()})
+		if err != nil {
+			bad = true
+			fmt.Printf("MISS %-40s %-28s %v\n", app.Name, app.Newest, err)
+		} else {
+			fmt.Printf("ok   %-40s %-28s %s\n", app.Name, app.Newest, res.Slug)
+		}
+		time.Sleep(8 * time.Second)
+	}
+	if bad {
+		return errors.New("some apps could not be found")
 	}
 	return nil
 }

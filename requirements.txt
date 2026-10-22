@@ -1,6 +1,0 @@
-curl_cffi==0.16.3
-beautifulsoup4==4.15.0
-PyYAML==6.0.3
-requests==2.34.2
-androguard==4.1.4
-pytest==8.3.4

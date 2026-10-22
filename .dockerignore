@@ -1,0 +1,7 @@
+.git
+.github
+*.md
+.golangci.yml
+.dockerignore
+internal/**/testdata
+**/*_test.go

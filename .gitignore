@@ -1,6 +1,8 @@
-__pycache__/
-*.pyc
-.venv/
-data/
-config.yaml
+# Build output
+/tv-patcher
+
+# Local data and secrets never go in git
+/data/
+*.keystore
 .env
+.DS_Store

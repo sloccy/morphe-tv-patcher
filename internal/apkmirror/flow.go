@@ -64,6 +64,7 @@ type AppRequest struct {
 	Hint      string // built-in guess, tried next
 	SDK       int    // device API level; 0 = unknown
 	DestDir   string
+	DryRun    bool // find the page and variant but do not download (Result.Path is the release URL)
 }
 
 // Result is a downloaded bundle and the app page that produced it.
@@ -264,6 +265,9 @@ func (c *Client) fetchSlug(ctx context.Context, req AppRequest, slug string) (st
 		}
 	default:
 		return "", err
+	}
+	if req.DryRun {
+		return rel, nil
 	}
 	c.pause(ctx, 2*time.Second, 6*time.Second)
 	dlURL := c.base() + btn

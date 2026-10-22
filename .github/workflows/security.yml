@@ -1,0 +1,42 @@
+name: Security
+
+# Nightly: scan -> fix -> test -> push; weekly rebuild; one failure issue.
+# Policy and inputs: see the sloccy/shared-ci README. Needs the repo secret WORKFLOW_TOKEN.
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Scan, fix and test, but do not push"
+        type: boolean
+        default: true
+      target_branch:
+        description: "Fix and push to this branch instead of main (testing)"
+        type: string
+        default: ""
+      force_rebuild:
+        description: "Dispatch the rebuild workflow now"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+concurrency:
+  group: security
+  cancel-in-progress: false
+
+jobs:
+  security:
+    uses: sloccy/shared-ci/.github/workflows/security.yml@v1
+    with:
+      dry_run: ${{ inputs.dry_run == true }}
+      target_branch: ${{ inputs.target_branch || '' }}
+      force_rebuild: ${{ inputs.force_rebuild == true }}
+      rebuild_workflow: build.yml
+      rebuild_weekday: 3
+    secrets:
+      token: ${{ secrets.WORKFLOW_TOKEN }}
