@@ -25,6 +25,9 @@ var (
 	ErrBlocked = errors.New("blocked by Cloudflare or rate limit")
 	// ErrNotFound: APKMirror does not have this page/version (yet).
 	ErrNotFound = errors.New("not found on APKMirror")
+	// ErrNoBuild: the release exists but none of its builds runs on this device's CPU (it is
+	// reported together with ErrNotFound, so callers that only care about "not found" still work).
+	ErrNoBuild = errors.New("no build for this device's CPU")
 )
 
 // Page is a fetched, parsed HTML page.

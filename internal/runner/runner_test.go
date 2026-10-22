@@ -79,6 +79,7 @@ type rig struct {
 	st       *store.Store
 	adb      *fakeADB
 	fetches  int
+	fetchABI [][]string
 	patches  int
 	fetchErr error
 	pkgName  func(path string) string
@@ -109,6 +110,7 @@ func newRig(t *testing.T) *rig {
 		List:     func(context.Context, string) (*patches.List, error) { return list, nil },
 		Fetch: func(ctx context.Context, a sources.App, sdk int) (*sources.Fetched, error) {
 			rg.fetches++
+			rg.fetchABI = append(rg.fetchABI, a.ABIs)
 			if rg.fetchErr != nil {
 				return nil, rg.fetchErr
 			}
@@ -170,18 +172,18 @@ func TestOneDeviceOfflineDoesNotBlockTheOther(t *testing.T) {
 	}
 }
 
-func TestFetchAndPatchOncePerAppAndABISet(t *testing.T) {
+func TestFetchAndPatchOncePerAppAndCPUGroup(t *testing.T) {
 	rg := newRig(t)
 	rg.device(t, "A", "10.0.0.1", prime)
 	rg.device(t, "B", "10.0.0.2", prime)
 	rg.device(t, "C", "10.0.0.3", prime)
 	rg.adb.abis["10.0.0.3"] = []string{"arm64-v8a", "armeabi-v7a"} // a different ABI set
 	rg.r.Run(context.Background(), Options{})
-	if rg.fetches != 1 {
-		t.Errorf("fetched %d times, want once for the app", rg.fetches)
+	if rg.fetches != 2 {
+		t.Errorf("fetched %d times, want once per CPU group (2)", rg.fetches)
 	}
 	if rg.patches != 2 {
-		t.Errorf("patched %d times, want once per ABI set (2)", rg.patches)
+		t.Errorf("patched %d times, want once per CPU group (2)", rg.patches)
 	}
 	if len(rg.adb.installs) != 3 {
 		t.Errorf("installs %v", rg.adb.installs)
@@ -437,5 +439,75 @@ func TestRingKeepsLastLines(t *testing.T) {
 	got := r.Lines()
 	if strings.Join(got, "|") != "line 2|line 3|line 4" {
 		t.Errorf("%v", got)
+	}
+}
+
+func TestEachCPUGroupGetsItsOwnBuild(t *testing.T) {
+	rg := newRig(t)
+	rg.device(t, "Old", "10.0.0.1", prime)
+	rg.device(t, "New", "10.0.0.2", prime)
+	rg.adb.abis["10.0.0.1"] = []string{"armeabi-v7a", "armeabi"}
+	rg.adb.abis["10.0.0.2"] = []string{"arm64-v8a", "armeabi-v7a", "armeabi"}
+	var strips [][]string
+	orig := rg.r.Deps.Patch
+	rg.r.Deps.Patch = func(ctx context.Context, o morphe.Options) error {
+		strips = append(strips, o.StripLibs)
+		return orig(ctx, o)
+	}
+	rg.r.Run(context.Background(), Options{})
+	if len(rg.fetchABI) != 2 || len(strips) != 2 {
+		t.Fatalf("fetches %v patches %v", rg.fetchABI, strips)
+	}
+	seen := map[string]bool{}
+	for _, a := range rg.fetchABI {
+		seen[strings.Join(a, ",")] = true
+	}
+	if !seen["armeabi-v7a,armeabi"] || !seen["arm64-v8a,armeabi-v7a,armeabi"] {
+		t.Errorf("each group must be fetched with its own preference order: %v", rg.fetchABI)
+	}
+	if len(rg.adb.installs) != 2 || rg.adb.installs[0] == rg.adb.installs[1] {
+		t.Errorf("two different patched files expected: %v", rg.adb.installs)
+	}
+	if info, ok := rg.st.DeviceInfo("new"); !ok || len(info.ABIs) != 3 || info.SDK != 31 {
+		t.Errorf("device info not saved: %+v %v", info, ok)
+	}
+}
+
+func TestNoBuildForThisCPUIsOneQuietMessageNotAFailureCount(t *testing.T) {
+	rg := newRig(t)
+	rg.device(t, "Chromebox", "10.0.0.5", prime)
+	rg.adb.abis["10.0.0.5"] = []string{"arm64-v8a"}
+	rg.fetchErr = &sources.FetchError{Attempts: []string{"apkmirror: no build"}, NoBuild: true}
+	res := rg.r.Run(context.Background(), Options{})
+	if res[0].OK || !res[0].Alert || !strings.Contains(res[0].Message, "no build of") || !strings.Contains(res[0].Message, "arm64-v8a") {
+		t.Fatalf("%+v", res)
+	}
+	if a := rg.st.App(prime); a.FetchFailures != 0 {
+		t.Errorf("a CPU mismatch is not a download failure: %+v", a)
+	}
+	rg.now = rg.now.Add(6 * time.Hour)
+	if res = rg.r.Run(context.Background(), Options{}); res[0].Alert {
+		t.Error("the same mismatch must not alert again every cycle")
+	}
+	if len(rg.adb.installs) != 0 {
+		t.Error("nothing should be installed")
+	}
+}
+
+func TestNoDeviceRunsBuildForTheRequestedCPUs(t *testing.T) {
+	rg := newRig(t)
+	var strip []string
+	rg.r.Deps.Patch = func(ctx context.Context, o morphe.Options) error {
+		strip = o.StripLibs
+		return os.WriteFile(o.Out, []byte("apk"), 0o600)
+	}
+	rg.r.Run(context.Background(), Options{NoDevice: true, Packages: []string{prime}, ABIs: []string{"arm64-v8a", "armeabi-v7a"}})
+	if strings.Join(strip, ",") != "arm64-v8a,armeabi-v7a" || strings.Join(rg.fetchABI[0], ",") != "arm64-v8a,armeabi-v7a" {
+		t.Errorf("strip %v fetch %v", strip, rg.fetchABI)
+	}
+	rg.fetchABI = nil
+	rg.r.Run(context.Background(), Options{NoDevice: true, Packages: []string{prime}})
+	if strings.Join(rg.fetchABI[0], ",") != "armeabi-v7a,armeabi" {
+		t.Errorf("no CPU given should mean the 32-bit default: %v", rg.fetchABI)
 	}
 }

@@ -124,6 +124,10 @@ func TestInspectRejectsBadFiles(t *testing.T) {
 	}
 }
 
+func want(source, pinned string) Want {
+	return Want{Package: "com.x", Version: "1.0", Source: source, Pinned: pinned}
+}
+
 func facts() *Facts {
 	return &Facts{Package: "com.x", Version: "1.0", Leanback: true, ABIs: map[string]bool{"armeabi-v7a": true}, Signer: "aa"}
 }
@@ -155,7 +159,7 @@ func TestCheckRules(t *testing.T) {
 	for _, c := range cases {
 		f := facts()
 		c.mod(f)
-		err := Check(f, "com.x", "1.0", c.source, c.pinned)
+		err := Check(f, want(c.source, c.pinned))
 		if c.kind == "" {
 			if err != nil {
 				t.Errorf("%s: unexpected %v", c.name, err)
@@ -184,7 +188,7 @@ func TestAPKSignerVerdictAndV1Fallback(t *testing.T) {
 	if err != nil || f.SignerOK == nil || *f.SignerOK {
 		t.Fatalf("expected a false verdict: %+v %v", f, err)
 	}
-	if err := Check(f, primePkg, primeVer, "apkmirror", ""); err == nil || !strings.Contains(err.Error(), "apksigner") {
+	if err := Check(f, Want{Package: primePkg, Version: primeVer, Source: "apkmirror"}); err == nil || !strings.Contains(err.Error(), "apksigner") {
 		t.Errorf("got %v", err)
 	}
 
@@ -222,8 +226,68 @@ func TestInspectRealBundles(t *testing.T) {
 		if f.Version != w[0] || f.Signer != w[1] || !f.Leanback || !f.ABIs["armeabi-v7a"] {
 			t.Errorf("%s: %+v", p, f)
 		}
-		if err := Check(f, f.Package, w[0], "apkmirror", w[1]); err != nil {
+		if err := Check(f, Want{Package: f.Package, Version: w[0], Source: "apkmirror", Pinned: w[1]}); err != nil {
 			t.Errorf("%s: %v", p, err)
 		}
+	}
+}
+
+func TestCheckPhoneBuildsAndDeviceCPUs(t *testing.T) {
+	phone := facts()
+	phone.Leanback = false
+	w := want("apkmirror", "")
+	var e *Error
+	if err := Check(phone, w); !errors.As(err, &e) || e.Kind != KindLeanback {
+		t.Errorf("a phone build must be refused by default, got %v", err)
+	}
+	w.AllowPhone = true
+	if err := Check(phone, w); err != nil {
+		t.Errorf("AllowPhone should accept it: %v", err)
+	}
+
+	cpu := []struct {
+		name   string
+		have   []string
+		device []string
+		ok     bool
+	}{
+		{"combined build on a 32-bit device", []string{"arm64-v8a", "armeabi-v7a"}, []string{"armeabi-v7a", "armeabi"}, true},
+		{"32-bit build on a 64-bit-capable device", []string{"armeabi-v7a"}, []string{"arm64-v8a", "armeabi-v7a", "armeabi"}, true},
+		{"32-bit build on an arm64-only device", []string{"armeabi-v7a"}, []string{"arm64-v8a"}, false},
+		{"64-bit build on a 32-bit device", []string{"arm64-v8a"}, []string{"armeabi-v7a", "armeabi"}, false},
+	}
+	for _, c := range cpu {
+		f := facts()
+		f.ABIs = map[string]bool{}
+		for _, a := range c.have {
+			f.ABIs[a] = true
+		}
+		w := want("apkmirror", "")
+		w.ABIs = c.device
+		err := Check(f, w)
+		if (err == nil) != c.ok {
+			t.Errorf("%s: got %v", c.name, err)
+		}
+		if err != nil && (!errors.As(err, &e) || e.Kind != KindArch || e.Fatal()) {
+			t.Errorf("%s: want a non-fatal arch error, got %v", c.name, err)
+		}
+	}
+}
+
+func TestVerifyReportsRank(t *testing.T) {
+	noAPKSigner(t)
+	der, _ := apktest.Cert("pub")
+	p := write(t, "r.apkm", apktest.Zip(map[string][]byte{
+		"base.apk":                     apktest.SignedAPK(map[string][]byte{"AndroidManifest.xml": manifest(t)}, der),
+		"split_config.armeabi_v7a.apk": []byte("n"),
+	}))
+	w := Want{Package: primePkg, Version: primeVer, Source: "apkmirror", ABIs: []string{"arm64-v8a", "armeabi-v7a", "armeabi"}}
+	v, err := Verify(context.Background(), p, w)
+	if err != nil || v.Rank != 1 {
+		t.Errorf("a 32-bit build on a 64-bit-capable device is rank 1, got %+v %v", v, err)
+	}
+	w.ABIs = []string{"armeabi-v7a"}
+	if v, _ = Verify(context.Background(), p, w); v == nil || v.Rank != 0 {
+		t.Errorf("on a 32-bit device it is rank 0, got %+v", v)
 	}
 }

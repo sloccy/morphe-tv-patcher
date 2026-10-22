@@ -60,10 +60,18 @@ type Install struct {
 	InstalledAt      string `json:"installed_at,omitempty"`
 }
 
+// DeviceInfo is what we learned about a device the last time we reached it.
+type DeviceInfo struct {
+	ABIs   []string `json:"abis"` // in order of preference, as the device reports them
+	SDK    int      `json:"sdk"`
+	SeenAt string   `json:"seen_at"`
+}
+
 type stateFile struct {
-	Apps        map[string]*AppState `json:"apps"`
-	Installs    map[string]*Install  `json:"installs"` // "<device id>/<package>"
-	LastProfile string               `json:"apkmirror_last_profile,omitempty"`
+	Apps        map[string]*AppState   `json:"apps"`
+	Installs    map[string]*Install    `json:"installs"` // "<device id>/<package>"
+	Devices     map[string]*DeviceInfo `json:"device_info,omitempty"`
+	LastProfile string                 `json:"apkmirror_last_profile,omitempty"`
 }
 
 // Store is safe for concurrent use.
@@ -98,6 +106,9 @@ func Open(dir string) (*Store, error) {
 	}
 	if s.state.Installs == nil {
 		s.state.Installs = map[string]*Install{}
+	}
+	if s.state.Devices == nil {
+		s.state.Devices = map[string]*DeviceInfo{}
 	}
 	return s, nil
 }
@@ -206,6 +217,7 @@ func (s *Store) RemoveDevice(id string) error {
 		}
 	}
 	delete(s.ports, id)
+	delete(s.state.Devices, id)
 	if err := s.write("state.json", s.state); err != nil {
 		return err
 	}
@@ -277,6 +289,25 @@ func (s *Store) SetInstall(dev, pkg string, in Install) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.state.Installs[dev+"/"+pkg] = &in
+	return s.write("state.json", s.state)
+}
+
+// DeviceInfo returns what we last learned about a device.
+func (s *Store) DeviceInfo(dev string) (DeviceInfo, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := s.state.Devices[dev]
+	if d == nil {
+		return DeviceInfo{}, false
+	}
+	return DeviceInfo{ABIs: append([]string{}, d.ABIs...), SDK: d.SDK, SeenAt: d.SeenAt}, true
+}
+
+// SetDeviceInfo records a device's CPU list and Android level.
+func (s *Store) SetDeviceInfo(dev string, in DeviceInfo) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state.Devices[dev] = &in
 	return s.write("state.json", s.state)
 }
 

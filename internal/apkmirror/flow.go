@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"math/rand/v2"
 	"net/url"
@@ -18,6 +19,7 @@ import (
 
 	"golang.org/x/net/html"
 
+	"github.com/sloccy/morphe-tv-patcher/internal/abi"
 	"github.com/sloccy/morphe-tv-patcher/internal/patches"
 )
 
@@ -57,14 +59,16 @@ func sleep(ctx context.Context, d time.Duration) {
 
 // AppRequest says which app version to get.
 type AppRequest struct {
-	Package   string
-	Name      string // display name, used to recognise search results
-	Version   string
-	KnownSlug string // cached or overridden publisher/app path, tried first
-	Hint      string // built-in guess, tried next
-	SDK       int    // device API level; 0 = unknown
-	DestDir   string
-	DryRun    bool // find the page and variant but do not download (Result.Path is the release URL)
+	Package    string
+	Name       string // display name, used to recognise search results
+	Version    string
+	KnownSlug  string // cached or overridden publisher/app path, tried first
+	Hint       string // built-in guess, tried next
+	SDK        int    // device API level; 0 = unknown
+	DestDir    string
+	ABIs       []string // the device's ABIs in order of preference; nil = the 32-bit default
+	AllowPhone bool     // phone apps are acceptable (affects which search results come first)
+	DryRun     bool     // find the page and variant but do not download (Result.Path is the release URL)
 }
 
 // Result is a downloaded bundle and the app page that produced it.
@@ -156,17 +160,20 @@ func APILevel(major int, l bool) int {
 	return api
 }
 
-// PickVariant chooses the variant page: a BUNDLE or APK row whose architecture we can run and whose
-// minimum Android fits the device. Rows naming the exact version win; then rows listing both
-// arm64-v8a and armeabi-v7a (or universal) over armeabi-v7a only.
-func PickVariant(rel *Page, version string, sdk int) (string, error) {
+// PickVariant chooses the variant page: a BUNDLE or APK row that runs on the device (its CPU
+// list, in order of preference) and whose minimum Android fits. Rows naming the exact version
+// win. Then the row with the best CPU match wins (a native 64-bit build for a 64-bit device),
+// then the one offering more ABIs, then the first listed. A nil abis means the 32-bit default.
+func PickVariant(rel *Page, version string, sdk int, abis []string) (string, error) {
 	type cand struct {
 		href  string
 		score int
+		nabis int
 		exact bool
 	}
 	var cands []cand
 	anyExact := false
+	archSkipped, sdkSkipped := 0, 0
 	for _, row := range find(rel.Doc, func(n *html.Node) bool { return n.Data == "div" && hasClass(n, "table-row", "headerFont") }) {
 		t := strings.ToLower(text(row))
 		if !variantType.MatchString(t) { // BUNDLE (split apks) or APK (single file)
@@ -176,43 +183,43 @@ func PickVariant(rel *Page, version string, sdk int) (string, error) {
 		if link == nil {
 			continue
 		}
-		var score int
-		switch {
-		case strings.Contains(t, "armeabi-v7a") && strings.Contains(t, "arm64-v8a"),
-			strings.Contains(t, "universal"), strings.Contains(t, "noarch"):
-			score = 2
-		case strings.Contains(t, "armeabi-v7a"):
-			score = 1
-		default:
+		r := abi.ParseRow(t)
+		score, ok := r.Score(abis)
+		if !ok {
+			archSkipped++
 			continue
 		}
 		if m := androidMin.FindStringSubmatch(t); m != nil && sdk > 0 {
 			major, _ := strconv.Atoi(m[1])
 			if need := APILevel(major, m[2] == "l"); need > sdk {
+				sdkSkipped++
 				continue
 			}
 		}
 		exact := version != "" && strings.Contains(t, strings.ToLower(version))
 		anyExact = anyExact || exact
-		cands = append(cands, cand{attr(link, "href"), score, exact})
+		cands = append(cands, cand{attr(link, "href"), score, len(r.ABIs), exact})
 	}
 	best := -1
 	for i, c := range cands {
 		if anyExact && !c.exact {
 			continue
 		}
-		if best < 0 || c.score > cands[best].score {
+		if best < 0 || c.score < cands[best].score || (c.score == cands[best].score && c.nabis > cands[best].nabis) {
 			best = i
 		}
 	}
-	if best < 0 {
-		title := rel.Title
-		if len(title) > 80 {
-			title = title[:80]
-		}
-		return "", fmt.Errorf("%w: no compatible variant (BUNDLE or APK for armeabi-v7a) on the release page (title %q)", ErrNotFound, title)
+	if best >= 0 {
+		return cands[best].href, nil
 	}
-	return cands[best].href, nil
+	title := rel.Title
+	if len(title) > 80 {
+		title = title[:80]
+	}
+	if archSkipped > 0 && sdkSkipped == 0 && len(cands) == 0 {
+		return "", fmt.Errorf("%w: %w: the release has no build for %v (title %q)", ErrNoBuild, ErrNotFound, abi.Normalize(abis), title)
+	}
+	return "", fmt.Errorf("%w: no compatible variant (BUNDLE or APK for %v, Android %d) on the release page (title %q)", ErrNotFound, abi.Normalize(abis), sdk, title)
 }
 
 // hasVariantTable reports whether the page lists variants (even unusable ones).
@@ -265,9 +272,11 @@ func (c *Client) fetchSlug(ctx context.Context, req AppRequest, slug string) (st
 	c.pause(ctx, 2*time.Second, 6*time.Second)
 	variant := rel
 	var btn string
-	vhref, err := PickVariant(rp, req.Version, req.SDK)
+	variantKey := "single" // which variant this is, so different builds never share a cache name
+	vhref, err := PickVariant(rp, req.Version, req.SDK, req.ABIs)
 	switch {
 	case err == nil:
+		variantKey = vhref
 		variant = c.base() + vhref
 		vp, err := c.F.Page(ctx, variant, rel)
 		if err != nil {
@@ -298,11 +307,26 @@ func (c *Client) fetchSlug(ctx context.Context, req AppRequest, slug string) (st
 		return "", err
 	}
 	c.pause(ctx, 2*time.Second, 4*time.Second)
-	dest := filepath.Join(req.DestDir, slugFile(slug)+"-"+patches.Slug(req.Version)+".apkm")
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(variantKey))
+	dest := filepath.Join(req.DestDir, fmt.Sprintf("%s-%s-%08x.apkm", slugFile(slug), patches.Slug(req.Version), h.Sum32()))
+	if have := existing(dest); have != "" {
+		return have, nil // the same release and variant is already cached
+	}
 	if err := c.F.File(ctx, c.base()+fl, dlURL, dest); err != nil {
 		return "", err
 	}
 	return fixExtension(dest), nil
+}
+
+// existing returns dest (or its plain-APK twin) if it is already on disk.
+func existing(dest string) string {
+	for _, p := range []string{dest, strings.TrimSuffix(dest, filepath.Ext(dest)) + ".apk"} {
+		if st, err := os.Stat(p); err == nil && st.Size() > 0 {
+			return p
+		}
+	}
+	return ""
 }
 
 // fixExtension renames a plain APK (AndroidManifest.xml at the top) from .apkm to .apk, since

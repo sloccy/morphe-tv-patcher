@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sloccy/morphe-tv-patcher/internal/abi"
 	"github.com/sloccy/morphe-tv-patcher/internal/config"
 	"github.com/sloccy/morphe-tv-patcher/internal/morphe"
 	"github.com/sloccy/morphe-tv-patcher/internal/patches"
@@ -55,6 +56,7 @@ type Options struct {
 	Force    bool     // reinstall even if up to date
 	DryRun   bool     // patch but do not install
 	NoDevice bool     // do not touch adb at all (implies DryRun)
+	ABIs     []string // with NoDevice: the CPU list to build for (default 32-bit)
 }
 
 // Result is the outcome for one app on one device (or a device/run-level problem).
@@ -248,7 +250,7 @@ func (r *Runner) pass(ctx context.Context, o Options) []Result {
 				}
 			}
 		}
-		conns = append(conns, conn{dev: store.Device{ID: "", Name: "(no device)", Apps: pkgs}})
+		conns = append(conns, conn{dev: store.Device{ID: "", Name: "(no device)", Apps: pkgs}, abis: abi.Normalize(o.ABIs)})
 	} else {
 		for _, d := range settings.Devices {
 			if o.DeviceID != "" && d.ID != o.DeviceID {
@@ -308,6 +310,7 @@ func (r *Runner) connect(ctx context.Context, d store.Device) (conn, error) {
 		return conn{}, err
 	}
 	sdk, _ := r.ADB.SDK(ctx, serial)
+	_ = r.Store.SetDeviceInfo(d.ID, store.DeviceInfo{ABIs: abis, SDK: sdk, SeenAt: r.Now().Format(time.RFC3339)})
 	return conn{dev: d, serial: serial, abis: abis, sdk: sdk}, nil
 }
 
@@ -360,64 +363,88 @@ func (r *Runner) app(ctx context.Context, o Options, rel *patches.Release, mpp s
 		return out
 	}
 
-	// fetch + verify once
+	// Devices with the same CPU list share one fetch and one patched file; a device with a
+	// different list (a 64-bit box next to a 32-bit one) gets its own build.
 	ov := r.Store.Override(pkg)
-	sdk := 0
+	groups := map[string][]*conn{}
+	var keys []string
 	for _, c := range need {
+		k := abi.Key(c.abis)
+		if _, ok := groups[k]; !ok {
+			keys = append(keys, k)
+		}
+		groups[k] = append(groups[k], c)
+	}
+	sort.Strings(keys)
+	recovered := false
+	for _, key := range keys {
+		gc := groups[key]
+		out = append(out, r.appGroup(ctx, o, rel, mpp, pkg, name, newest, ov, gc, key, &recovered)...)
+	}
+	r.prune(pkg)
+	return out
+}
+
+// appGroup fetches, patches and installs one app for devices that share a CPU list.
+func (r *Runner) appGroup(ctx context.Context, o Options, rel *patches.Release, mpp, pkg, name, newest string,
+	ov store.Override, gc []*conn, key string, recovered *bool) []Result {
+	var out []Result
+	res := func(c *conn, ok bool, msg string) Result {
+		return Result{Device: c.dev.Name, Package: pkg, Name: name, OK: ok, Message: msg}
+	}
+	abis := gc[0].abis
+	sdk := 0
+	for _, c := range gc {
 		if c.sdk > 0 && (sdk == 0 || c.sdk < sdk) {
 			sdk = c.sdk
 		}
 	}
 	fetched, err := r.Deps.Fetch(ctx, sources.App{Package: pkg, Name: name, Version: newest, Sources: ov.Sources,
-		SignerPin: strings.ToLower(ov.SignerSHA256), SlugOverride: ov.APKMirror}, sdk)
+		SignerPin: strings.ToLower(ov.SignerSHA256), SlugOverride: ov.APKMirror, ABIs: abis}, sdk)
 	if err != nil {
-		var fe *sources.FetchError
-		fatal := errors.As(err, &fe) && fe.Fatal
-		alert := r.noteFailure(pkg, err, fatal)
+		fe, _ := errors.AsType[*sources.FetchError](err)
+		if fe != nil && fe.NoBuild {
+			// the release exists, but not for this CPU: say so once, it is not a download failure
+			alert := r.noteNoBuild(pkg, newest, key)
+			msg := fmt.Sprintf("%s: no build of %s runs on %s (%s). The app or its patches only offer other CPU architectures",
+				name, newest, gc[0].dev.Name, strings.Join(abis, ","))
+			for i, c := range gc {
+				x := res(c, false, msg)
+				x.Alert = alert && i == 0
+				out = append(out, x)
+			}
+			return out
+		}
+		alert := r.noteFailure(pkg, err, fe != nil && fe.Fatal)
 		n := r.Store.App(pkg).FetchFailures
 		msg := fmt.Sprintf("%s: cannot get %s (%d cycle%s in a row): %v. Drop the .apkm into %s/ (newest supported version; no fallback to older)",
 			name, newest, n, plural(n), err, filepath.Join(r.Cfg.Input(), pkg))
-		for _, c := range need {
+		for i, c := range gc {
 			x := res(c, false, msg)
-			x.Alert = alert && c == need[0] // one message per app, not per device
+			x.Alert = alert && i == 0 // one message per app and CPU group, not per device
 			out = append(out, x)
 		}
 		return out
 	}
-	recovered := r.noteRecovered(pkg)
-
-	// patch once per ABI set
-	cache := map[string]*patched{}
-	patchFor := func(c *conn) *patched {
-		abis := append([]string{}, c.abis...)
-		sort.Strings(abis)
-		key := strings.Join(abis, ",")
-		if p := cache[key]; p != nil {
-			return p
-		}
-		p := &patched{}
-		cache[key] = p
-		suffix := ""
-		if key != "" {
-			h := fnv.New32a()
-			_, _ = h.Write([]byte(key))
-			suffix = "-" + strconv.FormatUint(uint64(h.Sum32()), 16)
-		}
-		p.path = filepath.Join(r.Cfg.Output(), fmt.Sprintf("%s-%s-%s%s.apk", pkg, safe(newest), rel.Tag, suffix))
-		p.err = r.Deps.Patch(ctx, morphe.Options{Jar: r.Cfg.MorpheJar, MPP: mpp, Input: fetched.Path, Out: p.path,
-			Keystore: r.Cfg.Keystore(), BytecodeMode: r.Cfg.BytecodeMode, StripLibs: c.abis,
-			OptionsFile: ov.OptionsFile, Enable: ov.Enable, Disable: ov.Disable})
-		p.installedPkg = pkg
-		if p.err == nil {
-			if ip, err := r.Deps.PackageOf(p.path); err == nil && ip != "" {
-				p.installedPkg = ip
-			}
-		}
-		return p
+	if r.noteRecovered(pkg) {
+		*recovered = true
 	}
 
-	for _, c := range need {
-		p := patchFor(c)
+	// patch once for this CPU list
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(key))
+	out2 := filepath.Join(r.Cfg.Output(), fmt.Sprintf("%s-%s-%s-%s.apk", pkg, safe(newest), rel.Tag, strconv.FormatUint(uint64(h.Sum32()), 16)))
+	patchErr := r.Deps.Patch(ctx, morphe.Options{Jar: r.Cfg.MorpheJar, MPP: mpp, Input: fetched.Path, Out: out2,
+		Keystore: r.Cfg.Keystore(), BytecodeMode: r.Cfg.BytecodeMode, StripLibs: abis,
+		OptionsFile: ov.OptionsFile, Enable: ov.Enable, Disable: ov.Disable})
+	p := &patched{path: out2, err: patchErr, installedPkg: pkg}
+	if patchErr == nil {
+		if ip, err := r.Deps.PackageOf(out2); err == nil && ip != "" {
+			p.installedPkg = ip
+		}
+	}
+
+	for _, c := range gc {
 		if p.err != nil {
 			x := res(c, false, fmt.Sprintf("%s: patching %s failed: %v", name, newest, p.err))
 			x.Alert = true
@@ -447,16 +474,27 @@ func (r *Runner) app(ctx context.Context, o Options, rel *patches.Release, mpp s
 			prev = "none"
 		}
 		msg := fmt.Sprintf("%s on %s: %s -> %s (patches %s) %s", name, c.dev.Name, prev, newest, rel.Tag, via)
-		if recovered {
+		if *recovered {
 			msg = "recovered, " + msg
-			recovered = false
+			*recovered = false
 		}
 		x := res(c, true, msg)
 		x.Changed, x.Alert = true, true
 		out = append(out, x)
 	}
-	r.prune(pkg)
 	return out
+}
+
+// noteNoBuild records that a version has no build for a CPU list and reports whether this is
+// the first time (so the message goes out once, not every cycle).
+func (r *Runner) noteNoBuild(pkg, version, key string) bool {
+	k := "nobuild:" + pkg + ":" + version + ":" + key
+	first := r.Store.App(k).LastFetchAlert == 0
+	if first {
+		now := r.Now().Unix()
+		_ = r.Store.UpdateApp(k, func(a *store.AppState) { a.LastFetchAlert = now })
+	}
+	return first
 }
 
 func (r *Runner) install(ctx context.Context, c *conn, pkg string, p *patched, ov store.Override) error {

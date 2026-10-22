@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sloccy/morphe-tv-patcher/internal/abi"
 	"github.com/sloccy/morphe-tv-patcher/internal/adb"
 	"github.com/sloccy/morphe-tv-patcher/internal/apkmirror"
 	"github.com/sloccy/morphe-tv-patcher/internal/config"
@@ -167,6 +168,7 @@ func cmdOnce(args []string) error {
 	force := fs.Bool("force", false, "reinstall even if up to date")
 	dry := fs.Bool("dry-run", false, "patch but do not install")
 	noDev := fs.Bool("no-device", false, "do not use adb at all (patch only)")
+	abiList := fs.String("abi", "", "CPU list to build for with --no-device, in order of preference (default armeabi-v7a,armeabi)")
 	var apps listFlag
 	fs.Var(&apps, "app", "package to handle (repeatable, or comma separated)")
 	_ = fs.Parse(args)
@@ -176,7 +178,7 @@ func cmdOnce(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	o := runner.Options{DeviceID: *device, Force: *force, DryRun: *dry, NoDevice: *noDev, Packages: apps}
+	o := runner.Options{DeviceID: *device, Force: *force, DryRun: *dry, NoDevice: *noDev, Packages: apps, ABIs: abi.Parse(*abiList)}
 	if len(apps) == 1 {
 		o.Package = apps[0]
 	}
@@ -229,6 +231,7 @@ func cmdFetch(args []string) error {
 	pkg := fs.String("package", "", "package name")
 	ver := fs.String("version", "", "version (default: newest the patches support)")
 	sdk := fs.Int("sdk", 31, "device API level")
+	abiList := fs.String("abi", "", "CPU list in order of preference (default armeabi-v7a,armeabi)")
 	_ = fs.Parse(args)
 	if *pkg == "" {
 		return errors.New("usage: fetch --package com.example.app [--version V]")
@@ -259,7 +262,7 @@ func cmdFetch(args []string) error {
 	env.FlareURL, env.DirectOK, env.APKPureOK = a.cfg.FlareSolverrURL, a.cfg.DirectOK, a.cfg.APKPureOK
 	ov := a.st.Override(*pkg)
 	f, err := sources.Fetch(ctx, &env, sources.App{Package: *pkg, Name: app.Name, Version: *ver, Sources: ov.Sources,
-		SignerPin: ov.SignerSHA256, SlugOverride: ov.APKMirror}, *sdk)
+		SignerPin: ov.SignerSHA256, SlugOverride: ov.APKMirror, ABIs: abi.Parse(*abiList)}, *sdk)
 	if err != nil {
 		return err
 	}

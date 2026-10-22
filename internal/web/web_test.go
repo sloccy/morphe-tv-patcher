@@ -265,3 +265,25 @@ func TestNoSecretsInResponses(t *testing.T) {
 		}
 	}
 }
+
+func TestDeviceCardCarriesCPUInfo(t *testing.T) {
+	srv, s, _ := setup(t)
+	d, _ := s.Store.AddDevice("Bedroom", "10.0.0.7")
+	_ = s.Store.SetDeviceInfo(d.ID, store.DeviceInfo{ABIs: []string{"arm64-v8a", "armeabi-v7a", "armeabi"}, SDK: 34, SeenAt: "now"})
+	_, body := do(t, srv, "GET", "/api/state", "", nil)
+	var st struct {
+		Devices []struct {
+			Info *store.DeviceInfo `json:"info"`
+			Is64 bool              `json:"is64"`
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal([]byte(body), &st); err != nil || len(st.Devices) != 1 || !st.Devices[0].Is64 || st.Devices[0].Info == nil || st.Devices[0].Info.SDK != 34 {
+		t.Errorf("%v %s", err, body)
+	}
+	d2, _ := s.Store.AddDevice("Old box", "10.0.0.8")
+	_ = s.Store.SetDeviceInfo(d2.ID, store.DeviceInfo{ABIs: []string{"armeabi-v7a", "armeabi"}, SDK: 31})
+	_, body = do(t, srv, "GET", "/api/state", "", nil)
+	if !strings.Contains(body, `"is64":false`) {
+		t.Errorf("a 32-bit box must not be reported as 64-bit: %s", body)
+	}
+}

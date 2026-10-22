@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sloccy/morphe-tv-patcher/internal/abi"
 	"github.com/sloccy/morphe-tv-patcher/internal/patches"
 	"github.com/sloccy/morphe-tv-patcher/internal/runner"
 	"github.com/sloccy/morphe-tv-patcher/internal/store"
@@ -150,6 +151,8 @@ type deviceRow struct {
 	store.Device
 	Installs map[string]store.Install `json:"installs"`
 	Last     []runner.Result          `json:"last"`
+	Info     *store.DeviceInfo        `json:"info,omitempty"` // CPU list and Android level, once reached
+	Is64     bool                     `json:"is64"`
 }
 
 func (s *Server) state(w http.ResponseWriter, r *http.Request) {
@@ -166,6 +169,9 @@ func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 	devs := make([]deviceRow, 0, len(settings.Devices))
 	for _, d := range settings.Devices {
 		row := deviceRow{Device: d, Installs: map[string]store.Install{}}
+		if info, ok := s.Store.DeviceInfo(d.ID); ok {
+			row.Info, row.Is64 = &info, abi.Is64(info.ABIs)
+		}
 		for _, p := range d.Apps {
 			if in, ok := s.Store.Install(d.ID, p); ok {
 				row.Installs[p] = in

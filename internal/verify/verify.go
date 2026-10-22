@@ -20,14 +20,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sloccy/morphe-tv-patcher/internal/abi"
 	"github.com/sloccy/morphe-tv-patcher/internal/apk"
 )
 
 // maxBaseAPK bounds how much we extract from a bundle (a decompression-bomb guard).
 const maxBaseAPK = 1 << 30
-
-// TargetABI is the native code this patcher installs for.
-const TargetABI = "armeabi-v7a"
 
 // Kind classifies a failed check.
 type Kind string
@@ -68,6 +66,18 @@ type Verified struct {
 	Signer  string
 	Package string
 	Version string
+	Rank    int // how well the bundle's native code matches the device (0 = its best ABI)
+}
+
+// Want is what a file has to be.
+type Want struct {
+	Package string
+	Version string
+	Source  string   // where the file came from (decides whether an unknown signer is acceptable)
+	Pinned  string   // signer on record, may be empty
+	ABIs    []string // the device's ABIs in order of preference; empty means the 32-bit default
+	// AllowPhone accepts builds without an Android TV launcher (phone apps). Off by default.
+	AllowPhone bool
 }
 
 // Facts are what Inspect learned from a file.
@@ -233,16 +243,18 @@ func extract(f *zip.File, dest string) error {
 }
 
 // Check applies the rules to facts. pinned is the signer on record (may be empty).
-func Check(f *Facts, pkg, version, source, pinned string) error {
+func Check(f *Facts, w Want) error {
+	pkg, version, source, pinned := w.Package, w.Version, w.Source, w.Pinned
+	_, archOK := abi.Rank(f.ABIs, w.ABIs)
 	switch {
 	case f.Package != pkg:
 		return &Error{KindPackage, fmt.Sprintf("%s != %s", f.Package, pkg)}
 	case f.Version != version:
 		return &Error{KindVersion, fmt.Sprintf("%s != %s", f.Version, version)}
-	case !f.Leanback:
+	case !f.Leanback && !w.AllowPhone:
 		return &Error{KindLeanback, "no Android TV launcher activity (phone build?)"}
-	case len(f.ABIs) > 0 && !f.ABIs[TargetABI]:
-		return &Error{KindArch, fmt.Sprintf("native code for %v, need %s", keys(f.ABIs), TargetABI)}
+	case !archOK:
+		return &Error{KindArch, fmt.Sprintf("native code for %v, the device runs %v", keys(f.ABIs), abi.Normalize(w.ABIs))}
 	case f.Signer == "":
 		return &Error{KindSignature, "no signing certificate found"}
 	case f.SignerOK != nil && !*f.SignerOK:
@@ -256,15 +268,16 @@ func Check(f *Facts, pkg, version, source, pinned string) error {
 }
 
 // Verify inspects a file and applies the rules.
-func Verify(ctx context.Context, path, pkg, version, source, pinned string) (*Verified, error) {
+func Verify(ctx context.Context, path string, w Want) (*Verified, error) {
 	f, err := Inspect(ctx, path)
 	if err != nil {
 		return nil, err
 	}
-	if err := Check(f, pkg, version, source, pinned); err != nil {
+	if err := Check(f, w); err != nil {
 		return nil, err
 	}
-	return &Verified{Path: path, Source: source, Signer: f.Signer, Package: f.Package, Version: f.Version}, nil
+	rank, _ := abi.Rank(f.ABIs, w.ABIs)
+	return &Verified{Path: path, Source: w.Source, Signer: f.Signer, Package: f.Package, Version: f.Version, Rank: rank}, nil
 }
 
 func keys(m map[string]bool) []string {

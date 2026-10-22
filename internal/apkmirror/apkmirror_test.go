@@ -50,7 +50,7 @@ func page(t *testing.T, raw string) *Page {
 func mirror(t *testing.T, gate func(w http.ResponseWriter, r *http.Request) bool) *httptest.Server {
 	t.Helper()
 	release, variant, dl := fx(t, "release"), fx(t, "variant"), fx(t, "download")
-	vhref, err := PickVariant(page(t, release), version, 31)
+	vhref, err := PickVariant(page(t, release), version, 31, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +200,7 @@ func TestCandidatesRankAndroidTVFirstAndDropNoise(t *testing.T) {
 
 func TestFallsBackToSearchWhenHintIsWrongApp(t *testing.T) {
 	release, variant, dl := fx(t, "release"), fx(t, "variant"), fx(t, "download")
-	vhref, _ := PickVariant(page(t, release), version, 31)
+	vhref, _ := PickVariant(page(t, release), version, 31, nil)
 	btn, _ := downloadButton(page(t, variant))
 	fl, _ := fileLink(page(t, dl))
 	mux := http.NewServeMux()
@@ -256,7 +256,7 @@ func TestPickVariantRanking(t *testing.T) {
 		{"universal counts", row("/a", "BUNDLE universal Android 7.0+"), "1.0", 31, "/a"},
 	}
 	for _, c := range cases {
-		got, err := PickVariant(page(t, "<html>"+c.rows+"</html>"), c.ver, c.sdk)
+		got, err := PickVariant(page(t, "<html>"+c.rows+"</html>"), c.ver, c.sdk, nil)
 		if c.want == "" {
 			if !errors.Is(err, ErrNotFound) {
 				t.Errorf("%s: got %q %v", c.name, got, err)
@@ -268,7 +268,7 @@ func TestPickVariantRanking(t *testing.T) {
 		}
 	}
 	// the real saved release page
-	href, err := PickVariant(page(t, fx(t, "release")), version, 31)
+	href, err := PickVariant(page(t, fx(t, "release")), version, 31, nil)
 	if err != nil || !strings.HasSuffix(href, "-android-apk-download/") {
 		t.Errorf("real page: %q %v", href, err)
 	}
@@ -467,7 +467,7 @@ func TestSingleVariantReleaseUsesTheDownloadButtonOnThePage(t *testing.T) {
 
 func TestUnusableVariantTableIsNotRescuedByTheButton(t *testing.T) {
 	row := `<div class="table-row headerFont"><a class="accent_color" href="/v">v</a> BUNDLE arm64-v8a Android 7.0+</div>`
-	if _, err := PickVariant(page(t, "<html>"+row+`<a class="downloadButton" href="/x/download/?key=1">d</a></html>`), "1", 31); !errors.Is(err, ErrNotFound) {
+	if _, err := PickVariant(page(t, "<html>"+row+`<a class="downloadButton" href="/x/download/?key=1">d</a></html>`), "1", 31, nil); !errors.Is(err, ErrNotFound) {
 		t.Errorf("got %v", err)
 	}
 	if !hasVariantTable(page(t, "<html>"+row+"</html>")) {
@@ -485,5 +485,135 @@ func TestPickReleasePrefersExactOverCounterSuffix(t *testing.T) {
 	}
 	if got := pickRelease(links, []string{"9-9-9"}); got != "" {
 		t.Errorf("got %q", got)
+	}
+}
+
+// realRows builds a release page from the variant rows harvested from live APKMirror pages
+// (testdata/arch-rows.tsv: "app<TAB>row text"). Row i links to /v/<app>/<i>.
+func realRows(t *testing.T, app string) *Page {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", "arch-rows.tsv")) //nolint:gosec // fixed test data
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sb strings.Builder
+	sb.WriteString("<html><title>" + app + "</title>")
+	i := 0
+	for line := range strings.SplitSeq(string(b), "\n") {
+		name, row, ok := strings.Cut(line, "\t")
+		if !ok || name != app {
+			continue
+		}
+		fmt.Fprintf(&sb, `<div class="table-row headerFont"><a class="accent_color" href="/v/%s/%d">v</a> %s</div>`, app, i, row)
+		i++
+	}
+	sb.WriteString("</html>")
+	return page(t, sb.String())
+}
+
+func TestPickVariantOnRealRowsForEachKindOfDevice(t *testing.T) {
+	var (
+		armv7  = []string{"armeabi-v7a", "armeabi"}
+		both   = []string{"arm64-v8a", "armeabi-v7a", "armeabi"}
+		only64 = []string{"arm64-v8a"}
+	)
+	// Peacock rows: 0 = armeabi-v7a (needs Android 12L), 1 = arm64-v8a + armeabi-v7a (Android 6), 2 = arm64-v8a (Android 10)
+	cases := []struct {
+		app, version string
+		device       []string
+		sdk          int
+		want         string // "" means no build for this CPU
+	}{
+		{"peacock", "7.8.100", armv7, 31, "/v/peacock/1"}, // the 32-bit-only row needs 12L; combined fits an Android 12 box
+		{"peacock", "7.8.100", armv7, 32, "/v/peacock/1"}, // equal match: the combined build offers more ABIs
+		{"peacock", "7.8.100", both, 33, "/v/peacock/1"},
+		{"peacock", "7.8.100", only64, 33, "/v/peacock/1"},
+		{"hbo", "7.9.0.61", armv7, 31, "/v/hbo/2"},
+		{"twitch", "13.0.0.2", armv7, 28, "/v/twitch/1"},
+		{"netflix", "13.0.1 build 25028", armv7, 31, "/v/netflix/0"},
+		{"netflix", "13.0.1 build 25028", both, 31, "/v/netflix/0"}, // a 64-bit box still runs the only (32-bit) build
+		{"netflix", "13.0.1 build 25028", only64, 31, ""},           // an arm64-only box cannot
+		{"disney", "26.16.0+rc2-2026.09.08", only64, 31, "/v/disney/0"},
+	}
+	for _, c := range cases {
+		got, err := PickVariant(realRows(t, c.app), c.version, c.sdk, c.device)
+		if c.want == "" {
+			if !errors.Is(err, ErrNoBuild) || !errors.Is(err, ErrNotFound) {
+				t.Errorf("%s on %v: got %q %v, want a no-build error", c.app, c.device, got, err)
+			}
+			continue
+		}
+		if err != nil || got != c.want {
+			t.Errorf("%s v%s on %v (sdk %d): got %q %v, want %q", c.app, c.version, c.device, c.sdk, got, err, c.want)
+		}
+	}
+}
+
+func TestSDKTooOldIsNotReportedAsNoBuild(t *testing.T) {
+	// the only 32-bit row needs Android 12L; on Android 10 that is an SDK problem, not a CPU one
+	row := `<div class="table-row headerFont"><a class="accent_color" href="/v">v</a> 1.0 BUNDLE armeabi-v7a Android 12L+ 320dpi</div>`
+	_, err := PickVariant(page(t, "<html>"+row+"</html>"), "1.0", 29, []string{"armeabi-v7a"})
+	if !errors.Is(err, ErrNotFound) || errors.Is(err, ErrNoBuild) {
+		t.Errorf("got %v", err)
+	}
+}
+
+// countingFetcher serves one saved release/variant/download chain and counts file downloads.
+type countingFetcher struct {
+	*scripted
+	files int
+}
+
+func (f *countingFetcher) File(ctx context.Context, u, ref, dest string) error {
+	f.files++
+	return f.scripted.File(ctx, u, ref, dest)
+}
+
+func TestSameVariantIsNotDownloadedTwiceAndDifferentVariantsDoNotShareAName(t *testing.T) {
+	single := fx(t, "single-release")
+	btn, _ := downloadButton(page(t, single))
+	rel := "https://m.test/apk/p/app/app-1-release/"
+	mk := func(release string) *countingFetcher {
+		return &countingFetcher{scripted: &scripted{pages: map[string]string{
+			"https://m.test/":      "<title>home</title>",
+			rel:                    release + " com.x",
+			"https://m.test" + btn: fx(t, "download"),
+		}}}
+	}
+	dir := t.TempDir()
+	f := mk(single)
+	c := &Client{F: f, Base: "https://m.test", Sleep: noSleep}
+	req := AppRequest{Package: "com.x", Version: "1", Hint: "p/app", SDK: 31, DestDir: dir}
+	r1, err := c.Fetch(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2, err := c.Fetch(context.Background(), req)
+	if err != nil || r1.Path != r2.Path || f.files != 1 {
+		t.Fatalf("second fetch must reuse the cached file: %q %q files=%d %v", r1.Path, r2.Path, f.files, err)
+	}
+
+	// a release with a variant table names the file by the chosen variant
+	row := func(href, cells string) string {
+		return fmt.Sprintf(`<div class="table-row headerFont"><a class="accent_color" href=%q>v</a> %s</div>`, href, cells)
+	}
+	table := "<html>" + row("/v/arm64", "1 BUNDLE arm64-v8a Android 7.0+") + row("/v/armv7", "1 BUNDLE armeabi-v7a Android 7.0+") + "</html>"
+	f2 := &countingFetcher{scripted: &scripted{pages: map[string]string{
+		"https://m.test/":                        "<title>home</title>",
+		rel:                                      table + " com.x",
+		"https://m.test/v/arm64":                 "<html><a class=\"downloadButton\" href=\"/d/arm64/download/?key=1\">d</a></html>",
+		"https://m.test/v/armv7":                 "<html><a class=\"downloadButton\" href=\"/d/armv7/download/?key=2\">d</a></html>",
+		"https://m.test/d/arm64/download/?key=1": fx(t, "download"),
+		"https://m.test/d/armv7/download/?key=2": fx(t, "download"),
+	}}}
+	c2 := &Client{F: f2, Base: "https://m.test", Sleep: noSleep}
+	dir2 := t.TempDir()
+	r64, err := c2.Fetch(context.Background(), AppRequest{Package: "com.x", Version: "1", Hint: "p/app", SDK: 31, DestDir: dir2, ABIs: []string{"arm64-v8a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r32, err := c2.Fetch(context.Background(), AppRequest{Package: "com.x", Version: "1", Hint: "p/app", SDK: 31, DestDir: dir2, ABIs: []string{"armeabi-v7a"}})
+	if err != nil || r64.Path == r32.Path || f2.files != 2 {
+		t.Fatalf("different variants must be cached under different names: %q %q files=%d %v", r64.Path, r32.Path, f2.files, err)
 	}
 }

@@ -28,6 +28,8 @@ type App struct {
 	Sources      []string // order of "apkmirror", "apkpure"; default both
 	SignerPin    string   // from a settings override; otherwise the recorded signer is used
 	SlugOverride string
+	ABIs         []string // the device's ABIs in order of preference; nil = the 32-bit default
+	AllowPhone   bool     // accept phone builds (no Android TV launcher)
 }
 
 // Env holds the dependencies (functions so tests can fake the network).
@@ -42,7 +44,7 @@ type Env struct {
 	Mirror        func(context.Context, apkmirror.AppRequest, apkmirror.Options) (apkmirror.Result, string, error)
 	Pure          func(ctx context.Context, pkg, version, destDir string) (string, error)
 	PureAvailable func() bool
-	Verify        func(ctx context.Context, path, pkg, version, source, pinned string) (*verify.Verified, error)
+	Verify        func(ctx context.Context, path string, w verify.Want) (*verify.Verified, error)
 }
 
 // DefaultEnv wires the real implementations.
@@ -67,6 +69,9 @@ type Fetched struct {
 type FetchError struct {
 	Attempts []string
 	Fatal    bool
+	// NoBuild means the release exists but has no build for the device's CPU: not a download
+	// problem, so it must not feed the "cannot download" alert counters.
+	NoBuild bool
 }
 
 func (e *FetchError) Error() string {
@@ -85,6 +90,10 @@ func Fetch(ctx context.Context, e *Env, a App, sdk int) (*Fetched, error) {
 		pinned = e.Store.App(a.Package).SignerSHA256
 	}
 	var attempts, fatals []string
+	noBuild := false
+	want := func(source string) verify.Want {
+		return verify.Want{Package: a.Package, Version: a.Version, Source: source, Pinned: pinned, ABIs: a.ABIs, AllowPhone: a.AllowPhone}
+	}
 	finish := func(v *verify.Verified, detail string) *Fetched {
 		learned := pinned == ""
 		if learned {
@@ -94,15 +103,24 @@ func Fetch(ctx context.Context, e *Env, a App, sdk int) (*Fetched, error) {
 		return &Fetched{Verified: v, Detail: detail, LearnedSigner: learned}
 	}
 	note := func(label string, err error) {
-		if ve, ok := errors.AsType[*verify.Error](err); ok && ve.Fatal() {
-			fatals = append(fatals, fmt.Sprintf("%s: %v", label, err))
-		} else {
-			attempts = append(attempts, fmt.Sprintf("%s: %v", label, err))
+		if errors.Is(err, apkmirror.ErrNoBuild) {
+			noBuild = true
 		}
+		if ve, ok := errors.AsType[*verify.Error](err); ok {
+			noBuild = noBuild || ve.Kind == verify.KindArch
+			if ve.Fatal() {
+				fatals = append(fatals, fmt.Sprintf("%s: %v", label, err))
+				slog.Warn("source failed", "source", label, "err", err)
+				return
+			}
+		}
+		attempts = append(attempts, fmt.Sprintf("%s: %v", label, err))
 		slog.Warn("source failed", "source", label, "err", err)
 	}
 
-	// 1. files you dropped in, 2. the cache
+	// 1. files you dropped in, 2. the cache. A file that matches the device's best ABI wins at
+	// once; otherwise keep the best seen and look online for a better one.
+	var bestLocal *Fetched
 	for _, loc := range []struct{ dir, label string }{
 		{filepath.Join(e.InputDir, a.Package), verify.SourceDropFolder},
 		{e.CacheDir, "cache"},
@@ -114,21 +132,35 @@ func Fetch(ctx context.Context, e *Env, a App, sdk int) (*Fetched, error) {
 				continue
 			}
 			p := filepath.Join(loc.dir, en.Name())
-			v, err := e.Verify(ctx, p, a.Package, a.Version, loc.label, pinned)
+			v, err := e.Verify(ctx, p, want(loc.label))
 			if err == nil {
 				if loc.label == verify.SourceDropFolder && pinned == "" {
 					slog.Warn("manual file accepted with no signer on record", "package", a.Package)
 				}
-				return finish(v, loc.label), nil
+				if v.Rank == 0 {
+					return finish(v, loc.label), nil
+				}
+				if bestLocal == nil || v.Rank < bestLocal.Rank {
+					bestLocal = &Fetched{Verified: v, Detail: loc.label}
+				}
+				continue
 			}
 			if ve, ok := errors.AsType[*verify.Error](err); ok {
-				// an old version is expected; the cache is shared by every app
-				if ve.Kind == verify.KindVersion || (loc.label == "cache" && (ve.Kind == verify.KindUnpinned || ve.Kind == verify.KindPackage)) {
+				// an old version is expected; the cache is shared by every app, and its files
+				// may be for another CPU
+				if ve.Kind == verify.KindVersion || (loc.label == "cache" && (ve.Kind == verify.KindUnpinned || ve.Kind == verify.KindPackage || ve.Kind == verify.KindArch)) {
 					continue
 				}
 			}
 			note(loc.label+" "+en.Name(), err)
 		}
+	}
+	// withBest returns the downloaded file unless a local one matches the device better.
+	withBest := func(f *Fetched) (*Fetched, error) {
+		if bestLocal != nil && bestLocal.Rank < f.Rank {
+			return finish(bestLocal.Verified, bestLocal.Detail), nil
+		}
+		return f, nil
 	}
 
 	// 3+. downloads
@@ -138,7 +170,7 @@ func Fetch(ctx context.Context, e *Env, a App, sdk int) (*Fetched, error) {
 			note(label, err)
 			return nil
 		}
-		v, err := e.Verify(ctx, path, a.Package, a.Version, source, pinned)
+		v, err := e.Verify(ctx, path, want(source))
 		if err != nil {
 			_ = os.Remove(path)
 			note(label, err)
@@ -156,7 +188,7 @@ func Fetch(ctx context.Context, e *Env, a App, sdk int) (*Fetched, error) {
 		slug = app.Slug
 	}
 	req := apkmirror.AppRequest{Package: a.Package, Name: a.Name, Version: a.Version, KnownSlug: slug,
-		Hint: apkmirror.Hints[a.Package], SDK: sdk, DestDir: e.CacheDir}
+		Hint: apkmirror.Hints[a.Package], SDK: sdk, DestDir: e.CacheDir, ABIs: a.ABIs, AllowPhone: a.AllowPhone}
 	for _, src := range srcs {
 		switch src {
 		case "apkmirror":
@@ -175,12 +207,12 @@ func Fetch(ctx context.Context, e *Env, a App, sdk int) (*Fetched, error) {
 			}
 			if e.DirectOK {
 				if f := run("apkmirror", apkmirror.Options{ProfileHint: e.Store.LastProfile()}); f != nil {
-					return f, nil
+					return withBest(f)
 				}
 			}
 			if e.FlareURL != "" {
 				if f := run("apkmirror via flaresolverr", apkmirror.Options{FlareURL: e.FlareURL}); f != nil {
-					return f, nil
+					return withBest(f)
 				}
 			}
 		case "apkpure":
@@ -194,10 +226,13 @@ func Fetch(ctx context.Context, e *Env, a App, sdk int) (*Fetched, error) {
 					p, err := e.Pure(ctx, a.Package, a.Version, e.CacheDir)
 					return p, "apkpure", err
 				}); f != nil {
-					return f, nil
+					return withBest(f)
 				}
 			}
 		}
 	}
-	return nil, &FetchError{Attempts: append(attempts, fatals...), Fatal: len(fatals) > 0}
+	if bestLocal != nil { // downloads failed or found nothing, but a usable (if not ideal) file exists
+		return finish(bestLocal.Verified, bestLocal.Detail), nil
+	}
+	return nil, &FetchError{Attempts: append(attempts, fatals...), Fatal: len(fatals) > 0, NoBuild: noBuild && len(fatals) == 0}
 }
