@@ -36,7 +36,7 @@ func manifest(t *testing.T) []byte {
 func write(t *testing.T, name string, data []byte) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), name)
-	if err := os.WriteFile(p, data, 0o644); err != nil {
+	if err := os.WriteFile(p, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return p
@@ -44,6 +44,7 @@ func write(t *testing.T, name string, data []byte) string {
 
 // APKMirror layout: base.apk + split_config.* + info.json.
 func mirrorBundle(t *testing.T, signer []byte, libs ...string) string {
+	t.Helper()
 	files := map[string][]byte{"AndroidManifest.xml": manifest(t)}
 	for _, l := range libs {
 		files["lib/"+l+"/libx.so"] = []byte("so")

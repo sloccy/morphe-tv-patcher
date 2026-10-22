@@ -400,7 +400,7 @@ func (r *Runner) app(ctx context.Context, o Options, rel *patches.Release, mpp s
 		suffix := ""
 		if key != "" {
 			h := fnv.New32a()
-			h.Write([]byte(key))
+			_, _ = h.Write([]byte(key))
 			suffix = "-" + strconv.FormatUint(uint64(h.Sum32()), 16)
 		}
 		p.path = filepath.Join(r.Cfg.Output(), fmt.Sprintf("%s-%s-%s%s.apk", pkg, safe(newest), rel.Tag, suffix))
@@ -527,7 +527,7 @@ func keepNewest(dir string, patterns []string, keep int) {
 	}
 	sort.Slice(files, func(i, j int) bool { return mtime(files[i]).After(mtime(files[j])) })
 	for _, f := range files[min(keep, len(files)):] {
-		os.Remove(f)
+		_ = os.Remove(f)
 	}
 }
 

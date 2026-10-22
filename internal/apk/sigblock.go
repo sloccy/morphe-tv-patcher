@@ -39,10 +39,14 @@ func SignerSHA256(r io.ReaderAt, size int64) (string, error) {
 	if !bytes.Equal(tail[8:], sigMagic) {
 		return "", ErrNoSigningBlock
 	}
-	blockSize := int64(binary.LittleEndian.Uint64(tail))
+	rawSize := binary.LittleEndian.Uint64(tail)
+	if rawSize < 24 || rawSize > 64<<20 {
+		return "", fmt.Errorf("apk: bad signing block size %d", rawSize)
+	}
+	blockSize := int64(rawSize) //nolint:gosec // bounded to 64 MiB just above
 	start := cdOff - blockSize - 8
-	if blockSize < 24 || start < 0 || blockSize > 64<<20 {
-		return "", fmt.Errorf("apk: bad signing block size %d", blockSize)
+	if start < 0 {
+		return "", fmt.Errorf("apk: bad signing block size %d", rawSize)
 	}
 	pairs := make([]byte, blockSize-24)
 	if _, err := r.ReadAt(pairs, start+8); err != nil {
@@ -52,7 +56,7 @@ func SignerSHA256(r io.ReaderAt, size int64) (string, error) {
 	var v2, v3 []byte
 	for len(pairs) >= 12 {
 		l := binary.LittleEndian.Uint64(pairs)
-		if l < 4 || l > uint64(len(pairs)-8) {
+		if l < 4 || l > uint64(len(pairs)-8) { //nolint:gosec // the loop condition guarantees len(pairs) >= 12
 			return "", errTruncated
 		}
 		id := binary.LittleEndian.Uint32(pairs[8:])

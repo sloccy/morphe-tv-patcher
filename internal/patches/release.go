@@ -24,7 +24,7 @@ type Release struct {
 var APIBase = "https://api.github.com"
 
 func get(ctx context.Context, hc *http.Client, url, token string, limit int64) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return nil, err
 	}
@@ -37,7 +37,7 @@ func get(ctx context.Context, hc *http.Client, url, token string, limit int64) (
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GET %s: HTTP %d", url, resp.StatusCode)
 	}
@@ -85,10 +85,10 @@ func Download(ctx context.Context, hc *http.Client, rel *Release, cacheDir strin
 	if st, err := os.Stat(dest); err == nil && st.Size() == rel.Size {
 		return dest, nil
 	}
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+	if err := os.MkdirAll(cacheDir, 0o750); err != nil {
 		return "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rel.AssetURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rel.AssetURL, http.NoBody)
 	if err != nil {
 		return "", err
 	}
@@ -97,12 +97,12 @@ func Download(ctx context.Context, hc *http.Client, rel *Release, cacheDir strin
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("download %s: HTTP %d", rel.Name, resp.StatusCode)
 	}
 	tmp := dest + ".part"
-	f, err := os.Create(tmp)
+	f, err := os.Create(tmp) //nolint:gosec // inside our own cache directory
 	if err != nil {
 		return "", err
 	}
@@ -111,12 +111,12 @@ func Download(ctx context.Context, hc *http.Client, rel *Release, cacheDir strin
 		err = cerr
 	}
 	if err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return "", err
 	}
 	if rel.Size > 0 {
 		if st, _ := os.Stat(tmp); st == nil || st.Size() != rel.Size {
-			os.Remove(tmp)
+			_ = os.Remove(tmp)
 			return "", errors.New("download size mismatch")
 		}
 	}
@@ -126,7 +126,7 @@ func Download(ctx context.Context, hc *http.Client, rel *Release, cacheDir strin
 	old, _ := filepath.Glob(filepath.Join(cacheDir, "patches-*.mpp"))
 	for _, o := range old {
 		if o != dest {
-			os.Remove(o)
+			_ = os.Remove(o)
 		}
 	}
 	return dest, nil

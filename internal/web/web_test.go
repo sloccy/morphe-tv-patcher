@@ -43,7 +43,7 @@ type ring struct{ lines []string }
 
 func (r ring) Lines() []string { return r.lines }
 
-func setup(t *testing.T) (*httptest.Server, *Server, *fakeBackend) {
+func setup(t *testing.T) (srv *httptest.Server, s *Server, fb *fakeBackend) {
 	t.Helper()
 	st, err := store.Open(t.TempDir())
 	if err != nil {
@@ -51,16 +51,16 @@ func setup(t *testing.T) (*httptest.Server, *Server, *fakeBackend) {
 	}
 	data, _ := os.ReadFile("../patches/testdata/patches-list.json")
 	list, _ := patches.ParseList(data)
-	fb := &fakeBackend{list: list}
-	s := &Server{Store: st, Backend: fb, Log: ring{[]string{"line one", "line two"}}, Version: "test"}
-	srv := httptest.NewServer(s.Handler())
+	fb = &fakeBackend{list: list}
+	s = &Server{Store: st, Backend: fb, Log: ring{[]string{"line one", "line two"}}, Version: "test"}
+	srv = httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
 	return srv, s, fb
 }
 
-func do(t *testing.T, srv *httptest.Server, method, path, body string, hdr map[string]string) (int, string) {
+func do(t *testing.T, srv *httptest.Server, method, path, body string, hdr map[string]string) (status int, respBody string) {
 	t.Helper()
-	req, _ := http.NewRequest(method, srv.URL+path, strings.NewReader(body))
+	req, _ := http.NewRequestWithContext(context.Background(), method, srv.URL+path, strings.NewReader(body))
 	if body != "" || method == "POST" || method == "PUT" {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -79,7 +79,7 @@ func do(t *testing.T, srv *httptest.Server, method, path, body string, hdr map[s
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	b, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, string(b)
 }
@@ -112,10 +112,10 @@ func TestDeviceLifecycleAndState(t *testing.T) {
 	var st struct {
 		Apps    []map[string]any `json:"apps"`
 		Devices []struct {
-			ID   string
-			Apps []string
-			Last []runner.Result
-		}
+			ID   string          `json:"id"`
+			Apps []string        `json:"apps"`
+			Last []runner.Result `json:"last"`
+		} `json:"devices"`
 	}
 	if err := json.Unmarshal([]byte(body), &st); err != nil || code != 200 {
 		t.Fatalf("%d %v %s", code, err, body)
@@ -133,7 +133,7 @@ func TestDeviceLifecycleAndState(t *testing.T) {
 
 func TestInputValidation(t *testing.T) {
 	srv, s, fb := setup(t)
-	s.Store.AddDevice("TV", "10.0.0.6")
+	_, _ = s.Store.AddDevice("TV", "10.0.0.6")
 	bad := []struct{ method, path, body string }{
 		{"POST", "/api/devices", `{"name":"x","host":"-oProxyCommand=evil"}`},
 		{"POST", "/api/devices", `{"name":"x","host":"10.0.0.6; rm -rf /"}`},
@@ -199,11 +199,12 @@ func TestCrossSiteProtections(t *testing.T) {
 
 func TestSecurityHeaders(t *testing.T) {
 	srv, _, _ := setup(t)
-	resp, err := http.Get(srv.URL + "/")
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/", http.NoBody)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.Header.Get("X-Content-Type-Options") != "nosniff" || !strings.Contains(resp.Header.Get("Content-Security-Policy"), "default-src 'none'") {
 		t.Errorf("headers %v", resp.Header)
 	}
@@ -211,7 +212,7 @@ func TestSecurityHeaders(t *testing.T) {
 
 func TestPairRunAndLog(t *testing.T) {
 	srv, s, fb := setup(t)
-	s.Store.AddDevice("TV", "10.0.0.6")
+	_, _ = s.Store.AddDevice("TV", "10.0.0.6")
 	if code, b := do(t, srv, "POST", "/api/devices/tv/pair", `{"pair_port":38000,"code":"123456"}`, nil); code != 200 || !strings.Contains(b, "10.0.0.6") {
 		t.Errorf("%d %s", code, b)
 	}
@@ -246,7 +247,7 @@ func TestPairRunAndLog(t *testing.T) {
 func TestAppListNotLoadedYet(t *testing.T) {
 	srv, s, fb := setup(t)
 	fb.list = nil
-	s.Store.AddDevice("TV", "10.0.0.6")
+	_, _ = s.Store.AddDevice("TV", "10.0.0.6")
 	if code, _ := do(t, srv, "PUT", "/api/devices/tv/apps", `{"apps":["com.netflix.ninja"]}`, nil); code != 503 {
 		t.Errorf("got %d", code)
 	}

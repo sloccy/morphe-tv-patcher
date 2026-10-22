@@ -37,9 +37,9 @@ func Solve(ctx context.Context, hc *http.Client, base, url string) (*Result, err
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var j struct {
 		Status   string `json:"status"`
 		Message  string `json:"message"`
@@ -54,7 +54,7 @@ func Solve(ctx context.Context, hc *http.Client, base, url string) (*Result, err
 		} `json:"solution"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 32<<20)).Decode(&j); err != nil {
-		return nil, fmt.Errorf("%w: bad response: %v", ErrUnavailable, err)
+		return nil, fmt.Errorf("%w: bad response: %w", ErrUnavailable, err)
 	}
 	if j.Status != "ok" {
 		return nil, fmt.Errorf("%w: %s", ErrUnavailable, j.Message)

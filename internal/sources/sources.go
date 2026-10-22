@@ -94,8 +94,7 @@ func Fetch(ctx context.Context, e *Env, a App, sdk int) (*Fetched, error) {
 		return &Fetched{Verified: v, Detail: detail, LearnedSigner: learned}
 	}
 	note := func(label string, err error) {
-		var ve *verify.Error
-		if errors.As(err, &ve) && ve.Fatal() {
+		if ve, ok := errors.AsType[*verify.Error](err); ok && ve.Fatal() {
 			fatals = append(fatals, fmt.Sprintf("%s: %v", label, err))
 		} else {
 			attempts = append(attempts, fmt.Sprintf("%s: %v", label, err))
@@ -122,8 +121,7 @@ func Fetch(ctx context.Context, e *Env, a App, sdk int) (*Fetched, error) {
 				}
 				return finish(v, loc.label), nil
 			}
-			var ve *verify.Error
-			if errors.As(err, &ve) {
+			if ve, ok := errors.AsType[*verify.Error](err); ok {
 				// an old version is expected; the cache is shared by every app
 				if ve.Kind == verify.KindVersion || (loc.label == "cache" && (ve.Kind == verify.KindUnpinned || ve.Kind == verify.KindPackage)) {
 					continue
@@ -142,7 +140,7 @@ func Fetch(ctx context.Context, e *Env, a App, sdk int) (*Fetched, error) {
 		}
 		v, err := e.Verify(ctx, path, a.Package, a.Version, source, pinned)
 		if err != nil {
-			os.Remove(path)
+			_ = os.Remove(path)
 			note(label, err)
 			return nil
 		}

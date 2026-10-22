@@ -17,7 +17,7 @@ func attr(n *html.Node, key string) string {
 
 func hasClass(n *html.Node, classes ...string) bool {
 	have := map[string]bool{}
-	for _, c := range strings.Fields(attr(n, "class")) {
+	for c := range strings.FieldsSeq(attr(n, "class")) {
 		have[c] = true
 	}
 	for _, c := range classes {

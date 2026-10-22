@@ -43,12 +43,16 @@ func TestConnectTriesSavedThenMDNSThenScan(t *testing.T) {
 }
 
 func TestConnectScansWhenNothingElseWorks(t *testing.T) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer l.Close()
-	open := l.Addr().(*net.TCPAddr).Port
+	defer func() { _ = l.Close() }()
+	addr, ok := l.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatal("not a TCP listener")
+	}
+	open := addr.Port
 	var log []string
 	c := &Client{
 		Run: func(ctx context.Context, args ...string) (string, error) {
@@ -57,7 +61,7 @@ func TestConnectScansWhenNothingElseWorks(t *testing.T) {
 			}
 			return fake(open, &log)(ctx, args...)
 		},
-		Dial:   func(host string, p int) bool { return dial(host, p) },
+		Dial:   dial,
 		ScanLo: open - 20, ScanHi: open + 20,
 	}
 	port, err := c.Connect(context.Background(), "127.0.0.1")

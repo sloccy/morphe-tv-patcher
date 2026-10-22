@@ -44,7 +44,7 @@ func (c Config) Keystore() string { return filepath.Join(c.DataDir, "keystore", 
 // Ensure creates the working directories.
 func (c Config) Ensure() error {
 	for _, d := range []string{c.Cache(), c.Input(), c.Output(), filepath.Dir(c.Keystore())} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
+		if err := os.MkdirAll(d, 0o750); err != nil {
 			return err
 		}
 	}
@@ -93,7 +93,7 @@ func FromEnv(getenv func(string) string) (Config, error) {
 
 func splitList(s string) []string {
 	var out []string
-	for _, p := range strings.Split(s, ",") {
+	for p := range strings.SplitSeq(s, ",") {
 		if p = strings.ToLower(strings.TrimSpace(p)); p != "" {
 			out = append(out, p)
 		}

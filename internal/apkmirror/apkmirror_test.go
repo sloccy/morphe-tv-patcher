@@ -27,7 +27,7 @@ const (
 
 func fx(t *testing.T, name string) string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("testdata", "apkmirror-"+name+".html"))
+	b, err := os.ReadFile(filepath.Join("testdata", "apkmirror-"+name+".html")) //nolint:gosec // fixed test data directory
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func mirror(t *testing.T, gate func(w http.ResponseWriter, r *http.Request) bool
 	if err != nil {
 		t.Fatal(err)
 	}
-	flPath := strings.SplitN(fl, "?", 2)[0]
+	flPath, _, _ := strings.Cut(fl, "?")
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if gate != nil && gate(w, r) {
@@ -70,21 +70,21 @@ func mirror(t *testing.T, gate func(w http.ResponseWriter, r *http.Request) bool
 		}
 		switch {
 		case r.URL.Path == "/":
-			fmt.Fprint(w, "<html><title>APKMirror</title></html>")
+			_, _ = fmt.Fprint(w, "<html><title>APKMirror</title></html>")
 		case r.URL.Path == "/apk/"+slug+"/":
-			fmt.Fprintf(w, `<html><title>app</title><a href="%s">6.23.23</a><a href="/apk/%s/x-6-24-8-release/">new</a></html>`, relPath, slug)
+			_, _ = fmt.Fprintf(w, `<html><title>app</title><a href="%s">6.23.23</a><a href="/apk/%s/x-6-24-8-release/">new</a></html>`, relPath, slug)
 		case r.URL.Path == relPath:
-			fmt.Fprint(w, release)
+			_, _ = fmt.Fprint(w, release)
 		case r.URL.Path == vhref:
-			fmt.Fprint(w, variant)
+			_, _ = fmt.Fprint(w, variant)
 		case r.URL.Path == strings.SplitN(btn, "?", 2)[0]:
-			fmt.Fprint(w, dl)
+			_, _ = fmt.Fprint(w, dl)
 		case r.URL.Path == flPath:
 			if r.Header.Get("Referer") == "" {
-				http.Error(w, "no referer", 403)
+				http.Error(w, "no referer", http.StatusForbidden)
 				return
 			}
-			fmt.Fprint(w, zipBytes)
+			_, _ = fmt.Fprint(w, zipBytes)
 		default:
 			http.NotFound(w, r)
 		}
@@ -95,6 +95,7 @@ func mirror(t *testing.T, gate func(w http.ResponseWriter, r *http.Request) bool
 }
 
 func req(t *testing.T) AppRequest {
+	t.Helper()
 	return AppRequest{Package: pkg, Name: "Prime Video Android TV", Version: version, SDK: 31, DestDir: t.TempDir()}
 }
 
@@ -118,8 +119,8 @@ func TestRotatesProfilesWhenBlocked(t *testing.T) {
 	srv := mirror(t, func(w http.ResponseWriter, r *http.Request) bool {
 		if strings.Contains(r.UserAgent(), "Chrome/") {
 			chromeHits.Add(1)
-			w.WriteHeader(403)
-			fmt.Fprint(w, "<title>Just a moment...</title>")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = fmt.Fprint(w, "<title>Just a moment...</title>")
 			return true
 		}
 		return false
@@ -145,7 +146,10 @@ func TestRotatesProfilesWhenBlocked(t *testing.T) {
 }
 
 func TestAllProfilesBlocked(t *testing.T) {
-	srv := mirror(t, func(w http.ResponseWriter, r *http.Request) bool { w.WriteHeader(429); return true })
+	srv := mirror(t, func(w http.ResponseWriter, r *http.Request) bool {
+		w.WriteHeader(http.StatusTooManyRequests)
+		return true
+	})
 	r := req(t)
 	r.Hint = slug
 	_, _, err := Download(context.Background(), r, Options{Base: srv.URL, Backoff: []time.Duration{time.Millisecond}, Sleep: noSleep})
@@ -156,7 +160,7 @@ func TestAllProfilesBlocked(t *testing.T) {
 
 func TestNotFoundServedAs200(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "<html><head><title>Page Not Found - APKMirror</title></head></html>")
+		_, _ = fmt.Fprint(w, "<html><head><title>Page Not Found - APKMirror</title></head></html>")
 	}))
 	defer srv.Close()
 	_, err := NewDirect(Profiles[0]).Page(context.Background(), srv.URL+"/x", "")
@@ -166,7 +170,7 @@ func TestNotFoundServedAs200(t *testing.T) {
 }
 
 func TestDownloadMustBeAZip(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "<html>captcha</html>") }))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = fmt.Fprint(w, "<html>captcha</html>") }))
 	defer srv.Close()
 	dest := filepath.Join(t.TempDir(), "x.apkm")
 	err := NewDirect(Profiles[0]).File(context.Background(), srv.URL, "", dest)
@@ -181,7 +185,7 @@ func TestDownloadMustBeAZip(t *testing.T) {
 func TestCandidatesRankAndroidTVFirstAndDropNoise(t *testing.T) {
 	body := `<a href="/apk/pluto-inc/pluto-tv/">p</a><a href="/apk/pluto-inc/pluto-tv-android-tv/">tv</a>` +
 		`<a href="/apk/bytedance-pte-ltd/capcut/">c</a><a href="/apk/google-inc/youtube/">y</a>`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "<title>s</title>"+body) }))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = fmt.Fprint(w, "<title>s</title>"+body) }))
 	defer srv.Close()
 	cl := &Client{F: NewDirect(Profiles[0]), Base: srv.URL, Sleep: noSleep}
 	got, err := cl.Candidates(context.Background(), "tv.pluto.android", "Pluto TV Android TV")
@@ -203,19 +207,19 @@ func TestFallsBackToSearchWhenHintIsWrongApp(t *testing.T) {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Query().Get("s") == pkg:
-			fmt.Fprintf(w, `<title>s</title><a href="/apk/%s/">tv</a>`, slug)
+			_, _ = fmt.Fprintf(w, `<title>s</title><a href="/apk/%s/">tv</a>`, slug)
 		case r.URL.Path == "/":
-			fmt.Fprint(w, "<title>x</title>")
+			_, _ = fmt.Fprint(w, "<title>x</title>")
 		case r.URL.Path == "/apk/wrong/prime-video-phone/prime-video-phone-"+"6-23-23v15-5-0-70-armv7a-release/":
-			fmt.Fprint(w, "<title>phone</title>nothing here")
+			_, _ = fmt.Fprint(w, "<title>phone</title>nothing here")
 		case r.URL.Path == "/apk/"+slug+"/prime-video-android-tv-android-tv-6-23-23v15-5-0-70-armv7a-release/":
-			fmt.Fprint(w, release)
+			_, _ = fmt.Fprint(w, release)
 		case r.URL.Path == vhref:
-			fmt.Fprint(w, variant)
+			_, _ = fmt.Fprint(w, variant)
 		case r.URL.Path == strings.SplitN(btn, "?", 2)[0]:
-			fmt.Fprint(w, dl)
+			_, _ = fmt.Fprint(w, dl)
 		case r.URL.Path == strings.SplitN(fl, "?", 2)[0]:
-			fmt.Fprint(w, zipBytes)
+			_, _ = fmt.Fprint(w, zipBytes)
 		default:
 			http.NotFound(w, r)
 		}
@@ -233,7 +237,7 @@ func TestFallsBackToSearchWhenHintIsWrongApp(t *testing.T) {
 
 func TestPickVariantRanking(t *testing.T) {
 	row := func(href, cells string) string {
-		return fmt.Sprintf(`<div class="table-row headerFont"><div class="table-cell"><a class="accent_color" href="%s">v</a> %s</div></div>`, href, cells)
+		return fmt.Sprintf(`<div class="table-row headerFont"><div class="table-cell"><a class="accent_color" href=%q>v</a> %s</div></div>`, href, cells)
 	}
 	cases := []struct {
 		name, rows, ver string
@@ -284,11 +288,12 @@ func TestAPILevel(t *testing.T) {
 
 func TestReleaseLookupVariants(t *testing.T) {
 	appPage := func(hrefs ...string) string {
-		s := "<title>app</title>"
+		var b strings.Builder
+		b.WriteString("<title>app</title>")
 		for _, h := range hrefs {
-			s += fmt.Sprintf(`<a href="%s">r</a>`, h)
+			fmt.Fprintf(&b, `<a href=%q>r</a>`, h)
 		}
-		return s
+		return b.String()
 	}
 	cases := []struct{ name, slug, version, href string }{
 		{"apk in url (Peacock)", "p/peacock", "7.8.100", "/apk/p/peacock/peacock-tv-stream-7-8-100-apk-release/"},
@@ -300,9 +305,9 @@ func TestReleaseLookupVariants(t *testing.T) {
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
 			case "/apk/" + c.slug + "/":
-				fmt.Fprint(w, appPage(c.href, "/apk/"+c.slug+"/other-1-0-release/"))
+				_, _ = fmt.Fprint(w, appPage(c.href, "/apk/"+c.slug+"/other-1-0-release/"))
 			case c.href:
-				fmt.Fprint(w, "<title>release</title>"+c.slug)
+				_, _ = fmt.Fprint(w, "<title>release</title>"+c.slug)
 			default:
 				http.NotFound(w, r)
 			}
@@ -335,7 +340,7 @@ func TestPlainAPKIsRenamedAndBundlesAreNot(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name string, files map[string][]byte) string {
 		p := filepath.Join(dir, name)
-		os.WriteFile(p, apktest.Zip(files), 0o644)
+		_ = os.WriteFile(p, apktest.Zip(files), 0o600)
 		return p
 	}
 	plain := write("a.apkm", map[string][]byte{"AndroidManifest.xml": []byte("x")})
@@ -366,17 +371,19 @@ func TestFlareHandsCookiesToTheFileDownload(t *testing.T) {
 			sawUA.Store(true)
 		}
 		if c == nil {
-			w.WriteHeader(403)
-			fmt.Fprint(w, "<title>Just a moment...</title>")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = fmt.Fprint(w, "<title>Just a moment...</title>")
 			return
 		}
-		fmt.Fprint(w, zipBytes)
+		_, _ = fmt.Fprint(w, zipBytes)
 	}))
 	defer target.Close()
 	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var in struct{ URL string }
-		json.NewDecoder(r.Body).Decode(&in)
-		fmt.Fprint(w, `{"status":"ok","solution":{"response":"<html><title>ok</title></html>","status":200,"userAgent":"Sidecar-Chrome/152","cookies":[{"name":"cf_clearance","value":"solved"}]}}`)
+		var in struct {
+			URL string `json:"url"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		_, _ = fmt.Fprint(w, `{"status":"ok","solution":{"response":"<html><title>ok</title></html>","status":200,"userAgent":"Sidecar-Chrome/152","cookies":[{"name":"cf_clearance","value":"solved"}]}}`)
 	}))
 	defer sidecar.Close()
 
@@ -423,7 +430,7 @@ func (f *scripted) Page(ctx context.Context, u, ref string) (*Page, error) {
 
 func (f *scripted) File(ctx context.Context, u, ref, dest string) error {
 	f.seen = append(f.seen, "FILE "+u)
-	return os.WriteFile(dest, []byte(zipBytes), 0o644)
+	return os.WriteFile(dest, []byte(zipBytes), 0o600)
 }
 
 func TestSingleVariantReleaseUsesTheDownloadButtonOnThePage(t *testing.T) {

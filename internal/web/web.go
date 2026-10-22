@@ -8,7 +8,6 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -50,7 +49,7 @@ const maxBody = 64 << 10
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.index)
-	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok") })
+	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") })
 	mux.HandleFunc("GET /api/state", s.state)
 	mux.HandleFunc("GET /api/log", s.log)
 	mux.HandleFunc("POST /api/devices", s.addDevice)
@@ -113,13 +112,13 @@ func (s *Server) hostOK(host string) bool {
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	b, _ := ui.ReadFile("ui/index.html")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(b)
+	_, _ = w.Write(b)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func fail(w http.ResponseWriter, code int, msg string) {
@@ -130,8 +129,7 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
-		var mbe *http.MaxBytesError
-		if errors.As(err, &mbe) {
+		if _, tooBig := errors.AsType[*http.MaxBytesError](err); tooBig {
 			fail(w, http.StatusRequestEntityTooLarge, "request too large")
 		} else {
 			fail(w, http.StatusBadRequest, "bad request body")
@@ -164,8 +162,9 @@ func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 		}
 		out["apps"] = rows
 	}
-	devs := []deviceRow{}
-	for _, d := range s.Store.Settings().Devices {
+	settings := s.Store.Settings()
+	devs := make([]deviceRow, 0, len(settings.Devices))
+	for _, d := range settings.Devices {
 		row := deviceRow{Device: d, Installs: map[string]store.Install{}}
 		for _, p := range d.Apps {
 			if in, ok := s.Store.Install(d.ID, p); ok {
@@ -271,7 +270,7 @@ func (s *Server) pair(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"message": fmt.Sprintf("paired with %s", host)})
+	writeJSON(w, http.StatusOK, map[string]string{"message": "paired with " + host})
 }
 
 func (s *Server) run(w http.ResponseWriter, r *http.Request) {

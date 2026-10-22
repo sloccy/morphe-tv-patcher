@@ -14,7 +14,7 @@ func TestSendPostsToTelegram(t *testing.T) {
 	var path, body string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path = r.URL.Path
-		r.ParseForm()
+		_ = r.ParseForm()
 		body = r.PostForm.Get("chat_id") + "|" + r.PostForm.Get("text")
 	}))
 	defer srv.Close()

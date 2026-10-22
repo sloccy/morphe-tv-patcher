@@ -40,7 +40,7 @@ func (f *fakeADB) Connect(ctx context.Context, host string, known ...int) (int, 
 	return 40000, nil
 }
 func (f *fakeADB) ABIs(ctx context.Context, s string) ([]string, error) {
-	host := strings.Split(s, ":")[0]
+	host, _, _ := strings.Cut(s, ":")
 	if a, ok := f.abis[host]; ok {
 		return a, nil
 	}
@@ -52,7 +52,7 @@ func (f *fakeADB) InstalledVersion(ctx context.Context, s, pkg string) (string, 
 	defer f.mu.Unlock()
 	return f.installed[s+"/"+pkg], nil
 }
-func (f *fakeADB) Install(ctx context.Context, s, apk string) (bool, string) {
+func (f *fakeADB) Install(ctx context.Context, s, apk string) (ok bool, output string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	base := filepath.Base(apk)
@@ -92,7 +92,7 @@ func newRig(t *testing.T) *rig {
 	t.Helper()
 	dir := t.TempDir()
 	cfg := config.Config{DataDir: dir, MorpheJar: "m.jar", BytecodeMode: "STRIP_SAFE", Interval: time.Hour, FailuresBeforeAlert: 3, DirectOK: true}
-	cfg.Ensure()
+	_ = cfg.Ensure()
 	st, err := store.Open(filepath.Join(dir, "state"))
 	if err != nil {
 		t.Fatal(err)
@@ -116,7 +116,7 @@ func newRig(t *testing.T) *rig {
 		},
 		Patch: func(ctx context.Context, o morphe.Options) error {
 			rg.patches++
-			return os.WriteFile(o.Out, []byte("apk"), 0o644)
+			return os.WriteFile(o.Out, []byte("apk"), 0o600)
 		},
 		PackageOf: func(path string) (string, error) {
 			if rg.pkgName != nil {
@@ -136,7 +136,7 @@ func (rg *rig) device(t *testing.T, name, host string, apps ...string) store.Dev
 	if err != nil {
 		t.Fatal(err)
 	}
-	rg.st.SetApps(d.ID, apps)
+	_ = rg.st.SetApps(d.ID, apps)
 	return d
 }
 
@@ -240,8 +240,8 @@ func TestFetchFailureAlertRules(t *testing.T) {
 	rg := newRig(t)
 	rg.device(t, "TV", "10.0.0.6", prime)
 	rg.fetchErr = &sources.FetchError{Attempts: []string{"apkmirror: blocked"}}
-	var alerts []bool
-	for i := 0; i < 5; i++ {
+	alerts := make([]bool, 0, 5)
+	for range 5 {
 		res := rg.r.Run(context.Background(), Options{})
 		alerts = append(alerts, res[0].Alert)
 		rg.now = rg.now.Add(6 * time.Hour)
@@ -299,7 +299,7 @@ func TestSignatureConflictGuidanceAndAllowUninstall(t *testing.T) {
 	dir := filepath.Dir(rg.r.Cfg.Cache())
 	_ = dir
 	settings := `{"devices":[{"id":"` + d.ID + `","name":"TV","host":"10.0.0.6","apps":["` + prime + `"]}],"overrides":{"` + prime + `":{"allow_uninstall":true}}}`
-	os.WriteFile(filepath.Join(rg.r.Cfg.DataDir, "state", "settings.json"), []byte(settings), 0o600)
+	_ = os.WriteFile(filepath.Join(rg.r.Cfg.DataDir, "state", "settings.json"), []byte(settings), 0o600)
 	st, _ := store.Open(filepath.Join(rg.r.Cfg.DataDir, "state"))
 	rg.r.Store = st
 	rg.adb.installMsg[prime] = "Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE]"
@@ -313,7 +313,7 @@ func TestStockNetflixIsNeverUninstalled(t *testing.T) {
 	rg := newRig(t)
 	d := rg.device(t, "TV", "10.0.0.6", netflix)
 	settings := `{"devices":[{"id":"` + d.ID + `","name":"TV","host":"10.0.0.6","apps":["` + netflix + `"]}],"overrides":{"` + netflix + `":{"allow_uninstall":true}}}`
-	os.WriteFile(filepath.Join(rg.r.Cfg.DataDir, "state", "settings.json"), []byte(settings), 0o600)
+	_ = os.WriteFile(filepath.Join(rg.r.Cfg.DataDir, "state", "settings.json"), []byte(settings), 0o600)
 	rg.r.Store, _ = store.Open(filepath.Join(rg.r.Cfg.DataDir, "state"))
 	rg.pkgName = func(string) string { return "com.netflix.ninja" } // pretend the clone patch did not rename it
 	rg.adb.installMsg[netflix] = "Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE]"
@@ -394,7 +394,7 @@ func TestLoopRunsOnStartThenOnTriggerAndStops(t *testing.T) {
 	done := make(chan struct{})
 	go func() { rg.r.Loop(ctx); close(done) }()
 	wait := func(n int) {
-		for i := 0; i < 200; i++ {
+		for range 200 {
 			mu.Lock()
 			got := runs
 			mu.Unlock()
@@ -430,10 +430,10 @@ func TestTriggerQueuesAtMostOne(t *testing.T) {
 
 func TestRingKeepsLastLines(t *testing.T) {
 	r := NewRing(3, nil)
-	for i := 0; i < 5; i++ {
-		fmt.Fprintf(r, "line %d\n", i)
+	for i := range 5 {
+		_, _ = fmt.Fprintf(r, "line %d\n", i)
 	}
-	fmt.Fprint(r, "partial")
+	_, _ = fmt.Fprint(r, "partial")
 	got := r.Lines()
 	if strings.Join(got, "|") != "line 2|line 3|line 4" {
 		t.Errorf("%v", got)

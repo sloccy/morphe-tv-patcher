@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -76,12 +77,12 @@ type Store struct {
 
 // Open loads (or starts empty) the files in dir.
 func Open(dir string) (*Store, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, err
 	}
 	s := &Store{dir: dir, ports: map[string]int{}}
 	for name, v := range map[string]any{"settings.json": &s.settings, "state.json": &s.state, "adb_ports.json": &s.ports} {
-		b, err := os.ReadFile(filepath.Join(dir, name))
+		b, err := os.ReadFile(filepath.Join(dir, name)) //nolint:gosec // our own data directory
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -139,9 +140,7 @@ func (s *Store) Settings() Settings {
 		d.Apps = append([]string{}, d.Apps...)
 		out.Devices = append(out.Devices, d)
 	}
-	for k, v := range s.settings.Overrides {
-		out.Overrides[k] = v
-	}
+	maps.Copy(out.Overrides, s.settings.Overrides)
 	return out
 }
 

@@ -79,13 +79,13 @@ func TestLatestReleaseAndDownload(t *testing.T) {
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/repos/o/r/releases":
-			fmt.Fprintf(w, `[
+			_, _ = fmt.Fprintf(w, `[
 			 {"tag_name":"v9","draft":true,"assets":[{"name":"patches-9.mpp","size":3,"browser_download_url":"%[1]s/f9"}]},
 			 {"tag_name":"v8","prerelease":true,"assets":[{"name":"patches-8.mpp","size":3,"browser_download_url":"%[1]s/f8"}]},
 			 {"tag_name":"v7","assets":[{"name":"notes.txt","size":1,"browser_download_url":"x"}]},
 			 {"tag_name":"v6","assets":[{"name":"patches-6.mpp","size":3,"browser_download_url":"%[1]s/f6"}]}]`, srv.URL)
 		case "/f6":
-			w.Write([]byte("abc"))
+			_, _ = w.Write([]byte("abc"))
 		default:
 			http.NotFound(w, r)
 		}
@@ -100,12 +100,12 @@ func TestLatestReleaseAndDownload(t *testing.T) {
 		t.Fatalf("got %+v %v (draft, prerelease and asset-less releases must be skipped)", rel, err)
 	}
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "patches-1.mpp"), []byte("old"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "patches-1.mpp"), []byte("old"), 0o600)
 	path, err := Download(context.Background(), srv.Client(), rel, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b, _ := os.ReadFile(path); string(b) != "abc" {
+	if b, _ := os.ReadFile(path); string(b) != "abc" { //nolint:gosec // test temp dir
 		t.Errorf("content %q", b)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "patches-1.mpp")); err == nil {

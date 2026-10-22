@@ -23,6 +23,9 @@ import (
 	"github.com/sloccy/morphe-tv-patcher/internal/apk"
 )
 
+// maxBaseAPK bounds how much we extract from a bundle (a decompression-bomb guard).
+const maxBaseAPK = 1 << 30
+
 // TargetABI is the native code this patcher installs for.
 const TargetABI = "armeabi-v7a"
 
@@ -101,7 +104,7 @@ func PickBase(zr *zip.Reader) (*zip.File, error) {
 					Package string `json:"package_name"`
 				}
 				_ = json.NewDecoder(io.LimitReader(rc, 1<<20)).Decode(&m)
-				rc.Close()
+				_ = rc.Close()
 				for _, t := range tops {
 					if m.Package != "" && t.Name == m.Package+".apk" {
 						return t, nil
@@ -131,7 +134,7 @@ func Inspect(ctx context.Context, path string) (*Facts, error) {
 	if err != nil {
 		return nil, &Error{KindFormat, "not a zip/apk"}
 	}
-	defer zr.Close()
+	defer func() { _ = zr.Close() }()
 
 	abis := map[string]bool{}
 	basePath := path
@@ -157,7 +160,7 @@ func Inspect(ctx context.Context, path string) (*Facts, error) {
 		if err != nil {
 			return nil, err
 		}
-		defer os.RemoveAll(dir)
+		defer func() { _ = os.RemoveAll(dir) }()
 		tmp = filepath.Join(dir, "base.apk")
 		if err := extract(bf, tmp); err != nil {
 			return nil, err
@@ -169,7 +172,7 @@ func Inspect(ctx context.Context, path string) (*Facts, error) {
 	if err != nil {
 		return nil, &Error{KindFormat, "base apk is not a zip"}
 	}
-	defer bz.Close()
+	defer func() { _ = bz.Close() }()
 	var manifest []byte
 	for _, f := range bz.File {
 		if strings.HasPrefix(f.Name, "lib/") {
@@ -183,7 +186,7 @@ func Inspect(ctx context.Context, path string) (*Facts, error) {
 				return nil, &Error{KindFormat, err.Error()}
 			}
 			manifest, err = io.ReadAll(io.LimitReader(rc, 16<<20))
-			rc.Close()
+			_ = rc.Close()
 			if err != nil {
 				return nil, &Error{KindFormat, err.Error()}
 			}
@@ -193,11 +196,11 @@ func Inspect(ctx context.Context, path string) (*Facts, error) {
 	if err != nil {
 		return nil, &Error{KindFormat, "unreadable manifest: " + err.Error()}
 	}
-	fh, err := os.Open(basePath)
+	fh, err := os.Open(basePath) //nolint:gosec // a file we just extracted or the caller's own path
 	if err != nil {
 		return nil, err
 	}
-	defer fh.Close()
+	defer func() { _ = fh.Close() }()
 	st, _ := fh.Stat()
 	signer, serr := apk.SignerSHA256(fh, st.Size())
 	f := &Facts{Package: m.Package, Version: m.VersionName, Leanback: m.Leanback, ABIs: abis, Signer: signer}
@@ -214,14 +217,17 @@ func extract(f *zip.File, dest string) error {
 	if err != nil {
 		return err
 	}
-	defer rc.Close()
-	out, err := os.Create(dest)
+	defer func() { _ = rc.Close() }()
+	out, err := os.Create(dest) //nolint:gosec // dest is inside our own temp directory
 	if err != nil {
 		return err
 	}
-	_, err = io.Copy(out, rc)
+	n, err := io.Copy(out, io.LimitReader(rc, maxBaseAPK+1))
 	if cerr := out.Close(); err == nil {
 		err = cerr
+	}
+	if err == nil && n > maxBaseAPK {
+		err = &Error{KindFormat, "base apk is implausibly large"}
 	}
 	return err
 }
@@ -262,7 +268,7 @@ func Verify(ctx context.Context, path, pkg, version, source, pinned string) (*Ve
 }
 
 func keys(m map[string]bool) []string {
-	var out []string
+	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
 	}
@@ -275,10 +281,10 @@ var (
 	warnOnce      sync.Once
 	signerDigest  = regexp.MustCompile(`(?m)^Signer #1 certificate SHA-256 digest: ([0-9a-fA-F]{64})`)
 	lookPath      = exec.LookPath
-	execAPKSigner = func(ctx context.Context, exe, apk string) ([]byte, error) {
+	execAPKSigner = func(ctx context.Context, exe, apkPath string) ([]byte, error) {
 		ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, exe, "verify", "--print-certs", apk)
+		cmd := exec.CommandContext(ctx, exe, "verify", "--print-certs", apkPath) //nolint:gosec // exe came from LookPath; the path is a temp file we created
 		var out bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &out, &out
 		err := cmd.Run()
@@ -287,19 +293,19 @@ var (
 )
 
 // runAPKSigner returns (verdict, notes, signer from its output). nil verdict if not installed.
-func runAPKSigner(ctx context.Context, apk string) (*bool, string, string) {
+func runAPKSigner(ctx context.Context, apkPath string) (verdict *bool, notes, signer string) {
 	exe, err := lookPath("apksigner")
 	if err != nil {
 		warnOnce.Do(func() { slog.Warn("apksigner not found; skipping the cryptographic signature check") })
 		return nil, "", ""
 	}
-	out, err := execAPKSigner(ctx, exe, apk)
+	out, err := execAPKSigner(ctx, exe, apkPath)
 	ok := err == nil
 	var cert string
 	if m := signerDigest.FindSubmatch(out); m != nil {
 		cert = strings.ToLower(string(m[1]))
 	}
-	notes := string(out)
+	notes = string(out)
 	if len(notes) > 300 {
 		notes = notes[:300]
 	}
@@ -316,24 +322,25 @@ func PackageOf(apkPath string) (string, error) {
 	if err != nil {
 		return "", &Error{KindFormat, "not a zip/apk"}
 	}
-	defer zr.Close()
+	defer func() { _ = zr.Close() }()
 	for _, f := range zr.File {
-		if f.Name == "AndroidManifest.xml" {
-			rc, err := f.Open()
-			if err != nil {
-				return "", err
-			}
-			b, err := io.ReadAll(io.LimitReader(rc, 16<<20))
-			rc.Close()
-			if err != nil {
-				return "", err
-			}
-			m, err := apk.ParseManifest(b)
-			if err != nil {
-				return "", &Error{KindFormat, err.Error()}
-			}
-			return m.Package, nil
+		if f.Name != "AndroidManifest.xml" {
+			continue
 		}
+		rc, err := f.Open()
+		if err != nil {
+			return "", err
+		}
+		b, err := io.ReadAll(io.LimitReader(rc, 16<<20))
+		_ = rc.Close()
+		if err != nil {
+			return "", err
+		}
+		m, err := apk.ParseManifest(b)
+		if err != nil {
+			return "", &Error{KindFormat, err.Error()}
+		}
+		return m.Package, nil
 	}
 	return "", &Error{KindFormat, "no AndroidManifest.xml"}
 }

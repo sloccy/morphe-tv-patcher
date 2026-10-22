@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -42,7 +43,7 @@ func (c *Client) pause(ctx context.Context, lo, hi time.Duration) {
 		c.Sleep(ctx, lo, hi)
 		return
 	}
-	sleep(ctx, lo+time.Duration(rand.Int64N(int64(hi-lo)+1)))
+	sleep(ctx, lo+time.Duration(rand.Int64N(int64(hi-lo)+1))) //nolint:gosec // jitter between requests, not security
 }
 
 func sleep(ctx context.Context, d time.Duration) {
@@ -70,8 +71,6 @@ type Result struct {
 	Path string
 	Slug string
 }
-
-var releaseHref = regexp.MustCompile(`^/apk/([^/]+/[^/]+)/[^/]+-release/?$`)
 
 // FindRelease finds the release page for a version under an app page. The URL is guessed
 // first; if that 404s the app's own page is searched (release URLs often differ from the
@@ -107,7 +106,7 @@ func (c *Client) FindRelease(ctx context.Context, slug, version string) (string,
 		}
 		for _, core := range cores {
 			for _, a := range find(app.Doc, isA) {
-				h := strings.SplitN(attr(a, "href"), "#", 2)[0]
+				h, _, _ := strings.Cut(attr(a, "href"), "#")
 				if !strings.Contains(h, "/"+slug+"/") {
 					continue
 				}
@@ -158,7 +157,7 @@ func PickVariant(rel *Page, version string, sdk int) (string, error) {
 		if link == nil {
 			continue
 		}
-		score := 0
+		var score int
 		switch {
 		case strings.Contains(t, "armeabi-v7a") && strings.Contains(t, "arm64-v8a"),
 			strings.Contains(t, "universal"), strings.Contains(t, "noarch"):
@@ -245,7 +244,8 @@ func (c *Client) fetchSlug(ctx context.Context, req AppRequest, slug string) (st
 	}
 	slog.Info("apkmirror release page", "url", rel)
 	c.pause(ctx, 2*time.Second, 6*time.Second)
-	variant, btn := rel, ""
+	variant := rel
+	var btn string
 	vhref, err := PickVariant(rp, req.Version, req.SDK)
 	switch {
 	case err == nil:
@@ -297,7 +297,7 @@ func fixExtension(path string) string {
 			break
 		}
 	}
-	zr.Close()
+	_ = zr.Close()
 	if !plain {
 		return path
 	}
@@ -371,7 +371,7 @@ func tokens(pkg, name string) []string {
 	for _, w := range regexp.MustCompile(`[A-Za-z0-9]+`).FindAllString(name, -1) {
 		add(w)
 	}
-	for _, seg := range strings.Split(pkg, ".") {
+	for seg := range strings.SplitSeq(pkg, ".") {
 		if len(seg) >= 4 {
 			add(seg)
 		}
@@ -412,7 +412,7 @@ func (c *Client) Candidates(ctx context.Context, pkg, name string) ([]string, er
 	var tv, other []string
 	for _, a := range find(p.Doc, isA) {
 		m := regexp.MustCompile(`^/apk/([^/]+/[^/]+)/`).FindStringSubmatch(attr(a, "href"))
-		if m == nil || seen[m[1]] {
+		if len(m) == 0 || seen[m[1]] {
 			continue
 		}
 		seen[m[1]] = true
@@ -425,7 +425,7 @@ func (c *Client) Candidates(ctx context.Context, pkg, name string) ([]string, er
 			other = append(other, m[1])
 		}
 	}
-	out := append(tv, other...)
+	out := slices.Concat(tv, other)
 	if len(out) > 4 {
 		out = out[:4]
 	}
@@ -474,7 +474,7 @@ func Download(ctx context.Context, req AppRequest, o Options) (Result, string, e
 		}
 		if i < len(order)-1 {
 			wait := backoff[min(i, len(backoff)-1)]
-			wait = time.Duration(float64(wait) * (0.8 + 0.5*rand.Float64()))
+			wait = time.Duration(float64(wait) * (0.8 + 0.5*rand.Float64())) //nolint:gosec // jitter, not security
 			slog.Warn("blocked; backing off", "profile", p.Name, "wait", wait.Round(time.Second), "err", err)
 			sleep(ctx, wait)
 		}

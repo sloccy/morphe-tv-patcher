@@ -3,6 +3,7 @@ package apk
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,7 +12,7 @@ import (
 )
 
 // Values recorded from the real APKs (cross-checked with androguard and apksigner).
-var real = []struct {
+var realApps = []struct {
 	file, pkg, version, signer string
 }{
 	{"prime", "com.amazon.amazonvideo.livingroom", "6.23.23+v15.5.0.70-armv7a",
@@ -23,7 +24,7 @@ var real = []struct {
 }
 
 func TestParseManifestRealApps(t *testing.T) {
-	for _, tc := range real {
+	for _, tc := range realApps {
 		data, err := os.ReadFile(filepath.Join("testdata", tc.file+".AndroidManifest.xml"))
 		if err != nil {
 			t.Fatal(err)
@@ -67,18 +68,18 @@ func TestSignerRealAPKs(t *testing.T) {
 		t.Skip("no base.apk files")
 	}
 	for _, f := range matches {
-		fh, err := os.Open(f)
+		fh, err := os.Open(f) //nolint:gosec // test files named by an env var
 		if err != nil {
 			t.Fatal(err)
 		}
 		st, _ := fh.Stat()
 		got, err := SignerSHA256(fh, st.Size())
-		fh.Close()
+		_ = fh.Close()
 		if err != nil {
 			t.Fatalf("%s: %v", f, err)
 		}
 		found := false
-		for _, tc := range real {
+		for _, tc := range realApps {
 			if got == tc.signer {
 				found = true
 			}
@@ -102,9 +103,9 @@ func TestSignerV1OnlyAndGarbage(t *testing.T) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 	w, _ := zw.Create("a")
-	w.Write([]byte("x"))
-	zw.Close()
-	if _, err := SignerSHA256(bytes.NewReader(buf.Bytes()), int64(buf.Len())); err != ErrNoSigningBlock {
+	_, _ = w.Write([]byte("x"))
+	_ = zw.Close()
+	if _, err := SignerSHA256(bytes.NewReader(buf.Bytes()), int64(buf.Len())); !errors.Is(err, ErrNoSigningBlock) {
 		t.Errorf("v1-only apk: got %v", err)
 	}
 	if _, err := SignerSHA256(bytes.NewReader([]byte("nope")), 4); err == nil {

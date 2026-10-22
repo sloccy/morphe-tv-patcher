@@ -50,7 +50,7 @@ func (t *Telegram) Send(ctx context.Context, title, body string) {
 		slog.Warn("notify failed", "err", redact(err.Error(), t.Token))
 		return
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		slog.Warn("notify failed", "status", resp.StatusCode)
 	}

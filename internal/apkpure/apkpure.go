@@ -31,7 +31,7 @@ func Available() bool {
 
 // run is replaced in tests.
 var run = func(ctx context.Context, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "apkeep", args...)
+	cmd := exec.CommandContext(ctx, "apkeep", args...) //nolint:gosec // fixed binary; package and version come from the patch data and are passed as arguments, not through a shell
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	err := cmd.Run()
@@ -47,7 +47,7 @@ func Download(ctx context.Context, pkg, version, destDir string) (string, error)
 	if err != nil {
 		return "", err
 	}
-	defer os.RemoveAll(tmp)
+	defer func() { _ = os.RemoveAll(tmp) }()
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Minute)
 	defer cancel()
 	out, runErr := run(ctx, "-a", pkg+"@"+version, "-d", "apk-pure", "-o", Options, "-s", "3000", tmp)

@@ -28,18 +28,18 @@ func newRig(t *testing.T) *rig {
 	base := t.TempDir()
 	e := &Env{InputDir: filepath.Join(base, "input"), CacheDir: filepath.Join(base, "cache"), Store: st,
 		DirectOK: true, APKPureOK: true, PureAvailable: func() bool { return true }}
-	os.MkdirAll(e.CacheDir, 0o755)
+	_ = os.MkdirAll(e.CacheDir, 0o750)
 	e.Verify = func(ctx context.Context, path, pkg, version, source, pinned string) (*verify.Verified, error) {
 		return &verify.Verified{Path: path, Source: source, Signer: "aa", Package: pkg, Version: version}, nil
 	}
 	e.Mirror = func(ctx context.Context, req apkmirror.AppRequest, o apkmirror.Options) (apkmirror.Result, string, error) {
 		p := filepath.Join(req.DestDir, "m.apkm")
-		os.WriteFile(p, []byte("PK"), 0o644)
+		_ = os.WriteFile(p, []byte("PK"), 0o600)
 		return apkmirror.Result{Path: p, Slug: "pub/app"}, "chrome", nil
 	}
 	e.Pure = func(ctx context.Context, pkg, version, dest string) (string, error) {
 		p := filepath.Join(dest, "p.xapk")
-		os.WriteFile(p, []byte("PK"), 0o644)
+		_ = os.WriteFile(p, []byte("PK"), 0o600)
 		return p, nil
 	}
 	r.env = e
@@ -58,7 +58,7 @@ func TestAPKMirrorFirstLearnsSignerSlugAndProfile(t *testing.T) {
 	if s.SignerSHA256 != "aa" || s.Slug != "pub/app" || r.st.LastProfile() != "chrome" {
 		t.Errorf("state %+v profile %q", s, r.st.LastProfile())
 	}
-	os.Remove(filepath.Join(r.env.CacheDir, "m.apkm"))
+	_ = os.Remove(filepath.Join(r.env.CacheDir, "m.apkm"))
 	f, _ = Fetch(context.Background(), r.env, app, 31)
 	if f.LearnedSigner {
 		t.Error("signer already on record")
@@ -68,7 +68,7 @@ func TestAPKMirrorFirstLearnsSignerSlugAndProfile(t *testing.T) {
 func TestFallsThroughDirectThenFlareThenAPKPure(t *testing.T) {
 	r := newRig(t)
 	r.env.FlareURL = "http://flare"
-	r.st.UpdateApp("com.x", func(s *store.AppState) { s.SignerSHA256 = "aa" })
+	_ = r.st.UpdateApp("com.x", func(s *store.AppState) { s.SignerSHA256 = "aa" })
 	var order []string
 	r.env.Mirror = func(ctx context.Context, req apkmirror.AppRequest, o apkmirror.Options) (apkmirror.Result, string, error) {
 		if o.FlareURL != "" {
@@ -139,10 +139,10 @@ func TestSignatureMismatchIsFatalAndTheFileIsDeleted(t *testing.T) {
 func TestDropFolderWinsAndOldVersionsAreIgnored(t *testing.T) {
 	r := newRig(t)
 	dir := filepath.Join(r.env.InputDir, "com.x")
-	os.MkdirAll(dir, 0o755)
-	os.WriteFile(filepath.Join(dir, "old.apkm"), []byte("x"), 0o644)
-	os.WriteFile(filepath.Join(dir, "new.apkm"), []byte("x"), 0o644)
-	os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("x"), 0o644)
+	_ = os.MkdirAll(dir, 0o750)
+	_ = os.WriteFile(filepath.Join(dir, "old.apkm"), []byte("x"), 0o600)
+	_ = os.WriteFile(filepath.Join(dir, "new.apkm"), []byte("x"), 0o600)
+	_ = os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("x"), 0o600)
 	r.env.Verify = func(ctx context.Context, path, pkg, version, source, pinned string) (*verify.Verified, error) {
 		if filepath.Base(path) == "old.apkm" {
 			return nil, &verify.Error{Kind: verify.KindVersion, Msg: "old"}
@@ -161,7 +161,7 @@ func TestDropFolderWinsAndOldVersionsAreIgnored(t *testing.T) {
 
 func TestCacheIgnoresOtherAppsFilesAndTheyAreNotFatal(t *testing.T) {
 	r := newRig(t)
-	os.WriteFile(filepath.Join(r.env.CacheDir, "other.apkm"), []byte("x"), 0o644)
+	_ = os.WriteFile(filepath.Join(r.env.CacheDir, "other.apkm"), []byte("x"), 0o600)
 	r.env.Verify = func(ctx context.Context, path, pkg, version, source, pinned string) (*verify.Verified, error) {
 		if filepath.Base(path) == "other.apkm" {
 			return nil, &verify.Error{Kind: verify.KindPackage, Msg: "other app"}
@@ -189,7 +189,7 @@ func TestSlugOverrideHintAndSDKArePassedThrough(t *testing.T) {
 	a := app
 	a.SlugOverride = "me/override"
 	a.Package = "com.netflix.ninja"
-	Fetch(context.Background(), r.env, a, 31)
+	_, _ = Fetch(context.Background(), r.env, a, 31)
 	if got.KnownSlug != "me/override" || got.Hint != apkmirror.Hints["com.netflix.ninja"] || got.SDK != 31 {
 		t.Errorf("%+v", got)
 	}

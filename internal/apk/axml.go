@@ -7,6 +7,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
+	"strconv"
 	"unicode/utf16"
 )
 
@@ -44,10 +46,7 @@ func ParseManifest(data []byte) (*Manifest, error) {
 	if len(data) < 8 || binary.LittleEndian.Uint16(data) != chunkXML {
 		return nil, errors.New("apk: not a binary xml document")
 	}
-	total := int(binary.LittleEndian.Uint32(data[4:]))
-	if total > len(data) {
-		total = len(data)
-	}
+	total := min(int(binary.LittleEndian.Uint32(data[4:])), len(data))
 	var (
 		strs  []string
 		m     = &Manifest{}
@@ -129,12 +128,7 @@ func collect(m *Manifest, name string, stack []string, attrs []attr) {
 }
 
 func inIntentFilter(stack []string) bool {
-	for _, s := range stack {
-		if s == "intent-filter" {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(stack, "intent-filter")
 }
 
 func parseStringPool(c []byte) ([]string, error) {
@@ -150,7 +144,7 @@ func parseStringPool(c []byte) ([]string, error) {
 		return nil, errTruncated
 	}
 	out := make([]string, count)
-	for i := 0; i < count; i++ {
+	for i := range count {
 		off := start + int(binary.LittleEndian.Uint32(c[hdr+4*i:]))
 		if off >= len(c) {
 			return nil, errTruncated
@@ -196,7 +190,7 @@ func readString(b []byte, utf8 bool) (string, error) {
 	return string(utf16.Decode(u)), nil
 }
 
-func varLen8(b []byte) (int, int) {
+func varLen8(b []byte) (length, size int) {
 	if len(b) == 0 {
 		return 0, 1
 	}
@@ -226,7 +220,7 @@ func parseStartElement(c []byte, hdr int, strs []string) (string, []attr, error)
 		return "", nil, fmt.Errorf("apk: bad attribute size %d", attrSize)
 	}
 	attrs := make([]attr, 0, attrCount)
-	for i := 0; i < attrCount; i++ {
+	for i := range attrCount {
 		o := attrStart + i*attrSize
 		if o+20 > len(body) {
 			return "", nil, errTruncated
@@ -246,7 +240,7 @@ func parseStartElement(c []byte, hdr int, strs []string) (string, []attr, error)
 			at.value, at.isString = str(strs, data), true
 		case dt == typeIntDec || dt == typeIntHex:
 			at.num = data
-			at.value = fmt.Sprint(data)
+			at.value = strconv.FormatUint(uint64(data), 10)
 		default:
 			at.num = data // references and other types are not literal values
 		}

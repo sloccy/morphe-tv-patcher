@@ -1,0 +1,107 @@
+version: "2"
+
+run:
+  timeout: 3m
+
+linters:
+  default: standard
+  enable:
+    # Pre-existing
+    - copyloopvar
+    - gocritic
+    - gosec
+    - misspell
+    - noctx
+    - unparam
+    # Security
+    - bidichk
+    - bodyclose
+    - depguard
+    # Correctness
+    - durationcheck
+    - errorlint
+    - exhaustive
+    - forcetypeassert
+    - musttag
+    - nilerr
+    - nakedret
+    - nilnesserr
+    - nilnil
+    - recvcheck
+    # Resource efficiency
+    - canonicalheader
+    - contextcheck
+    - fatcontext
+    - makezero
+    - prealloc
+    # Modernisation
+    - exptostd
+    - intrange
+    - modernize
+    - perfsprint
+    - unconvert
+    # Consistency
+    - asciicheck
+    - dupword
+    - errname
+    - gocheckcompilerdirectives
+    - iface
+    - nolintlint
+    - nosprintfhostport
+    - predeclared
+    - reassign
+    - revive
+    - usestdlibvars
+    - wastedassign
+    - whitespace
+    # Testing
+    - thelper
+    - usetesting
+    # Mirror patterns
+    - mirror
+  settings:
+    exhaustive:
+      default-signifies-exhaustive: true
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+      disabled-checks:
+        - hugeParam
+        - rangeValCopy
+        - commentedOutCode
+    nolintlint:
+      require-explanation: true
+      allow-unused: true # needed for platform-specific nolint directives (e.g. gosec G115 on Linux only)
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: error-return
+        - name: error-strings
+        - name: increment-decrement
+        - name: var-declaration
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: superfluous-else
+        - name: unreachable-code
+    depguard:
+      rules:
+        main:
+          deny:
+            - pkg: "crypto/md5"
+              desc: "use crypto/sha256 or crypto/sha512 instead"
+            - pkg: "crypto/sha1"
+              desc: "use crypto/sha256 or crypto/sha512 instead"
+            - pkg: "unsafe"
+              desc: "unsafe is not needed in this project"
+            - pkg: "net/http/cgi"
+              desc: "CGI is not appropriate for this project"
+            - pkg: "net/http/pprof"
+              desc: "do not expose pprof in production builds"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

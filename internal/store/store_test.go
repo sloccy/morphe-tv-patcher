@@ -28,9 +28,9 @@ func TestDevicesPersistAndIDsAreUnique(t *testing.T) {
 	if err := s.SetApps(a.ID, []string{"com.b", "com.a", "com.b"}); err != nil {
 		t.Fatal(err)
 	}
-	s.SetInstall(a.ID, "com.a", Install{APKVersion: "1.0", PatchesVersion: "v1"})
-	s.SetPort(a.ID, 41234)
-	s.UpdateApp("com.a", func(x *AppState) { x.SignerSHA256 = "ab" })
+	_ = s.SetInstall(a.ID, "com.a", Install{APKVersion: "1.0", PatchesVersion: "v1"})
+	_ = s.SetPort(a.ID, 41234)
+	_ = s.UpdateApp("com.a", func(x *AppState) { x.SignerSHA256 = "ab" })
 
 	s2, err := Open(dir) // reload from disk
 	if err != nil {
@@ -51,8 +51,8 @@ func TestDevicesPersistAndIDsAreUnique(t *testing.T) {
 func TestRemoveDeviceForgetsItsInstalls(t *testing.T) {
 	s, _ := Open(t.TempDir())
 	d, _ := s.AddDevice("TV", "10.0.0.6")
-	s.SetInstall(d.ID, "com.a", Install{APKVersion: "1"})
-	s.SetPort(d.ID, 1111)
+	_ = s.SetInstall(d.ID, "com.a", Install{APKVersion: "1"})
+	_ = s.SetPort(d.ID, 1111)
 	if err := s.RemoveDevice(d.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -90,12 +90,12 @@ func TestConcurrentAccessAndNoTempFilesLeft(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := Open(dir)
 	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			s.SetInstall("d", fmt.Sprintf("com.%d", i), Install{APKVersion: "1"})
-			s.UpdateApp(fmt.Sprintf("com.%d", i), func(a *AppState) { a.FetchFailures++ })
+			_ = s.SetInstall("d", fmt.Sprintf("com.%d", i), Install{APKVersion: "1"})
+			_ = s.UpdateApp(fmt.Sprintf("com.%d", i), func(a *AppState) { a.FetchFailures++ })
 			_ = s.Settings()
 		}(i)
 	}
@@ -110,7 +110,7 @@ func TestConcurrentAccessAndNoTempFilesLeft(t *testing.T) {
 
 func TestCorruptFileIsAnErrorNotSilentlyEmpty(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "settings.json"), []byte("{broken"), 0o600)
+	_ = os.WriteFile(filepath.Join(dir, "settings.json"), []byte("{broken"), 0o600)
 	if _, err := Open(dir); err == nil {
 		t.Error("a corrupt settings file must not be replaced with an empty one")
 	}
@@ -118,7 +118,7 @@ func TestCorruptFileIsAnErrorNotSilentlyEmpty(t *testing.T) {
 
 func TestOverridesAreReadFromSettings(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "settings.json"),
+	_ = os.WriteFile(filepath.Join(dir, "settings.json"),
 		[]byte(`{"devices":[],"overrides":{"com.a":{"apkmirror":"pub/app","allow_uninstall":true}}}`), 0o600)
 	s, _ := Open(dir)
 	if o := s.Override("com.a"); o.APKMirror != "pub/app" || !o.AllowUninstall {

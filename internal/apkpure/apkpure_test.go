@@ -13,7 +13,7 @@ func fakeApkeep(t *testing.T, script string) {
 	t.Helper()
 	dir := t.TempDir()
 	p := filepath.Join(dir, "apkeep")
-	if err := os.WriteFile(p, []byte("#!/bin/sh\n"+script), 0o755); err != nil {
+	if err := os.WriteFile(p, []byte("#!/bin/sh\n"+script), 0o755); err != nil { //nolint:gosec // a test stub that must be executable
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -35,13 +35,13 @@ echo bundle-contents > "$last/com.x@1.0@armeabi-v7a.xapk"
 	if filepath.Base(p) != "apkpure-com.x-1.0.xapk" {
 		t.Errorf("path %s", p)
 	}
-	args, _ := os.ReadFile(filepath.Join(dir, "args"))
+	args, _ := os.ReadFile(filepath.Join(dir, "args")) //nolint:gosec // test temp dir
 	for _, want := range []string{"-a com.x@1.0", "-d apk-pure", "acknowledge_dangers=true", "arch=armeabi-v7a"} {
 		if !strings.Contains(string(args), want) {
 			t.Errorf("args %q missing %q", args, want)
 		}
 	}
-	if b, _ := os.ReadFile(p); !strings.Contains(string(b), "bundle-contents") {
+	if b, _ := os.ReadFile(p); !strings.Contains(string(b), "bundle-contents") { //nolint:gosec // test temp dir
 		t.Errorf("wrong file chosen: %q", b)
 	}
 }

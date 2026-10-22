@@ -62,7 +62,7 @@ func (o Options) Args() []string {
 
 // runJava is replaced in tests.
 var runJava = func(ctx context.Context, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "java", args...)
+	cmd := exec.CommandContext(ctx, "java", args...) //nolint:gosec // fixed binary; arguments are file paths and patch names, never a shell string
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	err := cmd.Run()
@@ -104,14 +104,14 @@ func AdoptKeystore(log []byte, jar, dest string) error {
 		root = string(m[1])
 	}
 	src := filepath.Join(root, "morphe.keystore")
-	b, err := os.ReadFile(src)
+	b, err := os.ReadFile(src) //nolint:gosec // path from Morphe's own log line or the jar directory
 	if err != nil {
 		return fmt.Errorf("patched, but Morphe's keystore not found at %s; the next run would sign with a different key", src)
 	}
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dest), 0o750); err != nil {
 		return err
 	}
-	if err := os.WriteFile(dest, b, 0o600); err != nil {
+	if err := os.WriteFile(dest, b, 0o600); err != nil { //nolint:gosec // dest is our own keystore path from configuration
 		return err
 	}
 	slog.Warn("new signing keystore saved; BACK IT UP, losing it means uninstalling each app before it can update", "path", dest)
@@ -127,7 +127,7 @@ type result struct {
 
 // CheckResult fails on anything but a clean result.json.
 func CheckResult(path string) error {
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) //nolint:gosec // the result file we asked Morphe to write
 	if err != nil {
 		return errors.New("morphe wrote no result file")
 	}
@@ -153,7 +153,7 @@ var versionLine = regexp.MustCompile(`^\s+(\S.*?)\s+\(\d+ patch(?:es)?\)\s*$`)
 // ParseListVersions reads `list-versions` output (lines like "\t6.23.23+v15… (5 patches)").
 func ParseListVersions(out []byte) []string {
 	var vs []string
-	for _, line := range strings.Split(string(out), "\n") {
+	for line := range strings.SplitSeq(string(out), "\n") {
 		if m := versionLine.FindStringSubmatch(strings.TrimRight(line, "\r")); m != nil {
 			vs = append(vs, m[1])
 		}

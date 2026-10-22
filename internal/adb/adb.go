@@ -11,6 +11,7 @@ import (
 	"net"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,7 +41,7 @@ func New() *Client {
 }
 
 func execRun(ctx context.Context, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "adb", args...)
+	cmd := exec.CommandContext(ctx, "adb", args...) //nolint:gosec // fixed binary; arguments are built by us from validated host/port values
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	err := cmd.Run()
@@ -48,11 +49,12 @@ func execRun(ctx context.Context, args ...string) (string, error) {
 }
 
 func dial(host string, port int) bool {
-	c, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(port)), 400*time.Millisecond)
+	d := net.Dialer{Timeout: 400 * time.Millisecond}
+	c, err := d.DialContext(context.Background(), "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {
 		return false
 	}
-	c.Close()
+	_ = c.Close()
 	return true
 }
 
@@ -121,10 +123,8 @@ func (c *Client) scan(host string) []int {
 		wg   sync.WaitGroup
 		jobs = make(chan int)
 	)
-	for i := 0; i < 400; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 400 {
+		wg.Go(func() {
 			for p := range jobs {
 				if dialFn(host, p) {
 					mu.Lock()
@@ -132,23 +132,15 @@ func (c *Client) scan(host string) []int {
 					mu.Unlock()
 				}
 			}
-		}()
+		})
 	}
 	for p := c.ScanLo; p <= c.ScanHi; p++ {
 		jobs <- p
 	}
 	close(jobs)
 	wg.Wait()
-	sortInts(open)
+	slices.Sort(open)
 	return open
-}
-
-func sortInts(a []int) {
-	for i := 1; i < len(a); i++ {
-		for j := i; j > 0 && a[j] < a[j-1]; j-- {
-			a[j], a[j-1] = a[j-1], a[j]
-		}
-	}
 }
 
 func (c *Client) shell(ctx context.Context, serial, cmd string) (string, error) {
@@ -166,7 +158,7 @@ func (c *Client) ABIs(ctx context.Context, serial string) ([]string, error) {
 		return nil, err
 	}
 	var abis []string
-	for _, a := range strings.Split(out, ",") {
+	for a := range strings.SplitSeq(out, ",") {
 		if a = strings.TrimSpace(a); a != "" {
 			abis = append(abis, a)
 		}
@@ -198,8 +190,8 @@ func (c *Client) InstalledVersion(ctx context.Context, serial, pkg string) (stri
 }
 
 // Install runs `adb install -r`. ok is false with the adb output on failure.
-func (c *Client) Install(ctx context.Context, serial, apk string) (bool, string) {
-	out, err := c.Run(ctx, "-s", serial, "install", "-r", apk)
+func (c *Client) Install(ctx context.Context, serial, apkPath string) (ok bool, output string) {
+	out, err := c.Run(ctx, "-s", serial, "install", "-r", apkPath)
 	return err == nil && strings.Contains(out, "Success"), out
 }
 

@@ -21,18 +21,19 @@ import (
 func lp(b ...[]byte) []byte {
 	var out []byte
 	for _, e := range b {
-		out = binary.LittleEndian.AppendUint32(out, uint32(len(e)))
+		out = binary.LittleEndian.AppendUint32(out, uint32(len(e))) //nolint:gosec // test helper with tiny inputs
 		out = append(out, e...)
 	}
 	return out
 }
 
 // Cert returns a fresh self-signed certificate (DER) and its SHA-256 hex.
-func Cert(cn string) ([]byte, string) {
+func Cert(cn string) (der []byte, fingerprint string) {
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	t := &x509.Certificate{SerialNumber: big.NewInt(time.Now().UnixNano()), Subject: pkix.Name{CommonName: cn},
 		NotBefore: time.Now(), NotAfter: time.Now().Add(time.Hour)}
-	der, err := x509.CreateCertificate(rand.Reader, t, t, &key.PublicKey, key)
+	var err error
+	der, err = x509.CreateCertificate(rand.Reader, t, t, &key.PublicKey, key)
 	if err != nil {
 		panic(err)
 	}
@@ -51,9 +52,9 @@ func Zip(files map[string][]byte) []byte {
 	sort.Strings(names)
 	for _, n := range names {
 		w, _ := zw.Create(n)
-		w.Write(files[n])
+		_, _ = w.Write(files[n])
 	}
-	zw.Close()
+	_ = zw.Close()
 	return buf.Bytes()
 }
 
@@ -78,6 +79,6 @@ func SignedAPK(files map[string][]byte, certDER []byte) []byte {
 	out := append([]byte{}, z[:cd]...)
 	out = append(out, block...)
 	out = append(out, z[cd:]...)
-	binary.LittleEndian.PutUint32(out[eocd+len(block)+16:], uint32(cd+len(block)))
+	binary.LittleEndian.PutUint32(out[eocd+len(block)+16:], uint32(cd+len(block))) //nolint:gosec // test helper with tiny inputs
 	return out
 }

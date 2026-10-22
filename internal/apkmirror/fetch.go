@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/cookiejar"
 	"os"
@@ -114,7 +115,7 @@ func NewDirect(p Profile) *Direct {
 }
 
 func (d *Direct) request(ctx context.Context, url, referer string) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +138,7 @@ func (d *Direct) Page(ctx context.Context, url, referer string) (*Page, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
 		return nil, err
@@ -174,15 +175,15 @@ func (d *Direct) save(req *http.Request, dest string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode == 403 || resp.StatusCode == 429 || resp.StatusCode == 503 {
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
 		return fmt.Errorf("%w: download HTTP %d", ErrBlocked, resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download HTTP %d", resp.StatusCode)
 	}
 	tmp := dest + ".part"
-	f, err := os.Create(tmp)
+	f, err := os.Create(tmp) //nolint:gosec // dest is inside our own cache directory
 	if err != nil {
 		return err
 	}
@@ -191,22 +192,22 @@ func (d *Direct) save(req *http.Request, dest string) error {
 		err = cerr
 	}
 	if err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return err
 	}
 	if !isZip(tmp) {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return fmt.Errorf("%w: download was not a zip (interstitial page?)", ErrBlocked)
 	}
 	return os.Rename(tmp, dest)
 }
 
 func isZip(path string) bool {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // a file we just downloaded
 	if err != nil {
 		return false
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var b [2]byte
 	_, err = io.ReadFull(f, b[:])
 	return err == nil && b[0] == 'P' && b[1] == 'K'
@@ -229,9 +230,7 @@ func NewFlare(url string) *Flare {
 }
 
 func (f *Flare) absorb(r *flaresolverr.Result) {
-	for k, v := range r.Cookies {
-		f.cookies[k] = v
-	}
+	maps.Copy(f.cookies, r.Cookies)
 	if r.UserAgent != "" {
 		f.ua = r.UserAgent
 	}
@@ -241,7 +240,7 @@ func (f *Flare) absorb(r *flaresolverr.Result) {
 func (f *Flare) Page(ctx context.Context, url, _ string) (*Page, error) {
 	r, err := flaresolverr.Solve(ctx, f.hc, f.URL, url)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrBlocked, err)
+		return nil, fmt.Errorf("%w: %w", ErrBlocked, err)
 	}
 	f.absorb(r)
 	if err := classify(url, r.Status, r.HTML); err != nil {
@@ -263,7 +262,7 @@ func (f *Flare) File(ctx context.Context, url, referer, dest string) error {
 		req.Header.Set("User-Agent", f.ua)
 	}
 	for k, v := range f.cookies {
-		req.AddCookie(&http.Cookie{Name: k, Value: v})
+		req.AddCookie(&http.Cookie{Name: k, Value: v}) //nolint:gosec // a request cookie we send to the site; Secure/HttpOnly apply to Set-Cookie
 	}
 	return f.direct.save(req, dest)
 }

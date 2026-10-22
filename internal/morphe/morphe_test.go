@@ -17,7 +17,7 @@ func TestArgsOmitMissingKeystore(t *testing.T) {
 	if strings.Contains(strings.Join(o.Args(), " "), "--keystore") {
 		t.Error("missing keystore file must not be passed (Morphe errors on it)")
 	}
-	os.WriteFile(o.Keystore, []byte("k"), 0o600)
+	_ = os.WriteFile(o.Keystore, []byte("k"), 0o600)
 	a := o.Args()
 	joined := strings.Join(a, " ")
 	for _, want := range []string{"--keystore " + o.Keystore, "--striplibs armeabi-v7a", "--bytecode-mode STRIP_SAFE", "-e A", "-d B"} {
@@ -46,7 +46,7 @@ func TestCheckResultRealShapes(t *testing.T) {
 	}
 	dir := t.TempDir()
 	p := filepath.Join(dir, "r.json")
-	os.WriteFile(p, []byte(`{"success":true,"failedPatches":[{"name":"X"}]}`), 0o644)
+	_ = os.WriteFile(p, []byte(`{"success":true,"failedPatches":[{"name":"X"}]}`), 0o600)
 	if CheckResult(p) == nil {
 		t.Error("failed patches must fail")
 	}
@@ -65,13 +65,13 @@ func TestParseListVersionsRealOutput(t *testing.T) {
 func TestPatchAdoptsKeystore(t *testing.T) {
 	dir := t.TempDir()
 	root := filepath.Join(dir, "data-root")
-	os.MkdirAll(root, 0o755)
-	os.WriteFile(filepath.Join(root, "morphe.keystore"), []byte("KEY"), 0o600)
+	_ = os.MkdirAll(root, 0o750)
+	_ = os.WriteFile(filepath.Join(root, "morphe.keystore"), []byte("KEY"), 0o600)
 	o := Options{Jar: filepath.Join(dir, "m.jar"), MPP: "p", Input: "in", Out: filepath.Join(dir, "o.apk"),
 		Keystore: filepath.Join(dir, "state", "morphe.keystore")}
 	runJava = func(ctx context.Context, args ...string) ([]byte, error) {
-		os.WriteFile(o.Out, []byte("apk"), 0o644)
-		os.WriteFile(o.ResultFile(), []byte(`{"success":true,"failedPatches":[]}`), 0o644)
+		_ = os.WriteFile(o.Out, []byte("apk"), 0o600)
+		_ = os.WriteFile(o.ResultFile(), []byte(`{"success":true,"failedPatches":[]}`), 0o600)
 		return []byte("INFO: Morphe data root: " + root + " (JAR-adjacent)\n"), nil
 	}
 	if err := Patch(context.Background(), o); err != nil {

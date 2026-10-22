@@ -2,7 +2,7 @@
 //
 //	tv-patcher run          web page + scheduler (the container default)
 //	tv-patcher once         one pass now, print the results
-//	tv-patcher pair         pair a device from the command line
+//	tv-patcher pair         register a device (command-line alternative to the web page)
 //	tv-patcher fetch        download and verify one app (debugging / CI)
 //	tv-patcher healthcheck  for the Docker HEALTHCHECK
 package main
@@ -77,7 +77,7 @@ type app struct {
 	hc     *http.Client
 }
 
-func setup(logToRing bool) (*app, error) {
+func setup() (*app, error) {
 	cfg, err := config.FromEnv(os.Getenv)
 	if err != nil {
 		return nil, err
@@ -119,7 +119,7 @@ func setup(logToRing bool) (*app, error) {
 }
 
 func cmdRun() error {
-	a, err := setup(true)
+	a, err := setup()
 	if err != nil {
 		return err
 	}
@@ -165,8 +165,8 @@ func cmdOnce(args []string) error {
 	noDev := fs.Bool("no-device", false, "do not use adb at all (patch only)")
 	var apps listFlag
 	fs.Var(&apps, "app", "package to handle (repeatable, or comma separated)")
-	fs.Parse(args)
-	a, err := setup(false)
+	_ = fs.Parse(args)
+	a, err := setup()
 	if err != nil {
 		return err
 	}
@@ -195,8 +195,8 @@ func cmdPair(args []string) error {
 	device := fs.String("device", "", "device id (default: the only device)")
 	port := fs.Int("pair-port", 0, "port shown in the TV's pairing dialog")
 	code := fs.String("code", "", "6-digit pairing code")
-	fs.Parse(args)
-	a, err := setup(false)
+	_ = fs.Parse(args)
+	a, err := setup()
 	if err != nil {
 		return err
 	}
@@ -225,11 +225,11 @@ func cmdFetch(args []string) error {
 	pkg := fs.String("package", "", "package name")
 	ver := fs.String("version", "", "version (default: newest the patches support)")
 	sdk := fs.Int("sdk", 31, "device API level")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 	if *pkg == "" {
 		return errors.New("usage: fetch --package com.example.app [--version V]")
 	}
-	a, err := setup(false)
+	a, err := setup()
 	if err != nil {
 		return err
 	}
@@ -276,13 +276,17 @@ func cmdHealth() error {
 		port = "8093"
 	}
 	c := &http.Client{Timeout: 4 * time.Second}
-	resp, err := c.Get("http://127.0.0.1:" + port + "/api/health")
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://127.0.0.1:"+port+"/api/health", http.NoBody) //nolint:gosec // localhost only; the port comes from our own environment
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	resp, err := c.Do(req) //nolint:gosec // localhost only; the port comes from our own environment
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 16))
-	if resp.StatusCode != 200 || string(b) != "ok" {
+	if resp.StatusCode != http.StatusOK || string(b) != "ok" {
 		return fmt.Errorf("unhealthy: HTTP %d", resp.StatusCode)
 	}
 	return nil
