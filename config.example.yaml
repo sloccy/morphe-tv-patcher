@@ -1,0 +1,12 @@
+device: { host: "192.168.1.50" }   # Google TV picks a random port; found automatically. Optional: port: 41234
+schedule: { interval: "6h" }
+patches: { repo: ajstrick81/morphe-androidtv-patches, prerelease: false }
+morphe: { bytecode_mode: STRIP_SAFE }
+apps:
+  - package: com.amazon.amazonvideo.livingroom
+    apkmirror: amazon-mobile-llc/prime-video-android-tv-android-tv
+  - package: com.netflix.ninja
+    apkmirror: netflix-inc/netflix-android-tv
+    installed_package: com.netflix.ninja.clone   # patched app installs as a clone; stock Netflix stays
+  - package: com.disney.disneyplus
+    apkmirror: disney/disney-android-tv

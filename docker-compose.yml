@@ -1,0 +1,21 @@
+services:
+  patcher:
+    image: ghcr.io/sloccy/morphe-tv-patcher:latest
+    build:
+      context: .
+      args: { MORPHE_VERSION: "${MORPHE_VERSION:-v1.19.0}" }
+    network_mode: host
+    restart: unless-stopped
+    env_file: /srv/secrets/telegram.env   # TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID, shared with Gatus
+    environment:
+      TZ: America/New_York
+      GITHUB_TOKEN: ""        # optional, avoids API rate limits
+    volumes:
+      - ./config:/config
+      - state:/data              # keystore, state.json, last adb port (small, worth backing up)
+      - work:/data/work          # APK cache, drop folder, patched output (large, regenerable)
+      - adbkeys:/root/.android   # pairing keys
+volumes:
+  state:
+  work:
+  adbkeys:
