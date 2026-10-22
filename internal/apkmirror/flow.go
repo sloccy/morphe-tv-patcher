@@ -105,23 +105,41 @@ func (c *Client) FindRelease(ctx context.Context, slug, version string) (string,
 			}
 			return "", nil, err
 		}
-		for _, core := range cores {
-			for _, a := range find(app.Doc, isA) {
-				h, _, _ := strings.Cut(attr(a, "href"), "#")
-				if !strings.Contains(h, "/"+slug+"/") {
-					continue
-				}
-				t := strings.TrimSuffix(h, "/")
-				if strings.HasSuffix(t, "-"+core+"-release") || strings.HasSuffix(t, "-"+core+"-apk-release") {
-					full := c.base() + h
-					c.pause(ctx, 2*time.Second, 6*time.Second)
-					rp, err := c.F.Page(ctx, full, c.base()+"/")
-					return full, rp, err
+		hrefs := make([]string, 0, 32)
+		for _, a := range find(app.Doc, isA) {
+			h, _, _ := strings.Cut(attr(a, "href"), "#")
+			if strings.Contains(h, "/"+slug+"/") {
+				hrefs = append(hrefs, h)
+			}
+		}
+		if h := pickRelease(hrefs, cores); h != "" {
+			full := c.base() + h
+			c.pause(ctx, 2*time.Second, 6*time.Second)
+			rp, err := c.F.Page(ctx, full, c.base()+"/")
+			return full, rp, err
+		}
+	}
+	return "", nil, fmt.Errorf("%w: %s for %s", ErrNotFound, version, slug)
+}
+
+// pickRelease chooses the release link for a version from an app page's links. For each
+// candidate version slug an exact match wins, then ones where APKMirror inserted "-apk", then
+// a trailing "-2" style counter it adds to a re-uploaded version (paramount-...-16-19-0-2-release).
+func pickRelease(hrefs, cores []string) string {
+	for _, core := range cores {
+		for _, tier := range []*regexp.Regexp{
+			regexp.MustCompile(`-` + regexp.QuoteMeta(core) + `-release$`),
+			regexp.MustCompile(`-` + regexp.QuoteMeta(core) + `-apk-release$`),
+			regexp.MustCompile(`-` + regexp.QuoteMeta(core) + `(-apk)?-\d+-release$`),
+		} {
+			for _, h := range hrefs {
+				if tier.MatchString(strings.TrimSuffix(h, "/")) {
+					return h
 				}
 			}
 		}
 	}
-	return "", nil, fmt.Errorf("%w: %s for %s", ErrNotFound, version, slug)
+	return ""
 }
 
 var variantType = regexp.MustCompile(`\b(bundle|apk)\b`)

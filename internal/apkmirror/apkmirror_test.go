@@ -299,6 +299,7 @@ func TestReleaseLookupVariants(t *testing.T) {
 		{"apk in url (Peacock)", "p/peacock", "7.8.100", "/apk/p/peacock/peacock-tv-stream-7-8-100-apk-release/"},
 		{"underscore kept (ViX)", "u/vix", "4.47.2_tv", "/apk/u/vix/vix-tv-4-47-2_tv-release/"},
 		{"numeric core (Pluto leanback)", "pl/pluto", "5.66.0-leanback", "/apk/pl/pluto/plutotv-5-66-0-release/"},
+		{"re-upload counter (Paramount+)", "c/paramount-2", "16.19.0", "/apk/c/paramount-2/paramount-android-tv-16-19-0-2-release/"},
 	}
 	for _, c := range cases {
 		mux := http.NewServeMux()
@@ -471,5 +472,18 @@ func TestUnusableVariantTableIsNotRescuedByTheButton(t *testing.T) {
 	}
 	if !hasVariantTable(page(t, "<html>"+row+"</html>")) {
 		t.Error("a table of unusable rows still counts as a table")
+	}
+}
+
+func TestPickReleasePrefersExactOverCounterSuffix(t *testing.T) {
+	links := []string{"/apk/p/a/x-16-19-0-2-release/", "/apk/p/a/x-16-19-0-release/", "/apk/p/a/x-16-20-0-release/"}
+	if got := pickRelease(links, []string{"16-19-0"}); got != "/apk/p/a/x-16-19-0-release/" {
+		t.Errorf("got %q", got)
+	}
+	if got := pickRelease(links[:1], []string{"16-19-0"}); got != links[0] {
+		t.Errorf("suffixed link should be used when it is the only one: %q", got)
+	}
+	if got := pickRelease(links, []string{"9-9-9"}); got != "" {
+		t.Errorf("got %q", got)
 	}
 }

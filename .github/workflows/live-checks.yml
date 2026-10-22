@@ -16,13 +16,13 @@ jobs:
     steps:
       - name: Prepare data with the publisher signers recorded from APKMirror
         run: |
-          mkdir -p data/state && sudo chown -R 65532:65532 data
+          mkdir -p data/state
           cat > data/state/settings.json <<'JSON'
           {"devices": [], "overrides": {
             "com.amazon.amazonvideo.livingroom": {"signer_sha256": "2f19adeb284eb36f7f07786152b9a1d14b21653203ad0b04ebbf9c73ab6d7625"},
             "com.disney.disneyplus": {"signer_sha256": "b4d251e979ea974d8f070feb5ab69fc4c2873f4e8add421ff63ad5f2789d63d4"}}}
           JSON
-          sudo chown 65532:65532 data/state/settings.json
+          sudo chown -R 65532:65532 data
       - name: Fetch, verify and patch with APKMirror switched off
         run: |
           docker run --rm -v "$PWD/data:/data" \

@@ -57,7 +57,7 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
 # volume so adb's pairing keys survive container re-creation. Morphe keeps its own data next to
 # the jar (/opt/morphe/morphe-data), which must be writable.
 RUN groupadd --gid 65532 nonroot && useradd --uid 65532 --gid 65532 --no-create-home --home-dir /data/home nonroot && \
-    mkdir -p /opt/morphe/morphe-data /data/home/.android && \
+    mkdir -p /opt/morphe/morphe-data /data/home/.android /data/work && \
     chown -R 65532:65532 /opt/morphe /data
 
 COPY --from=tools --chown=65532:65532 /morphe.jar /opt/morphe/morphe.jar
