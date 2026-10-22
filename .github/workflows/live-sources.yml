@@ -20,10 +20,13 @@ jobs:
       - name: apkeep raw output
         continue-on-error: true
         run: |
-          apkeep --help | sed -n 1,60p
-          echo "--- list versions"; apkeep -l -a com.amazon.amazonvideo.livingroom -d apk-pure 2>&1 | tail -15
-          echo "--- download exact"; mkdir -p raw && apkeep -a "com.amazon.amazonvideo.livingroom@6.23.23+v15.5.0.70-armv7a" -d apk-pure raw 2>&1 | tail -15; ls -la raw
-          echo "--- download latest"; apkeep -a com.disney.disneyplus -d apk-pure raw 2>&1 | tail -15; ls -la raw
+          O='acknowledge_dangers=true,arch=armeabi-v7a'
+          echo "--- list prime (tail)"; apkeep -l -a com.amazon.amazonvideo.livingroom -o arch=armeabi-v7a -d apk-pure 2>&1 | tr ',' '\n' | tail -6
+          echo "--- list disney (tail)"; apkeep -l -a com.disney.disneyplus -o arch=armeabi-v7a -d apk-pure 2>&1 | tr ',' '\n' | tail -6
+          mkdir -p raw1 raw2 raw3
+          echo "--- prime short form"; apkeep -a "com.amazon.amazonvideo.livingroom@v15.5.0.70-armv7a" -d apk-pure -o "$O" raw1 2>&1 | tail -5; ls -la raw1
+          echo "--- prime long form"; apkeep -a "com.amazon.amazonvideo.livingroom@6.23.23+v15.5.0.70-armv7a" -d apk-pure -o "$O" raw2 2>&1 | tail -5; ls -la raw2
+          echo "--- disney exact"; apkeep -a "com.disney.disneyplus@26.16.0+rc2-2026.09.08" -d apk-pure -o "$O" raw3 2>&1 | tail -5; ls -la raw3
       - name: APKPure download + verify
         run: |
           python - <<'PY'
