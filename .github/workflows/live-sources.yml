@@ -72,3 +72,33 @@ jobs:
           YAML
           python -m patcher once --no-device --config cfg.yaml 2>&1 | grep -E "WARNING|ERROR|patched|Traceback|via " | cut -c1-250
           ls -la "$DATA_DIR/work/output"
+  flaresolverr:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r requirements.txt
+      - name: Start FlareSolverr
+        run: |
+          docker run -d --name fs -p 8191:8191 ghcr.io/flaresolverr/flaresolverr:latest
+          for i in $(seq 1 30); do curl -sf localhost:8191/health && break; sleep 3; done
+      - name: APKMirror through FlareSolverr (Prime Video)
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from patcher import apkmirror, verify
+          out = Path("dl"); out.mkdir(exist_ok=True)
+          pkg, ver = "com.amazon.amazonvideo.livingroom", "6.23.23+v15.5.0.70-armv7a"
+          try:
+              f, how = apkmirror.download("amazon-mobile-llc/prime-video-android-tv-android-tv", ver, 28, out,
+                                          flare_url="http://localhost:8191")
+              i = verify.inspect(f)
+              print("OK", how, f.stat().st_size // 1048576, "MB", i["package"], i["version"], i["leanback"], i["signer"][:16])
+          except Exception as e:
+              print("FAIL", type(e).__name__, e)
+              raise SystemExit(1)
+          PY
+      - if: always()
+        run: docker logs fs 2>&1 | tail -25
