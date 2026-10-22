@@ -50,6 +50,15 @@
   pre { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; overflow: auto; max-height: 320px; font-size: 12px; }
   details summary { cursor: pointer; color: var(--muted); }
   .empty { color: var(--muted); text-align: center; padding: 24px 8px; }
+  .setbox { border-top: 1px solid var(--line); padding: 12px 0; }
+  .setbox:first-of-type { border-top: 0; }
+  .problems { margin: 6px 0 0; padding-left: 18px; font-size: 13px; color: var(--bad); }
+  .note { font-size: 12.5px; color: var(--muted); margin-top: 4px; }
+  .checks { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 6px 0; }
+  .checks label { cursor: pointer; font-size: 14px; }
+  .app.locked { opacity: .75; }
+  details.setbox summary { padding: 2px 0; }
+  .seted { padding-top: 8px; }
 </style>
 </head>
 <body>
@@ -66,6 +75,8 @@
   </header>
 
   <div id="devices"></div>
+
+  <section class="card" id="sets"></section>
 
   <section class="card" id="sources"></section>
 
@@ -91,7 +102,11 @@
 let state = null;
 const dirty = {};      // device id -> Map(package -> patch source id), unsaved changes
 const openPair = {};   // device id -> true while the pairing form is open
-const notes = {};      // device id -> {text, ok}
+const notes = {};      // device id -> {text, ok, problems, unchecked}
+const dirtySets = {};  // device id -> Set of app-set ids not yet saved
+const setDraft = {};   // set id (or "__new") -> {name, apps: Map, devices: Set}
+const setNotes = {};   // set id -> {text, ok, problems, unchecked}
+const setOpen = {};    // set id -> true while its editor is expanded
 let sourceNote = null; // {text, ok}
 
 function h(tag, attrs, ...kids) {
@@ -115,8 +130,21 @@ async function api(method, path, body) {
   const r = await fetch(path, opt);
   let data = {};
   try { data = await r.json(); } catch (e) { /* empty body */ }
-  if (!r.ok) throw new Error(data.error || ("HTTP " + r.status));
+  if (!r.ok) { const e = new Error(data.error || ("HTTP " + r.status)); e.data = data; e.status = r.status; throw e; }
   return data;
+}
+
+// a note for the card/set that was just saved or refused: the message, the apps a device cannot run, and what could not be checked
+function noteFrom(err, okText) {
+  if (err) return { ok: false, text: err.message, problems: (err.data && err.data.problems) || [], unchecked: (err.data && err.data.unchecked) || [] };
+  return { ok: true, text: okText };
+}
+function noteBlock(n) {
+  if (!n) return null;
+  return h("div", {},
+    h("div", { class: "msg " + (n.ok ? "ok" : "bad") }, n.text),
+    n.problems && n.problems.length ? h("ul", { class: "problems" }, n.problems.map(p => h("li", {}, p.device + ": " + p.reason))) : null,
+    n.unchecked && n.unchecked.length ? h("div", { class: "note" }, "Not checked: " + n.unchecked.join("; ")) : null);
 }
 
 function when(iso) {
@@ -144,39 +172,64 @@ function pickSource(app, wanted) {
   return app.sources[0].id;
 }
 
+const setById = id => (state.sets || []).find(x => x.id === id);
+
+// One row per app the patch sources support. sel: Map(package -> source id). locked: Map(package ->
+// label) for apps a device gets from a set (shown ticked and disabled). onChange(newMap).
+function appGrid(idPrefix, sel, installs, locked, onChange) {
+  return h("div", { class: "apps" }, (state.apps || []).map(a => {
+    const chosen = sel.get(a.package);
+    const src = a.sources.find(s => s.id === pickSource(a, chosen)) || a.sources[0];
+    const srcInfo = sourceById(src.id) || {};
+    const inst = (installs || {})[a.package];
+    const lock = locked && locked.get(a.package);
+    const id = idPrefix + "-" + a.package;
+    return h("div", { class: "app" + (lock ? " locked" : "") },
+      h("input", { type: "checkbox", id, checked: sel.has(a.package) || !!lock, disabled: !!lock, onchange: ev => {
+        const m = new Map(sel);
+        ev.target.checked ? m.set(a.package, pickSource(a, chosen)) : m.delete(a.package);
+        onChange(m);
+      } }),
+      h("span", { class: "grow" },
+        h("label", { for: id },
+          a.name,
+          lock ? h("span", { class: "chip" }, "from " + lock) : null,
+          src.experimental ? h("span", { class: "chip warn" }, "experimental") : null,
+          srcInfo.allow_phone ? h("span", { class: "chip warn", title: "A phone app: it may install but not show in the TV launcher" }, "phone app") : null),
+        h("span", { class: "meta" }, "newest supported " + src.newest + (inst ? " · installed " + inst.apk_version + " (" + when(inst.installed_at) + ")" : "")),
+        !lock && a.sources.length > 1 ? h("span", { class: "meta" }, "patches from ",
+          h("select", { onchange: ev => { const m = new Map(sel); m.set(a.package, ev.target.value); onChange(m); } },
+            a.sources.map(s => h("option", { value: s.id, selected: s.id === src.id }, (sourceById(s.id) || {}).repo || s.id)))) : null));
+  }));
+}
+
+function deviceSets(dev) { return dirtySets[dev.id] || new Set(dev.sets || []); }
+
 function deviceCard(dev) {
   const sel = selection(dev);
-  const isDirty = !!dirty[dev.id];
+  const sets = deviceSets(dev);
+  const isDirty = !!dirty[dev.id] || !!dirtySets[dev.id];
   const last = dev.last || [];
   const offline = last.some(r => !r.ok && !r.package);
   const note = notes[dev.id];
 
-  const apps = h("div", { class: "apps" }, (state.apps || []).map(a => {
-    const chosen = sel.get(a.package);
-    const src = a.sources.find(s => s.id === pickSource(a, chosen)) || a.sources[0];
-    const srcInfo = sourceById(src.id) || {};
-    const inst = (dev.installs || {})[a.package];
-    return h("div", { class: "app" },
-      h("input", { type: "checkbox", id: "c-" + dev.id + "-" + a.package, checked: sel.has(a.package), onchange: ev => {
-        const m = new Map(selection(dev));
-        ev.target.checked ? m.set(a.package, pickSource(a, chosen)) : m.delete(a.package);
-        dirty[dev.id] = m;
-        render();
-      } }),
-      h("span", { class: "grow" },
-        h("label", { for: "c-" + dev.id + "-" + a.package },
-          a.name,
-          src.experimental ? h("span", { class: "chip warn" }, "experimental") : null,
-          srcInfo.allow_phone ? h("span", { class: "chip warn", title: "A phone app: it may install but not show in the TV launcher" }, "phone app") : null),
-        h("span", { class: "meta" }, "newest supported " + src.newest + (inst ? " · installed " + inst.apk_version + " (" + when(inst.installed_at) + ")" : "")),
-        a.sources.length > 1 ? h("span", { class: "meta" }, "patches from ",
-          h("select", { onchange: ev => {
-            const m = new Map(selection(dev));
-            m.set(a.package, ev.target.value);
-            dirty[dev.id] = m;
-            render();
-          } }, a.sources.map(s => h("option", { value: s.id, selected: s.id === src.id }, (sourceById(s.id) || {}).repo || s.id)))) : null));
-  }));
+  // apps this device gets from its sets (shown locked), by set name
+  const locked = new Map();
+  for (const e of dev.effective || []) if (e.via && e.via.startsWith("set:") && !sel.has(e.package) && sets.has(e.via.slice(4))) locked.set(e.package, (setById(e.via.slice(4)) || {}).name || "a set");
+  if (dirtySets[dev.id]) { // unsaved: show what the ticked sets would give
+    locked.clear();
+    for (const sid of sets) { const st = setById(sid); if (st) for (const c of st.apps || []) if (!sel.has(c.package) && !locked.has(c.package)) locked.set(c.package, st.name); }
+  }
+  const apps = appGrid("c-" + dev.id, sel, dev.installs, locked, m => { dirty[dev.id] = m; render(); });
+
+  const setChecks = (state.sets || []).length ? h("div", {},
+    h("div", { class: "sub" }, "App sets for this TV"),
+    h("div", { class: "checks" }, (state.sets || []).map(st => h("label", {},
+      h("input", { type: "checkbox", checked: sets.has(st.id), onchange: ev => {
+        const next = new Set(deviceSets(dev));
+        ev.target.checked ? next.add(st.id) : next.delete(st.id);
+        dirtySets[dev.id] = next; render();
+      } }), " " + st.name + " (" + (st.apps || []).length + ")")))) : null;
 
   const pairForm = openPair[dev.id] ? h("div", { class: "row", style: "margin-top:8px" },
     h("span", { class: "sub" }, "On the TV choose “Pair device with pairing code”, then enter the port and code it shows:"),
@@ -184,27 +237,86 @@ function deviceCard(dev) {
     h("input", { type: "text", id: "pc-" + dev.id, placeholder: "6-digit code", maxlength: 6, inputmode: "numeric", style: "width:120px" }),
     h("button", { onclick: () => doPair(dev) }, "Pair")) : null;
 
-  const cpu = dev.info
+  const paired = dev.info && dev.info.paired_at;
+  const cpu = dev.info && dev.info.abis && dev.info.abis.length
     ? h("span", { class: "chip", title: "What the device reports; builds are chosen to match" },
-        (dev.is64 ? "64-bit capable" : "32-bit") + " · " + (dev.info.abis || []).join(", ") + " · Android API " + dev.info.sdk)
+        (dev.is64 ? "64-bit capable" : "32-bit") + " · " + dev.info.abis.join(", ") + " · Android API " + dev.info.sdk)
     : null;
+  const pairChip = paired ? h("span", { class: "chip" }, "paired") : (cpu ? null : h("span", { class: "chip warn" }, "not paired yet"));
 
   return h("section", { class: "card" },
     h("div", { class: "row" },
       h("span", { class: "grow" },
         h("strong", {}, h("span", { class: "dot " + (last.length ? (offline ? "bad" : "ok") : "") }), dev.name),
         h("span", { class: "sub" }, "  " + dev.host),
-        cpu),
+        pairChip, cpu),
       h("button", { onclick: () => { openPair[dev.id] = !openPair[dev.id]; render(); } }, "Pair…"),
       h("button", { onclick: () => doRun(dev.id) }, "Run now"),
       h("button", { class: "danger", onclick: () => doRemove(dev) }, "Remove")),
     pairForm,
+    setChecks,
+    h("div", { class: "sub", style: "margin-top:8px" }, (state.sets || []).length ? "Extra apps for this TV only" : "Apps for this TV (create an app set to give the same apps to several TVs)"),
     apps,
     h("div", { class: "row" },
       h("button", { class: "primary", disabled: !isDirty, onclick: () => doSave(dev) }, "Save"),
+      h("button", { disabled: sel.size === 0 || isDirty, title: "Move this TV's own apps into a new set that this TV uses", onclick: () => doMakeSet(dev) }, "Make a set from these apps"),
       h("span", { class: "sub" }, isDirty ? "Unsaved changes. Saving never installs anything." : "Saved. Installs happen on the next run.")),
-    note ? h("div", { class: "msg " + (note.ok ? "ok" : "bad") }, note.text) : null,
+    noteBlock(note),
     last.length ? h("ul", { class: "results" }, last.map(r => h("li", { class: r.ok ? "ok" : "bad" }, r.message))) : null);
+}
+
+// ---- app sets ----
+function draftFor(set) {
+  if (!setDraft[set.id]) {
+    const m = new Map(); for (const c of set.apps || []) m.set(c.package, c.source);
+    const users = (state.devices || []).filter(d => (d.sets || []).includes(set.id)).map(d => d.id);
+    setDraft[set.id] = { name: set.name, apps: m, devices: new Set(users), dirty: false };
+  }
+  return setDraft[set.id];
+}
+
+// a collapsed one-line summary per set; the editor opens on demand (and stays open while edited)
+function setDetails(st) {
+  const d = draftFor(st);
+  const users = (state.devices || []).filter(x => d.devices.has(x.id)).map(x => x.name);
+  return h("details", { class: "setbox", open: !!setOpen[st.id] || d.dirty || !!setNotes[st.id], ontoggle: ev => { setOpen[st.id] = ev.target.open; } },
+    h("summary", {}, h("strong", {}, st.name), " · " + (((st.apps || []).length === 1) ? "1 app" : (st.apps || []).length + " apps") + " · " + (users.length ? "used by " + users.join(", ") : "not used by any TV yet")),
+    setEditor(st, false));
+}
+
+function setEditor(set, isNew) {
+  const d = draftFor(set);
+  const touch = f => { f(); d.dirty = true; render(); };
+  const usedBy = (state.devices || []);
+  return h("div", { class: isNew ? "setbox" : "seted" },
+    h("div", { class: "row" },
+      h("input", { type: "text", value: d.name, maxlength: 60, placeholder: "Set name (Streaming)", style: "min-width:200px",
+        oninput: ev => { d.name = ev.target.value; d.dirty = true; const b = document.getElementById("save-" + set.id); if (b) b.disabled = false; } }),
+      h("span", { class: "grow" }),
+      isNew ? h("button", { onclick: () => { delete setDraft[set.id]; render(); } }, "Cancel")
+            : h("button", { class: "danger", onclick: () => doRemoveSet(set) }, "Delete set")),
+    h("div", { class: "sub", style: "margin-top:6px" }, "Used by"),
+    h("div", { class: "checks" }, usedBy.length ? usedBy.map(dv => h("label", {},
+      h("input", { type: "checkbox", checked: d.devices.has(dv.id), onchange: ev => touch(() => { ev.target.checked ? d.devices.add(dv.id) : d.devices.delete(dv.id); }) }),
+      " " + dv.name)) : h("span", { class: "sub" }, "Add a device first")),
+    appGrid("s-" + set.id, d.apps, null, null, m => touch(() => { d.apps = m; })),
+    h("div", { class: "row" },
+      h("button", { class: "primary", id: "save-" + set.id, disabled: !isNew && !d.dirty, onclick: () => doSaveSet(set, isNew) }, isNew ? "Create set" : "Save set"),
+      h("span", { class: "sub" }, "Saving pushes the apps to every TV ticked above on its next run.")),
+    noteBlock(setNotes[set.id]));
+}
+
+function setsCard() {
+  const sets = state.sets || [];
+  const creating = !!setDraft["__new"];
+  return [
+    h("div", { class: "row" },
+      h("strong", { class: "grow" }, "App sets"),
+      creating ? null : h("button", { onclick: () => { setDraft["__new"] = { name: "", apps: new Map(), devices: new Set(), dirty: true }; render(); } }, "New set")),
+    h("div", { class: "sub" }, "Pick apps once, then give the set to several TVs. A TV that cannot run an app in a set is refused when you save, with the reason."),
+    creating ? setEditor({ id: "__new", name: "", apps: [] }, true) : null,
+    sets.length ? sets.map(st => setDetails(st)) : (creating ? null : h("div", { class: "sub", style: "margin-top:8px" }, "No sets yet.")),
+  ];
 }
 
 function sourcesCard() {
@@ -250,6 +362,8 @@ function render() {
   // keep what is being typed in the add-repository form
   const keep = ["newrepo", "newpre", "newphone", "newtrust"].map(id => { const e = document.getElementById(id); return e ? [id, e.type === "checkbox" ? e.checked : e.value] : null; }).filter(Boolean);
   document.getElementById("sources").replaceChildren(...sourcesCard().filter(Boolean));
+  const keepName = document.activeElement && document.activeElement.type === "text" && document.getElementById("sets").contains(document.activeElement) ? document.activeElement : null;
+  if (!keepName) document.getElementById("sets").replaceChildren(...setsCard().flat().filter(Boolean));
   for (const [id, v] of keep) { const e = document.getElementById(id); if (e) { if (e.type === "checkbox") e.checked = v; else e.value = v; } }
 }
 
@@ -265,12 +379,55 @@ async function loadLog() {
 }
 
 async function doSave(dev) {
+  let unchecked = [];
+  try {
+    if (dirtySets[dev.id]) {
+      const r = await api("PUT", "/api/devices/" + encodeURIComponent(dev.id) + "/sets", { sets: [...dirtySets[dev.id]] });
+      unchecked = unchecked.concat(r.unchecked || []);
+      delete dirtySets[dev.id];
+    }
+    if (dirty[dev.id]) {
+      const apps = [...dirty[dev.id]].map(([pkg, src]) => ({ package: pkg, source: src }));
+      const r = await api("PUT", "/api/devices/" + encodeURIComponent(dev.id) + "/apps", { apps });
+      unchecked = unchecked.concat(r.unchecked || []);
+      delete dirty[dev.id];
+    }
+    notes[dev.id] = { ok: true, text: "Saved.", unchecked };
+  } catch (e) { notes[dev.id] = noteFrom(e); }
+  await reload();
+}
+
+async function doMakeSet(dev) {
+  const name = prompt("Name for the new set (the apps you ticked for " + dev.name + " move into it):");
+  if (!name) return;
   const apps = [...selection(dev)].map(([pkg, src]) => ({ package: pkg, source: src }));
   try {
-    await api("PUT", "/api/devices/" + encodeURIComponent(dev.id) + "/apps", { apps });
+    await api("POST", "/api/sets", { name, apps, devices: [dev.id] });
+    await api("PUT", "/api/devices/" + encodeURIComponent(dev.id) + "/apps", { apps: [] });
     delete dirty[dev.id];
-    notes[dev.id] = { ok: true, text: "Saved." };
-  } catch (e) { notes[dev.id] = { ok: false, text: e.message }; }
+    notes[dev.id] = { ok: true, text: "Created the set “" + name + "”. This TV uses it now; give it to other TVs under App sets." };
+  } catch (e) { notes[dev.id] = noteFrom(e); }
+  await reload();
+}
+
+async function doSaveSet(set, isNew) {
+  const d = setDraft[set.id];
+  const body = { name: d.name, apps: [...d.apps].map(([pkg, src]) => ({ package: pkg, source: src })), devices: [...d.devices] };
+  setNotes[set.id] = { ok: true, text: "Saving… (checking each TV can run these apps)" }; render();
+  try {
+    const r = isNew ? await api("POST", "/api/sets", body) : await api("PUT", "/api/sets/" + encodeURIComponent(set.id), body);
+    delete setDraft[set.id];
+    delete setNotes[set.id];
+    if (r.unchecked && r.unchecked.length) setNotes[isNew ? (r.set || {}).id : set.id] = { ok: true, text: "Saved.", unchecked: r.unchecked };
+    for (const k of Object.keys(dirtySets)) delete dirtySets[k];
+  } catch (e) { setNotes[set.id] = noteFrom(e); }
+  await reload();
+}
+
+async function doRemoveSet(set) {
+  const users = (state.devices || []).filter(d => (d.sets || []).includes(set.id)).map(d => d.name);
+  if (!confirm("Delete the set “" + set.name + "”?" + (users.length ? " It is used by " + users.join(", ") + ". Their apps from this set are no longer kept up to date (nothing is uninstalled)." : ""))) return;
+  try { await api("DELETE", "/api/sets/" + encodeURIComponent(set.id)); delete setDraft[set.id]; } catch (e) { alert(e.message); }
   await reload();
 }
 
@@ -286,7 +443,7 @@ async function doPair(dev) {
   try {
     const r = await api("POST", "/api/devices/" + encodeURIComponent(dev.id) + "/pair", { pair_port: port, code });
     notes[dev.id] = { ok: true, text: r.message }; openPair[dev.id] = false;
-  } catch (e) { notes[dev.id] = { ok: false, text: e.message }; }
+  } catch (e) { notes[dev.id] = noteFrom(e); }
   render();
 }
 

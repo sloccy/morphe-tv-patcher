@@ -44,6 +44,19 @@ jobs:
             -e APKMIRROR_DIRECT_DISABLED=true -e FLARESOLVERR_URL=http://127.0.0.1:8191 \
             "$IMAGE" fetch --package com.amazon.amazonvideo.livingroom
 
+  cpu-builds:
+    name: CPU-aware builds (Netflix is 32-bit only)
+    runs-on: ubuntu-latest
+    steps:
+      - name: A 32-bit device gets it, an arm64-only device is told there is no build
+        run: |
+          mkdir -p data && sudo chown 65532:65532 data
+          docker run --rm -v "$PWD/data:/data" "$IMAGE" fetch --package com.netflix.ninja --abi armeabi-v7a,armeabi | grep '"abis"' -A2
+          if out=$(docker run --rm -v "$PWD/data:/data" "$IMAGE" fetch --package com.netflix.ninja --abi arm64-v8a 2>&1); then
+            echo "an arm64-only device must not be given a 32-bit-only app"; exit 1
+          fi
+          echo "$out" | grep -q "no build for this device"
+
   second-repository:
     name: A second patch repository (MorpheApp) works
     runs-on: ubuntu-latest

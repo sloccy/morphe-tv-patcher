@@ -49,6 +49,25 @@ Apps first installed by Morphe Manager are signed with Manager's key, so Android
 them: uninstall them once (the page tells you), or set `allow_uninstall` for that app in
 `settings.json`. Never uninstall stock Netflix; the patched copy installs beside it as a clone.
 
+## Several TVs and app sets
+
+Add each TV on the page and pair it once (**Pair…**; the page then reads its CPU, so the card shows
+"paired" and, for example, "32-bit · armeabi-v7a, armeabi"). Every TV is checked and updated on its own.
+
+To give the same apps to several TVs, create an **app set** (a name plus apps, each with its patch
+repository) and tick the TVs that use it, either under App sets ("Used by") or on a TV's card. Edit the
+set once and every TV using it follows on its next run. A TV can use several sets and also have its own
+extra apps (those win if they clash); apps that come from a set show locked with "from <set>". "Make a
+set from these apps" turns a TV you have already configured into a set.
+
+**Saves are refused when a TV cannot run an app.** Before a set or a TV's apps are saved, each affected
+TV is checked against the CPU builds the app offers at its newest supported version, which are read from
+APKMirror's release page (no download) and remembered. If the page says, for example, that Netflix only
+has 32-bit builds and a TV runs arm64 only, the save is rejected with that reason and nothing changes.
+When something cannot be checked (a TV that has never been reached, or APKMirror not answering) the save
+goes through, the page says what was not checked, and a mismatch then appears as the usual "no build for
+this CPU" message on that TV. Dropping an app from a set never uninstalls it.
+
 ## More patch repositories
 
 No repository is built in as a requirement. On the very first run the **Patch sources** list is seeded
