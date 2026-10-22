@@ -17,6 +17,13 @@ jobs:
           sudo chmod +x /usr/local/bin/apkeep
           sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends apksigner
           apkeep --version; apksigner --version
+      - name: apkeep raw output
+        continue-on-error: true
+        run: |
+          apkeep --help | sed -n 1,60p
+          echo "--- list versions"; apkeep -l -a com.amazon.amazonvideo.livingroom -d apk-pure 2>&1 | tail -15
+          echo "--- download exact"; mkdir -p raw && apkeep -a "com.amazon.amazonvideo.livingroom@6.23.23+v15.5.0.70-armv7a" -d apk-pure raw 2>&1 | tail -15; ls -la raw
+          echo "--- download latest"; apkeep -a com.disney.disneyplus -d apk-pure raw 2>&1 | tail -15; ls -la raw
       - name: APKPure download + verify
         run: |
           python - <<'PY'
