@@ -41,6 +41,7 @@ type Backend interface {
 	Compat(ctx context.Context, st store.Settings, deviceIDs []string) ([]runner.Problem, []string)
 	CheckRepo(ctx context.Context, repo string, prerelease bool) error
 	RefreshLists(ctx context.Context)
+	TestDevice(ctx context.Context, d store.Device) (runner.DeviceCheck, error)
 	Warnings() []runner.Problem // apps saved devices are known not to be able to run (no network)
 	Learning() runner.Learning  // CPU checks still running in the background
 }
@@ -78,6 +79,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/sources", s.addSource)
 	mux.HandleFunc("DELETE /api/sources/{id}", s.removeSource)
 	mux.HandleFunc("POST /api/devices/{id}/pair", s.pair)
+	mux.HandleFunc("POST /api/devices/{id}/test", s.testDevice)
 	mux.HandleFunc("POST /api/run", s.run)
 	return s.guard(mux)
 }
@@ -664,6 +666,35 @@ func (s *Server) pair(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		msg += ". Its CPU could not be read yet; that happens on the first run."
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": msg})
+}
+
+// testDevice checks that the TV can be reached over wireless debugging right now.
+func (s *Server) testDevice(w http.ResponseWriter, r *http.Request) {
+	var dev store.Device
+	for _, d := range s.Store.Settings().Devices {
+		if d.ID == r.PathValue("id") {
+			dev = d
+		}
+	}
+	if dev.ID == "" {
+		fail(w, http.StatusNotFound, "no such device")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	c, err := s.Backend.TestDevice(ctx, dev)
+	if err != nil {
+		fail(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	msg := fmt.Sprintf("Connected to %s on port %d", dev.Name, c.Port)
+	if len(c.ABIs) > 0 {
+		msg += " · " + strings.Join(c.ABIs, ", ")
+	}
+	if c.SDK > 0 {
+		msg += fmt.Sprintf(" · Android API %d", c.SDK)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": msg})
 }

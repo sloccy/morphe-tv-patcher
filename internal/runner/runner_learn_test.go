@@ -119,3 +119,32 @@ func TestUnreachableTVAlertsOnTheSecondCycleAndSaysWhatToDo(t *testing.T) {
 		t.Errorf("tell the user what to do: %s", msg)
 	}
 }
+
+func TestTestDeviceReportsPortCPUAndAdviceAndClearsFailures(t *testing.T) {
+	rg := newRig(t)
+	d := rg.device(t, "Bedroom", "10.0.0.7", prime)
+	rg.adb.abis["10.0.0.7"] = []string{"arm64-v8a", "armeabi-v7a"}
+	c, err := rg.r.TestDevice(context.Background(), d)
+	if err != nil || c.Port != 40000 || len(c.ABIs) != 2 {
+		t.Fatalf("%+v %v", c, err)
+	}
+	if info, ok := rg.st.DeviceInfo(d.ID); !ok || len(info.ABIs) != 2 {
+		t.Errorf("the CPU should be saved: %+v", info)
+	}
+	rg.adb.down["10.0.0.7"] = true
+	rg.r.Run(context.Background(), Options{})
+	if rg.st.App("device:"+d.ID).FetchFailures == 0 {
+		t.Fatal("setup: the failed run should be counted")
+	}
+	_, err = rg.r.TestDevice(context.Background(), d)
+	if err == nil || !strings.Contains(err.Error(), "Wireless debugging is switched off") {
+		t.Fatalf("advice expected: %v", err)
+	}
+	delete(rg.adb.down, "10.0.0.7")
+	if _, err := rg.r.TestDevice(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	if rg.st.App("device:"+d.ID).FetchFailures != 0 {
+		t.Error("a passing test clears the failure count so the alert does not carry over")
+	}
+}

@@ -109,6 +109,8 @@ const dirtySets = {};  // device id -> Set of app-set ids not yet saved
 const setDraft = {};   // set id (or "__new") -> {name, apps: Map, devices: Set}
 const setNotes = {};   // set id -> {text, ok, problems, unchecked}
 const setOpen = {};    // set id -> true while its editor is expanded
+const appsOpen = (() => { try { return JSON.parse(localStorage.getItem("appsOpen") || "{}"); } catch (e) { return {}; } })(); // device id -> false when its app list is collapsed
+function saveAppsOpen() { try { localStorage.setItem("appsOpen", JSON.stringify(appsOpen)); } catch (e) { /* private mode: fine */ } }
 let sourceNote = null; // {text, ok}
 const busy = new Set(); // keys of actions whose request is still running (their buttons are disabled)
 let lastText = "";      // last /api/state body, so an unchanged poll does not redraw (and wipe typing)
@@ -232,6 +234,17 @@ function appGrid(idPrefix, sel, installs, locked, onChange) {
 
 function deviceSets(dev) { return dirtySets[dev.id] || new Set(dev.sets || []); }
 
+// one line saying what the TV gets, shown even when the app list is collapsed
+function appsSummary(dev) {
+  const eff = dev.effective || [];
+  const own = eff.filter(e => !e.via || !e.via.startsWith("set:")).length;
+  const bySet = {};
+  for (const e of eff) if (e.via && e.via.startsWith("set:")) { const n = (setById(e.via.slice(4)) || {}).name || "a set"; bySet[n] = (bySet[n] || 0) + 1; }
+  const parts = Object.entries(bySet).map(([n, c]) => c + " from " + n);
+  if (own) parts.push(own + " extra");
+  return h("span", {}, h("strong", {}, "Apps: " + eff.length), parts.length ? " (" + parts.join(", ") + ")" : " (none chosen yet)");
+}
+
 function deviceCard(dev) {
   const sel = selection(dev);
   const sets = deviceSets(dev);
@@ -278,16 +291,19 @@ function deviceCard(dev) {
         h("span", { class: "sub" }, "  " + dev.host),
         pairChip, cpu),
       h("button", { onclick: () => { openPair[dev.id] = !openPair[dev.id]; render(); } }, "Pair…"),
+      h("button", { disabled: busy.has("test-" + dev.id), title: "Check that the TV can be reached over wireless debugging right now", onclick: () => doTest(dev) }, busy.has("test-" + dev.id) ? "Testing…" : "Test"),
       h("button", { disabled: busy.has("run-" + dev.id), onclick: () => doRun(dev.id) }, "Run now"),
       h("button", { class: "danger", disabled: busy.has("rm-" + dev.id), onclick: () => doRemove(dev) }, "Remove")),
     pairForm,
+    h("details", { class: "appsbox", open: appsOpen[dev.id] !== false || isDirty || busy.has("save-" + dev.id) },
+    h("summary", { onclick: ev => { appsOpen[dev.id] = !ev.currentTarget.parentNode.open; saveAppsOpen(); } }, appsSummary(dev)), // only a click by the user changes the remembered state
     setChecks,
     h("div", { class: "sub", style: "margin-top:8px" }, (state.sets || []).length ? "Extra apps for this TV only" : "Apps for this TV (create an app set to give the same apps to several TVs)"),
     apps,
     h("div", { class: "row" },
       h("button", { class: "primary", disabled: !isDirty || busy.has("save-" + dev.id), onclick: () => doSave(dev) }, busy.has("save-" + dev.id) ? "Saving… (checking CPUs)" : "Save"),
       h("button", { disabled: sel.size === 0 || isDirty || busy.has("mk-" + dev.id), title: "Move this TV's own apps into a new set that this TV uses", onclick: () => doMakeSet(dev) }, "Make a set from these apps"),
-      h("span", { class: "sub" }, isDirty ? "Unsaved changes. Saving never installs anything." : "Saved. Installs happen on the next run.")),
+      h("span", { class: "sub" }, isDirty ? "Unsaved changes. Saving never installs anything." : "Saved. Installs happen on the next run."))),
     noteBlock(note),
     (state.warnings || []).some(w => w.device === dev.name) ? h("ul", { class: "problems" }, (state.warnings || []).filter(w => w.device === dev.name).map(w => h("li", {}, "Won't be installed: " + w.reason))) : null,
     last.length ? h("ul", { class: "results" }, last.map(r => h("li", { class: r.ok ? "ok" : "bad" }, r.message))) : null);
@@ -473,6 +489,14 @@ async function doRun(device) {
   await reload(true);
 }
 
+async function doTest(dev) {
+  notes[dev.id] = { ok: true, text: "Testing the connection… (up to a minute if the TV is off)" }; safeRender();
+  try {
+    const r = await api("POST", "/api/devices/" + encodeURIComponent(dev.id) + "/test");
+    notes[dev.id] = { ok: true, text: r.message };
+  } catch (e) { notes[dev.id] = noteFrom(e); }
+}
+
 async function doPair(dev) {
   const port = parseInt(document.getElementById("pp-" + dev.id).value, 10);
   const code = document.getElementById("pc-" + dev.id).value.trim();
@@ -554,6 +578,7 @@ doSaveSet = once(set => "set-" + set.id, doSaveSet);
 doRemoveSet = once(set => "rmset-" + set.id, doRemoveSet);
 doRun = once(d => "run-" + (d || ""), doRun);
 doPair = once(d => "pair-" + d.id, doPair);
+doTest = once(d => "test-" + d.id, doTest);
 doRemove = once(d => "rm-" + d.id, doRemove);
 doAddSource = once(() => "addsrc", doAddSource);
 doRemoveSource = once(src => "rmsrc-" + src.id, doRemoveSource);

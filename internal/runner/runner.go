@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/sloccy/morphe-tv-patcher/internal/abi"
+	"github.com/sloccy/morphe-tv-patcher/internal/adb"
 	"github.com/sloccy/morphe-tv-patcher/internal/config"
 	"github.com/sloccy/morphe-tv-patcher/internal/morphe"
 	"github.com/sloccy/morphe-tv-patcher/internal/patches"
@@ -236,6 +237,27 @@ func (r *Runner) CheckRepo(ctx context.Context, repo string, prerelease bool) er
 		return fmt.Errorf("its bundle is %d MB, over the %d MB limit", rel.Size>>20, patches.MaxBundleBytes>>20)
 	}
 	return nil
+}
+
+// DeviceCheck is what a successful connection test found.
+type DeviceCheck struct {
+	Port int
+	ABIs []string
+	SDK  int
+}
+
+// TestDevice connects to a device the way a run would (known port, mDNS, port scan) and reads
+// its CPU. The error is plain advice the page can show as it is.
+func (r *Runner) TestDevice(ctx context.Context, d store.Device) (DeviceCheck, error) {
+	c, err := r.connect(ctx, d)
+	if err != nil {
+		if errors.Is(err, adb.ErrNotPaired) {
+			return DeviceCheck{}, fmt.Errorf("wireless debugging is on, but this server is not paired with %s (the pairing may have been reset). Use Pair… again", d.Name)
+		}
+		return DeviceCheck{}, fmt.Errorf("could not reach %s at %s. The TV may be off or asleep, or Wireless debugging is switched off (a reboot does that): turn it on in Developer options. The pairing is kept", d.Name, d.Host)
+	}
+	r.noteRecovered("device:" + d.ID)
+	return DeviceCheck{Port: r.Store.Port(d.ID), ABIs: c.abis, SDK: c.sdk}, nil
 }
 
 // PairDevice registers this machine with a device's wireless debugging (one time), notes when

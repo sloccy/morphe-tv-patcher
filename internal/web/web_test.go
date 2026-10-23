@@ -36,10 +36,17 @@ type fakeBackend struct {
 	refreshed atomic.Int32 // written by the background refresh, read by the test
 	warnings  []runner.Problem
 	learning  runner.Learning
+	testErr   error
 	hold      chan struct{} // when set, Compat blocks until it is closed
 	compatN   atomic.Int32
 }
 
+func (f *fakeBackend) TestDevice(ctx context.Context, d store.Device) (runner.DeviceCheck, error) {
+	if f.testErr != nil {
+		return runner.DeviceCheck{}, f.testErr
+	}
+	return runner.DeviceCheck{Port: 41234, ABIs: []string{"arm64-v8a"}, SDK: 34}, nil
+}
 func (f *fakeBackend) Warnings() []runner.Problem { return f.warnings }
 func (f *fakeBackend) Learning() runner.Learning  { return f.learning }
 
@@ -769,5 +776,24 @@ func TestOverlappingSavesDoNotStartMoreWork(t *testing.T) {
 	}
 	if fb.compatN.Load() != 1 {
 		t.Errorf("only one check ran, got %d", fb.compatN.Load())
+	}
+}
+
+func TestTestConnectionButton(t *testing.T) {
+	srv, s, fb := setup(t)
+	_, _ = s.Store.AddDevice("TV", "10.0.0.6")
+	code, b := do(t, srv, "POST", "/api/devices/tv/test", "", nil)
+	if code != 200 || !strings.Contains(b, "port 41234") || !strings.Contains(b, "arm64-v8a") || !strings.Contains(b, "API 34") {
+		t.Fatalf("%d %s", code, b)
+	}
+	fb.testErr = errors.New("could not reach TV. Wireless debugging is switched off")
+	if code, b := do(t, srv, "POST", "/api/devices/tv/test", "", nil); code != 502 || !strings.Contains(b, "switched off") {
+		t.Errorf("%d %s", code, b)
+	}
+	if code, _ := do(t, srv, "POST", "/api/devices/ghost/test", "", nil); code != 404 {
+		t.Errorf("unknown device: %d", code)
+	}
+	if code, _ := do(t, srv, "POST", "/api/devices/tv/test", "", map[string]string{"Origin": "https://evil.example"}); code != 403 {
+		t.Errorf("cross-site POST must be refused: %d", code)
 	}
 }

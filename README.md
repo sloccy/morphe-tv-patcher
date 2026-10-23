@@ -124,6 +124,8 @@ supported version cannot be found you are told, with the exact file to drop in.
 or pinned with `signer_sha256`; `apksigner` checks it cryptographically. APKPure files are refused
 until a signer is on record, because apkeep's docs warn APKPure has modified apps to spread malware.
 
+Each TV card has a **Test** button that connects the way a run does and shows the port and CPU, or tells you to turn Wireless debugging back on. The app list on each card can be collapsed (the line above it still says how many apps the TV gets).
+
 A TV that cannot be reached for two runs in a row sends a Telegram message saying to turn Wireless debugging back on (a reboot switches it off; the pairing is kept).
 
 Temporary download failures alert on Telegram only after 3 cycles in a row (then at most daily); a
