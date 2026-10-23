@@ -34,10 +34,17 @@ type fakeADB struct {
 	helperVer   string            // version a successful helper install leaves on the device
 	connects    int               // adb connect calls (each one makes the real TV show a notice)
 	flags       map[string]string // device_config "namespace key" -> value
+	playing     map[string]bool   // host -> something is playing
+	playingErr  error
+}
+
+func (f *fakeADB) Playing(ctx context.Context, s string) (bool, error) {
+	host, _, _ := strings.Cut(s, ":")
+	return f.playing[host], f.playingErr
 }
 
 func newADB() *fakeADB {
-	return &fakeADB{down: map[string]bool{}, abis: map[string][]string{}, installed: map[string]string{}, installMsg: map[string]string{}}
+	return &fakeADB{playing: map[string]bool{}, down: map[string]bool{}, abis: map[string][]string{}, installed: map[string]string{}, installMsg: map[string]string{}}
 }
 
 func (f *fakeADB) Reachable(ctx context.Context, host string, known ...int) (int, bool) {
@@ -134,6 +141,8 @@ type rig struct {
 	appsCalls   []string
 	notes       []string
 	now         time.Time
+	cacheFetch  bool
+	stripLibs   [][]string // StripLibs of every patch call
 }
 
 const (
@@ -174,10 +183,16 @@ func newRig(t *testing.T) *rig {
 			if rg.fetchErr != nil {
 				return nil, rg.fetchErr
 			}
-			return &sources.Fetched{Verified: &verify.Verified{Path: "in.apkm", Package: a.Package, Version: a.Version}, Detail: "apkmirror (chrome)"}, nil
+			path := "in.apkm"
+			if rg.cacheFetch { // a download that lands in the cache folder, as the real one does
+				path = filepath.Join(cfg.Cache(), a.Package+"-"+a.Version+".apkm")
+				_ = os.WriteFile(path, []byte("x"), 0o600)
+			}
+			return &sources.Fetched{Verified: &verify.Verified{Path: path, Package: a.Package, Version: a.Version}, Detail: "apkmirror (chrome)"}, nil
 		},
 		Patch: func(ctx context.Context, o morphe.Options) error {
 			rg.patches++
+			rg.stripLibs = append(rg.stripLibs, o.StripLibs)
 			return os.WriteFile(o.Out, []byte("apk"), 0o600)
 		},
 		Cached: func(src store.Source) (*patches.Release, string, bool) {
@@ -587,7 +602,7 @@ func TestNoDeviceRunsBuildForTheRequestedCPUs(t *testing.T) {
 		return os.WriteFile(o.Out, []byte("apk"), 0o600)
 	}
 	rg.r.Run(context.Background(), Options{NoDevice: true, Packages: []string{prime}, ABIs: []string{"arm64-v8a", "armeabi-v7a"}})
-	if strings.Join(strip, ",") != "arm64-v8a,armeabi-v7a" || strings.Join(rg.fetchABI[0], ",") != "arm64-v8a,armeabi-v7a" {
+	if len(strip) != 0 || strings.Join(rg.fetchABI[0], ",") != "arm64-v8a,armeabi-v7a" {
 		t.Errorf("strip %v fetch %v", strip, rg.fetchABI)
 	}
 	rg.fetchABI = nil
@@ -1068,5 +1083,129 @@ func TestPairingSavesWhenAndReadsTheCPU(t *testing.T) {
 	}
 	if _, ok := rg.st.DeviceInfo(d3.ID); ok {
 		t.Error("nothing is recorded for a failed pairing")
+	}
+}
+
+func TestBusyTVIsLeftAloneUntilARunFindsItIdle(t *testing.T) {
+	rg := newRig(t)
+	rg.device(t, "TV", "10.0.0.6", prime)
+	rg.adb.playing["10.0.0.6"] = true
+	res := rg.r.Run(context.Background(), Options{})
+	if rg.fetches != 0 || rg.patches != 0 || len(rg.adb.installs) != 0 {
+		t.Errorf("a playing TV must not trigger work: %d fetches, %d patches, %v", rg.fetches, rg.patches, rg.adb.installs)
+	}
+	if len(res) == 0 || !res[0].OK || res[0].Alert || !strings.Contains(res[0].Message, "waiting") {
+		t.Errorf("want a quiet waiting line, got %+v", res)
+	}
+	if _, has := rg.st.Install(rg.st.Settings().Devices[0].ID, prime); has {
+		t.Error("a deferred install must leave no install record")
+	}
+	rg.adb.playing["10.0.0.6"] = false
+	rg.r.Run(context.Background(), Options{})
+	if len(rg.adb.installs) != 1 {
+		t.Errorf("once idle the next run installs: %v", rg.adb.installs)
+	}
+}
+
+func TestRunNowAndForceIgnorePlayback(t *testing.T) {
+	for _, o := range []Options{{Manual: true}, {Force: true}} {
+		rg := newRig(t)
+		rg.device(t, "TV", "10.0.0.6", prime)
+		rg.adb.playing["10.0.0.6"] = true
+		rg.r.Run(context.Background(), o)
+		if len(rg.adb.installs) != 1 {
+			t.Errorf("%+v should install while playing: %v", o, rg.adb.installs)
+		}
+	}
+}
+
+func TestOnlyTheBusyTVWaits(t *testing.T) {
+	rg := newRig(t)
+	rg.device(t, "A", "10.0.0.1", prime)
+	rg.device(t, "B", "10.0.0.2", prime)
+	rg.adb.playing["10.0.0.1"] = true
+	rg.r.Run(context.Background(), Options{})
+	if len(rg.adb.installs) != 1 || !strings.HasPrefix(rg.adb.installs[0], "10.0.0.2:") {
+		t.Errorf("only the idle TV should be updated: %v", rg.adb.installs)
+	}
+}
+
+func TestFailedPlaybackCheckDoesNotBlockUpdates(t *testing.T) {
+	rg := newRig(t)
+	rg.device(t, "TV", "10.0.0.6", prime)
+	rg.adb.playingErr = errors.New("dumpsys failed")
+	rg.r.Run(context.Background(), Options{})
+	if len(rg.adb.installs) != 1 {
+		t.Errorf("a broken check must not hold updates back: %v", rg.adb.installs)
+	}
+}
+
+func TestInstallRemovesOlderVersionsFromCacheAndOutput(t *testing.T) {
+	rg := newRig(t)
+	rg.cacheFetch = true
+	rg.device(t, "TV", "10.0.0.6", prime)
+	cfg := rg.r.Cfg
+	const oldVer = "5.0.0"
+	oldBundle := filepath.Join(cfg.Cache(), prime+"-"+oldVer+".apkm")
+	oldApk := filepath.Join(cfg.Output(), prime+"-"+oldVer+"-v1-abc.apk")
+	oldResult := filepath.Join(cfg.Output(), prime+"-"+oldVer+"-v1-abc.result.json")
+	other := filepath.Join(cfg.Cache(), "com.other-1.0.apkm")
+	dropped := filepath.Join(cfg.Input(), prime, "mine.apkm")
+	_ = os.MkdirAll(filepath.Dir(dropped), 0o750)
+	for _, f := range []string{oldBundle, oldApk, oldResult, other, dropped} {
+		if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = rg.st.UpdateApp(prime, func(a *store.AppState) { a.CacheFiles = map[string]string{oldBundle: oldVer} })
+
+	rg.r.Run(context.Background(), Options{})
+	if len(rg.adb.installs) != 1 {
+		t.Fatalf("installs %v", rg.adb.installs)
+	}
+	for _, gone := range []string{oldBundle, oldApk, oldResult} {
+		if _, err := os.Stat(gone); err == nil {
+			t.Errorf("%s should have been deleted after the update", filepath.Base(gone))
+		}
+	}
+	for _, kept := range []string{other, dropped} {
+		if _, err := os.Stat(kept); err != nil {
+			t.Errorf("%s belongs to something else and must stay", filepath.Base(kept))
+		}
+	}
+	files, _ := filepath.Glob(filepath.Join(cfg.Cache(), prime+"-*.apkm"))
+	apks, _ := filepath.Glob(filepath.Join(cfg.Output(), prime+"-*.apk"))
+	if len(files) != 1 || len(apks) != 1 {
+		t.Errorf("the current version's files must remain: %v %v", files, apks)
+	}
+}
+
+func TestFailedInstallKeepsOlderFiles(t *testing.T) {
+	rg := newRig(t)
+	rg.cacheFetch = true
+	rg.device(t, "TV", "10.0.0.6", prime)
+	old := filepath.Join(rg.r.Cfg.Cache(), prime+"-5.0.0.apkm")
+	_ = os.WriteFile(old, []byte("x"), 0o600)
+	_ = rg.st.UpdateApp(prime, func(a *store.AppState) { a.CacheFiles = map[string]string{old: "5.0.0"} })
+	rg.adb.installMsg[prime] = "Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]"
+	rg.r.Run(context.Background(), Options{})
+	if _, err := os.Stat(old); err != nil {
+		t.Error("nothing may be deleted when the update did not succeed")
+	}
+}
+
+func TestPatchingNeverStripsNativeLibraries(t *testing.T) {
+	rg := newRig(t)
+	rg.device(t, "A", "10.0.0.1", prime)
+	rg.device(t, "B", "10.0.0.2", prime)
+	rg.adb.abis["10.0.0.2"] = []string{"arm64-v8a", "armeabi-v7a"}
+	rg.r.Run(context.Background(), Options{})
+	if len(rg.stripLibs) != 2 {
+		t.Fatalf("patched %d times, want 2", len(rg.stripLibs))
+	}
+	for _, s := range rg.stripLibs {
+		if len(s) != 0 {
+			t.Errorf("--striplibs %v would drop architectures; the patched app must keep them all", s)
+		}
 	}
 }

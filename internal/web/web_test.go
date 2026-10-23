@@ -368,7 +368,7 @@ func TestStateMergesAppsAcrossSourcesDefaultFirst(t *testing.T) {
 			Name    string `json:"name"`
 			Sources []struct {
 				ID     string `json:"id"`
-				Newest string `json:"newest"`
+				Target string `json:"target"`
 			} `json:"sources"`
 		} `json:"apps"`
 		Sources []map[string]any `json:"sources"`

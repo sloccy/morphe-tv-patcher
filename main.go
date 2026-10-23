@@ -133,7 +133,7 @@ func setup() (*app, error) {
 			if l, err := patches.FetchList(ctx, a.hc, src.Repo, rel.Tag, cfg.GitHubToken); err == nil {
 				names = l.Names()
 			}
-			return patches.FromCLI(rel.Tag, patches.ParseListPatches(stable), patches.ParseListPatches(all), names), nil
+			return patches.FromCLIWithPatches(rel.Tag, patches.ParseListPatches(stable), patches.ParseListPatches(all), patches.ParseListPatchDetails(all), names), nil
 		},
 		PausedUntil: apkmirror.Shared.BlockedUntil,
 		Probe: func(ctx context.Context, src store.Source, pkg, name, version string) ([]string, error) {
@@ -300,7 +300,7 @@ func cmdFetch(args []string) error {
 		return fmt.Errorf("%s is not supported by %s %s", *pkg, srcCfg.Repo, list.Version)
 	}
 	if *ver == "" {
-		*ver = app.Newest
+		*ver = app.Target
 	}
 	env := sources.DefaultEnv()
 	env.InputDir, env.CacheDir, env.Store = a.cfg.Input(), a.cfg.Cache(), a.st
@@ -373,13 +373,13 @@ func cmdResolve(args []string) error {
 			if *pkg != "" && app.Package != *pkg {
 				continue
 			}
-			res, _, err := apkmirror.Download(ctx, apkmirror.AppRequest{Package: app.Package, Name: app.Name, Version: app.Newest,
+			res, _, err := apkmirror.Download(ctx, apkmirror.AppRequest{Package: app.Package, Name: app.Name, Version: app.Target,
 				Hint: apkmirror.Hints[app.Package], SDK: 31, AllowPhone: src.AllowPhone, DryRun: true}, apkmirror.Options{ProfileHint: a.st.LastProfile()})
 			if err != nil {
 				bad = true
-				fmt.Printf("MISS %-40s %-28s %v\n", app.Name, app.Newest, err)
+				fmt.Printf("MISS %-40s %-28s %v\n", app.Name, app.Target, err)
 			} else {
-				fmt.Printf("ok   %-40s %-28s %s\n", app.Name, app.Newest, res.Slug)
+				fmt.Printf("ok   %-40s %-28s %s\n", app.Name, app.Target, res.Slug)
 			}
 			time.Sleep(8 * time.Second)
 		}

@@ -78,17 +78,17 @@ func (r *Runner) judge(st store.Settings, deviceIDs []string) (problems []Proble
 			if l == nil {
 				continue // a source that has not loaded: nothing to judge against
 			}
-			app, ok := l.App(e.Package)
-			if !ok || app.Newest == "" {
+			app, ok := r.appFor(l, e.Package)
+			if !ok || app.Target == "" {
 				continue
 			}
 			if !haveInfo || len(info.ABIs) == 0 {
 				note(fmt.Sprintf("%s has not been reached yet, so its CPU is unknown (pair it first); %s was not checked", dev.Name, app.Name))
 				continue
 			}
-			builds, known := r.Store.Builds(e.Package, app.Newest)
+			builds, known := r.Store.Builds(e.Package, app.Target)
 			if !known {
-				if r.checking(e.Package, app.Newest) {
+				if r.checking(e.Package, app.Target) {
 					note(fmt.Sprintf("still checking which CPUs %s has builds for", app.Name))
 				} else {
 					note(fmt.Sprintf("could not check which CPUs %s has builds for", app.Name))
@@ -98,7 +98,7 @@ func (r *Runner) judge(st store.Settings, deviceIDs []string) (problems []Proble
 			if !runnable(builds, info.ABIs) {
 				problems = append(problems, Problem{Device: dev.Name, Package: e.Package, Name: app.Name,
 					Reason: fmt.Sprintf("%s %s only has %s builds; %s runs %s. The patches cannot give it this app.",
-						app.Name, app.Newest, strings.Join(builds, ", "), dev.Name, strings.Join(info.ABIs, ", "))})
+						app.Name, app.Target, strings.Join(builds, ", "), dev.Name, strings.Join(info.ABIs, ", "))})
 			}
 		}
 	}

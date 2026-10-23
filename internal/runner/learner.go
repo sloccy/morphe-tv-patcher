@@ -158,16 +158,16 @@ func (r *Runner) needs(st store.Settings, deviceIDs []string) []job {
 			if l == nil {
 				continue
 			}
-			app, ok := l.App(e.Package)
-			if !ok || app.Newest == "" || seen[jobKey(e.Package, app.Newest)] {
+			app, ok := r.appFor(l, e.Package)
+			if !ok || app.Target == "" || seen[jobKey(e.Package, app.Target)] {
 				continue
 			}
-			seen[jobKey(e.Package, app.Newest)] = true
-			if _, known := r.Store.Builds(e.Package, app.Newest); known {
+			seen[jobKey(e.Package, app.Target)] = true
+			if _, known := r.Store.Builds(e.Package, app.Target); known {
 				continue
 			}
 			src, _ := r.Store.Source(e.Source)
-			out = append(out, job{src: src, pkg: e.Package, name: app.Name, version: app.Newest})
+			out = append(out, job{src: src, pkg: e.Package, name: app.Name, version: app.Target})
 		}
 	}
 	return out

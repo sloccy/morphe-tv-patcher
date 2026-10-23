@@ -152,6 +152,9 @@ type AppState struct {
 	// ReleaseURLs remembers each version's APKMirror release page, which often differs from what
 	// the app's name suggests, so later lookups load it directly (one request, not several).
 	ReleaseURLs map[string]string `json:"release_urls,omitempty"`
+	// CacheFiles maps each bundle we downloaded into the cache to the app version it holds, so the
+	// ones for older versions can be deleted once the newer one is installed.
+	CacheFiles map[string]string `json:"cache_files,omitempty"`
 }
 
 // Install is what we put on one device.

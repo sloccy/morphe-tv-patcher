@@ -13,9 +13,68 @@ import (
 type App struct {
 	Package      string   `json:"package"`
 	Name         string   `json:"name"`
-	Versions     []string `json:"versions"` // oldest first
-	Newest       string   `json:"newest"`
-	Experimental bool     `json:"experimental"` // the newest version is marked experimental
+	Versions     []string `json:"versions"`     // oldest first
+	Target       string   `json:"target"`       // the version to build by default (see Pick)
+	Experimental bool     `json:"experimental"` // the target version is marked experimental
+
+	// Patches says which versions each patch supports, so Pick can weigh them.
+	Patches []PatchCompat `json:"-"`
+	stable  map[string]bool
+}
+
+// PatchCompat is one patch's view of an app: whether it is on by default and which versions it names.
+// A patch naming no versions is universal and does not influence the choice.
+type PatchCompat struct {
+	Name     string
+	Enabled  bool
+	Versions []string
+}
+
+// Pick chooses the version to build: the stable version that the most applied patches support, the
+// newest of those on a tie. Applied means on by default, minus disable, plus enable (patch names, any
+// case). When no version is stable, all of them are considered and the result is flagged experimental.
+// Without patch data every score is zero, so it is simply the newest candidate.
+func (a App) Pick(enable, disable []string) (version string, experimental bool) {
+	var cands []string
+	for _, v := range a.Versions {
+		if a.stable[v] {
+			cands = append(cands, v)
+		}
+	}
+	if len(cands) == 0 {
+		cands, experimental = a.Versions, len(a.Versions) > 0
+	}
+	has := func(list []string, name string) bool {
+		for _, x := range list {
+			if strings.EqualFold(x, name) {
+				return true
+			}
+		}
+		return false
+	}
+	score := map[string]int{}
+	for _, p := range a.Patches {
+		on := p.Enabled
+		if has(disable, p.Name) {
+			on = false
+		}
+		if has(enable, p.Name) {
+			on = true
+		}
+		if !on {
+			continue
+		}
+		for _, v := range p.Versions {
+			score[v]++
+		}
+	}
+	best := -1
+	for _, v := range cands { // oldest first, so >= leaves the newest of equals
+		if score[v] >= best {
+			version, best = v, score[v]
+		}
+	}
+	return version, experimental
 }
 
 // List is the parsed patches-list.json.
@@ -29,6 +88,8 @@ type listFile struct {
 	Version  string            `json:"version"`
 	AppNames map[string]string `json:"appNames"`
 	Patches  []struct {
+		Name               string              `json:"name"`
+		Use                bool                `json:"use"`
 		CompatiblePackages map[string][]string `json:"compatiblePackages"`
 		Compatibility      []struct {
 			PackageName string `json:"packageName"`
@@ -48,32 +109,43 @@ func ParseList(data []byte) (*List, error) {
 		return nil, fmt.Errorf("patches-list.json: %w", err)
 	}
 	versions := map[string][]string{}
-	experimental := map[string]map[string]bool{}
-	for _, p := range f.Patches {
-		for pkg, vs := range p.CompatiblePackages {
-			versions[pkg] = append(versions[pkg], vs...)
+	stableMark := map[string]map[string]bool{} // a version is stable if any patch lists it as stable
+	details := map[string][]PatchCompat{}
+	mark := func(pkg, v string) {
+		if stableMark[pkg] == nil {
+			stableMark[pkg] = map[string]bool{}
 		}
+		stableMark[pkg][v] = true
+	}
+	for _, p := range f.Patches {
+		perPkg := map[string][]string{}
+		inCompat := map[string]bool{}
 		for _, c := range p.Compatibility {
+			inCompat[c.PackageName] = true
 			for _, t := range c.Targets {
-				versions[c.PackageName] = append(versions[c.PackageName], t.Version)
-				if t.Experimental {
-					if experimental[c.PackageName] == nil {
-						experimental[c.PackageName] = map[string]bool{}
-					}
-					experimental[c.PackageName][t.Version] = true
+				perPkg[c.PackageName] = append(perPkg[c.PackageName], t.Version)
+				if !t.Experimental {
+					mark(c.PackageName, t.Version)
 				}
 			}
+		}
+		for pkg, vs := range p.CompatiblePackages {
+			if inCompat[pkg] {
+				continue // the newer "compatibility" form says more (experimental flags)
+			}
+			perPkg[pkg] = append(perPkg[pkg], vs...)
+			for _, v := range vs {
+				mark(pkg, v)
+			}
+		}
+		for pkg, vs := range perPkg {
+			versions[pkg] = append(versions[pkg], vs...)
+			details[pkg] = append(details[pkg], PatchCompat{Name: p.Name, Enabled: p.Use, Versions: vs})
 		}
 	}
 	l := &List{Version: f.Version, byPkg: map[string]*App{}}
 	for pkg, vs := range versions {
-		stable := map[string]bool{}
-		for _, v := range vs {
-			if !experimental[pkg][v] {
-				stable[v] = true
-			}
-		}
-		a := buildApp(pkg, f.AppNames[pkg], vs, stable)
+		a := buildApp(pkg, f.AppNames[pkg], vs, stableMark[pkg], details[pkg])
 		if f.AppNames[pkg] == "" {
 			a.Name = pkg
 		}

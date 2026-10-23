@@ -65,7 +65,7 @@ func TestParseListRealFile(t *testing.T) {
 	}
 	for pkg, v := range want {
 		a, ok := l.App(pkg)
-		if !ok || a.Newest != v || a.Name == pkg {
+		if !ok || a.Target != v || a.Name == pkg {
 			t.Errorf("%s: %+v ok=%v", pkg, a, ok)
 		}
 	}

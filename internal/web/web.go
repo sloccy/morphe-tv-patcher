@@ -180,7 +180,7 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 
 type appSource struct {
 	ID           string `json:"id"`
-	Newest       string `json:"newest"`
+	Target       string `json:"target"`
 	Experimental bool   `json:"experimental"`
 }
 
@@ -207,7 +207,7 @@ func mergedApps(sources []store.Source, lists map[string]*patches.List) []appRow
 			continue
 		}
 		for _, a := range l.Apps {
-			if a.Newest == "" {
+			if a.Target == "" {
 				continue
 			}
 			row := byPkg[a.Package]
@@ -215,7 +215,7 @@ func mergedApps(sources []store.Source, lists map[string]*patches.List) []appRow
 				row = &appRow{Package: a.Package, Name: a.Name}
 				byPkg[a.Package] = row
 			}
-			row.Sources = append(row.Sources, appSource{ID: src.ID, Newest: a.Newest, Experimental: a.Experimental})
+			row.Sources = append(row.Sources, appSource{ID: src.ID, Target: a.Target, Experimental: a.Experimental})
 		}
 	}
 	rows := make([]appRow, 0, len(byPkg))

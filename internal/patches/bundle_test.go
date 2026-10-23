@@ -32,7 +32,7 @@ func TestCLIParseMatchesPatchesListJSON(t *testing.T) {
 	fromCLI := FromCLI("v1.42.2", cli, cli, fromJSON.Names())
 	for _, a := range fromJSON.Apps {
 		b, ok := fromCLI.App(a.Package)
-		if !ok || b.Newest != a.Newest || strings.Join(b.Versions, "|") != strings.Join(a.Versions, "|") || b.Name != a.Name {
+		if !ok || b.Target != a.Target || strings.Join(b.Versions, "|") != strings.Join(a.Versions, "|") || b.Name != a.Name {
 			t.Errorf("%s: json %+v, cli %+v (%v)", a.Package, a, b, ok)
 		}
 	}
@@ -53,13 +53,13 @@ func TestSecondRepositoryBundle(t *testing.T) {
 		t.Errorf("all %d stable %d", len(yt.Versions), len(stable["com.google.android.youtube"]))
 	}
 	// the target is the newest STABLE version; the newer experimental ones are listed but not chosen
-	if yt.Newest != Newest(stable["com.google.android.youtube"]) {
-		t.Errorf("newest %q, want the newest stable %q", yt.Newest, Newest(stable["com.google.android.youtube"]))
+	if yt.Target != Newest(stable["com.google.android.youtube"]) {
+		t.Errorf("newest %q, want the newest stable %q", yt.Target, Newest(stable["com.google.android.youtube"]))
 	}
 	if all["com.google.android.youtube"][0] == "" {
 		t.Error("versions should not be empty strings")
 	}
-	if rd, _ := l.App("com.reddit.frontpage"); rd.Name != "Reddit Frontpage" || rd.Newest == "" {
+	if rd, _ := l.App("com.reddit.frontpage"); rd.Name != "Reddit Frontpage" || rd.Target == "" {
 		t.Errorf("%+v", rd)
 	}
 	if ytm, _ := l.App("com.google.android.apps.youtube.music"); ytm.Name != "Youtube Music" {
@@ -71,7 +71,7 @@ func TestExperimentalOnlyPackageIsFlagged(t *testing.T) {
 	stable := map[string][]string{"a.app": nil}
 	all := map[string][]string{"a.app": {"2.0", "1.0"}}
 	a, _ := FromCLI("t", stable, all, nil).App("a.app")
-	if a.Newest != "2.0" || !a.Experimental {
+	if a.Target != "2.0" || !a.Experimental {
 		t.Errorf("%+v", a)
 	}
 }
@@ -83,7 +83,7 @@ func TestPatchesListJSONExperimentalVersionsAreNotChosenByDefault(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a, _ := l.App("p"); a.Newest != "1.0" || a.Experimental || len(a.Versions) != 2 {
+	if a, _ := l.App("p"); a.Target != "1.0" || a.Experimental || len(a.Versions) != 2 {
 		t.Errorf("%+v", a)
 	}
 }
@@ -155,5 +155,55 @@ func TestDownloadLimitsAndPerSourceFolders(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(b, "patches-9.mpp")); err != nil {
 		t.Error("another source's bundle must survive")
+	}
+}
+
+func TestPickMostSupportedThenNewest(t *testing.T) {
+	st := map[string][]string{"p": {"1.0", "2.0", "3.0"}}
+	details := map[string][]PatchCompat{"p": {
+		{Name: "Ads", Enabled: true, Versions: []string{"1.0", "2.0", "3.0"}},
+		{Name: "Pin", Enabled: true, Versions: []string{"1.0", "2.0"}},
+		{Name: "Clone", Enabled: false, Versions: []string{"3.0"}},
+		{Name: "Universal", Enabled: true},
+	}}
+	a, _ := FromCLIWithPatches("t", st, st, details, nil).App("p")
+	if a.Target != "2.0" { // 3.0 is newest but fewer applied patches support it
+		t.Fatalf("target %q, want 2.0", a.Target)
+	}
+	if v, _ := a.Pick([]string{"clone"}, nil); v != "3.0" { // enabling a patch for 3.0 ties it, newest wins
+		t.Errorf("with Clone enabled got %q, want 3.0", v)
+	}
+	if v, _ := a.Pick(nil, []string{"PIN"}); v != "3.0" { // dropping Pin ties 1.0/2.0/3.0 at one each
+		t.Errorf("with Pin disabled got %q, want 3.0", v)
+	}
+}
+
+func TestPickIgnoresExperimentalUnlessAlone(t *testing.T) {
+	stable := map[string][]string{"p": {"1.0"}}
+	all := map[string][]string{"p": {"1.0", "2.0"}}
+	details := map[string][]PatchCompat{"p": {{Name: "A", Enabled: true, Versions: []string{"2.0"}}}}
+	a, _ := FromCLIWithPatches("t", stable, all, details, nil).App("p")
+	if a.Target != "1.0" || a.Experimental {
+		t.Errorf("got %q experimental=%v, want stable 1.0 even though the patch names 2.0", a.Target, a.Experimental)
+	}
+}
+
+func TestParseListPatchDetails(t *testing.T) {
+	out := "Index: 0\nName: A\nDescription: x\nEnabled: true\nCompatible packages:\n\tPackage name: p\n\tCompatible versions:\n\t\t1.0\n\t\t2.0\n\nIndex: 1\nName: B\nEnabled: false\nCompatible packages:\n\tPackage name: p\n\tCompatible versions:\n\t\t2.0\n"
+	got := ParseListPatchDetails([]byte(out))["p"]
+	if len(got) != 2 || got[0].Name != "A" || !got[0].Enabled || len(got[0].Versions) != 2 || got[1].Name != "B" || got[1].Enabled || len(got[1].Versions) != 1 {
+		t.Errorf("got %+v", got)
+	}
+}
+
+func TestLiveListPicksMatchPreviousTargets(t *testing.T) {
+	l, err := ParseList(readFile(t, "patches-list.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for pkg, want := range map[string]string{"com.disney.disneyplus": "26.16.0+rc2-2026.09.08", "com.peacocktv.peacockandroid": "7.10.102", "com.wbd.hbomax": "7.9.0.61"} {
+		if a, _ := l.App(pkg); a.Target != want {
+			t.Errorf("%s target %q, want %q", pkg, a.Target, want)
+		}
 	}
 }

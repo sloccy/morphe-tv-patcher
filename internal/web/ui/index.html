@@ -225,7 +225,7 @@ function appGrid(idPrefix, sel, installs, locked, onChange) {
           lock ? h("span", { class: "chip" }, "from " + lock) : null,
           src.experimental ? h("span", { class: "chip warn" }, "experimental") : null,
           srcInfo.allow_phone ? h("span", { class: "chip warn", title: "A phone app: it may install but not show in the TV launcher" }, "phone app") : null),
-        h("span", { class: "meta" }, "newest supported " + src.newest + (inst ? " · installed " + inst.apk_version + " (" + when(inst.installed_at) + ")" : "")),
+        h("span", { class: "meta" }, "target " + src.target + (inst ? " · installed " + inst.apk_version + " (" + when(inst.installed_at) + ")" : "")),
         !lock && a.sources.length > 1 ? h("span", { class: "meta" }, "patches from ",
           h("select", { onchange: ev => { const m = new Map(sel); m.set(a.package, ev.target.value); onChange(m); } },
             a.sources.map(s => h("option", { value: s.id, selected: s.id === src.id }, (sourceById(s.id) || {}).repo || s.id)))) : null));

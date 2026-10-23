@@ -217,6 +217,27 @@ func (c *Client) InstalledVersion(ctx context.Context, serial, pkg string) (stri
 	return "", nil
 }
 
+var (
+	playingSession = regexp.MustCompile(`PlaybackState \{state=3\b`) // 3 = PlaybackState.STATE_PLAYING
+	startedPlayer  = regexp.MustCompile(`state:started\b`)           // an audio player that is running
+)
+
+// Playing says whether the TV is playing something right now: a media session in the playing state,
+// or (for apps that publish no session) an audio player that has started. Paused, idle and the
+// screensaver do not count. An error means the media service could not be asked.
+func (c *Client) Playing(ctx context.Context, serial string) (bool, error) {
+	sessions, err := c.shell(ctx, serial, "dumpsys media_session")
+	if err != nil {
+		return false, err
+	}
+	audio, _ := c.shell(ctx, serial, "dumpsys audio") // only a second opinion, so its failure is not one
+	return playingFrom(sessions, audio), nil
+}
+
+func playingFrom(mediaSession, audio string) bool {
+	return playingSession.MatchString(mediaSession) || startedPlayer.MatchString(audio)
+}
+
 // Install runs `adb install -r`. ok is false with the adb output on failure.
 func (c *Client) Install(ctx context.Context, serial, apkPath string) (ok bool, output string) {
 	out, err := c.Run(ctx, "-s", serial, "install", "-r", apkPath)

@@ -4,11 +4,14 @@ Keeps Morphe-patched apps (Prime Video, Netflix, Disney+, and anything else the
 [morphe-androidtv-patches](https://github.com/ajstrick81/morphe-androidtv-patches) support) installed
 on your Google TVs. A small web page lets you add devices and tick apps; a scheduler does the rest:
 
-1. find the newest patches release and the newest app version it supports;
+1. find the newest patches release and the app version to build: the stable version that the most
+   of your enabled patches support (the newest of those on a tie);
 2. get that exact Android TV bundle (your drop folder, the cache, APKMirror, APKMirror through
    FlareSolverr) and verify it;
 3. patch it once with the Morphe CLI for the TV's CPU;
-4. install it over wireless ADB on every device that needs it, and tell you on Telegram.
+4. install it over wireless ADB on every device that needs it, and tell you on Telegram. A scheduled
+   run leaves a TV alone while something is playing on it and tries again at the next run; **Run now**
+   always installs. After a successful update the older versions' downloads and patched files are deleted.
 
 Written in Go; the image adds the Java runtime, `adb` and `apksigner`.
 
@@ -30,7 +33,7 @@ volumes:
 ```
 
 Open `http://<host>:8093`, add a device (its IP), press **Pair…** and follow the prompt, tick apps,
-**Save**, then **Run now**. Saving never installs anything; the schedule (default every 6 hours) and
+**Save**, then **Run now**. Saving never installs anything; the schedule (default every 12 hours) and
 the button do.
 
 **No login.** Like your other LAN tools, the page is meant for the LAN/Tailscale only: anyone who can
@@ -118,6 +121,9 @@ The APKMirror page for an app is found automatically (search by package name, an
 first) and cached; `settings.json` can override a wrong guess. Nothing is downgraded: if the newest
 supported version cannot be found you are told, with the exact file to drop in.
 
+**Nothing is stripped:** patched apps keep every native-library architecture (no `--striplibs`), because
+dropping one can leave an app that will not install or starts and closes. The files are larger.
+
 **Every file is verified:** right package and version, an Android TV launcher (rejects phone builds),
 `armeabi-v7a`, and the publisher's signing certificate: learned from the first APKMirror download,
 or pinned with `signer_sha256`; `apksigner` checks it cryptographically.
@@ -157,7 +163,7 @@ wrong signature or a phone build alerts at once; a message follows when it recov
 | Variable | Default | |
 |---|---|---|
 | `DATA_DIR` | `/data` | settings, state, keystore, cache |
-| `INTERVAL` | `6h` | time between scheduled runs |
+| `INTERVAL` | `12h` | time between scheduled runs |
 | `WEB_PORT` / `WEB_BIND` | `8093` / `0.0.0.0` | |
 | `ALLOWED_HOST_SUFFIXES` | | extra `Host` names the page answers to |
 | `FLARESOLVERR_URL` | | e.g. `http://127.0.0.1:8191` |

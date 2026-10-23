@@ -160,3 +160,23 @@ func TestReachableNeverOpensAnADBSession(t *testing.T) {
 		t.Error("nothing listening")
 	}
 }
+
+func TestPlayingFrom(t *testing.T) {
+	playing := "  Sessions Stack - have 1 sessions:\n    com.netflix.ninja/x\n      state=PlaybackState {state=3, position=1000, buffered position=0}"
+	paused := "      state=PlaybackState {state=2, position=1000}"
+	cases := []struct {
+		name, session, audio string
+		want                 bool
+	}{
+		{"playing", playing, "", true},
+		{"paused", paused, "players:\n  AudioPlaybackConfiguration piid:5 state:paused", false},
+		{"idle", "Sessions Stack - have 0 sessions:", "", false},
+		{"no session but audio running", "", "AudioPlaybackConfiguration piid:7 state:started", true},
+		{"state 30 is not playing", "state=PlaybackState {state=30,", "", false},
+	}
+	for _, tc := range cases {
+		if got := playingFrom(tc.session, tc.audio); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

@@ -37,11 +37,44 @@ func ParseListPatches(out []byte) map[string][]string {
 	return res
 }
 
+// ParseListPatchDetails reads the same output per patch: its name, whether it is on by default and
+// the versions it names for each package. Patches with no package listing do not appear.
+func ParseListPatchDetails(out []byte) map[string][]PatchCompat {
+	res := map[string][]PatchCompat{}
+	name, enabled, cur := "", false, ""
+	for line := range strings.SplitSeq(string(out), "\n") {
+		line = strings.TrimRight(line, "\r")
+		switch {
+		case strings.HasPrefix(line, "Name: "):
+			name, enabled, cur = strings.TrimSpace(strings.TrimPrefix(line, "Name: ")), false, ""
+		case strings.HasPrefix(line, "Enabled: "):
+			enabled = strings.TrimSpace(strings.TrimPrefix(line, "Enabled: ")) == "true"
+		case strings.HasPrefix(line, "\tPackage name: "):
+			cur = strings.TrimSpace(strings.TrimPrefix(line, "\tPackage name: "))
+			res[cur] = append(res[cur], PatchCompat{Name: name, Enabled: enabled})
+		case strings.HasPrefix(line, "\t\t") && cur != "":
+			if v := strings.TrimSpace(line); v != "" {
+				last := &res[cur][len(res[cur])-1]
+				last.Versions = append(last.Versions, v)
+			}
+		case !strings.HasPrefix(line, "\t") && line != "":
+			cur = ""
+		}
+	}
+	return res
+}
+
 // FromCLI builds the app list of one release from the CLI's views of its bundle: stable holds
 // the versions without -x, all the versions with -x (stable plus experimental). names comes from
-// the repository's patches-list.json when it has one. The newest stable version is the target;
-// only when a package has no stable version is the newest experimental one used (and flagged).
+// the repository's patches-list.json when it has one. The target is chosen by App.Pick; only when a
+// package has no stable version are experimental ones considered (and flagged).
 func FromCLI(tag string, stable, all map[string][]string, names map[string]string) *List {
+	return FromCLIWithPatches(tag, stable, all, nil, names)
+}
+
+// FromCLIWithPatches is FromCLI plus each patch's own version list (ParseListPatchDetails of the
+// -x output), which lets Pick prefer the version the most patches support.
+func FromCLIWithPatches(tag string, stable, all map[string][]string, details map[string][]PatchCompat, names map[string]string) *List {
 	l := &List{Version: tag, byPkg: map[string]*App{}}
 	for pkg, vs := range all {
 		stableSet := map[string]bool{}
@@ -53,7 +86,7 @@ func FromCLI(tag string, stable, all map[string][]string, names map[string]strin
 				stableSet[v] = true
 			}
 		}
-		l.Apps = append(l.Apps, buildApp(pkg, names[pkg], vs, stableSet))
+		l.Apps = append(l.Apps, buildApp(pkg, names[pkg], vs, stableSet, details[pkg]))
 	}
 	sort.Slice(l.Apps, func(i, j int) bool { return l.Apps[i].Name < l.Apps[j].Name })
 	for i := range l.Apps {
@@ -62,24 +95,12 @@ func FromCLI(tag string, stable, all map[string][]string, names map[string]strin
 	return l
 }
 
-func buildApp(pkg, name string, versions []string, stable map[string]bool) App {
-	sorted := SortVersions(versions)
-	var stableVersions []string
-	for _, v := range sorted {
-		if stable[v] {
-			stableVersions = append(stableVersions, v)
-		}
-	}
-	a := App{Package: pkg, Name: name, Versions: sorted}
+func buildApp(pkg, name string, versions []string, stable map[string]bool, ps []PatchCompat) App {
+	a := App{Package: pkg, Name: name, Versions: SortVersions(versions), Patches: ps, stable: stable}
 	if a.Name == "" {
 		a.Name = PrettyName(pkg)
 	}
-	if len(stableVersions) > 0 {
-		a.Newest = Newest(stableVersions)
-	} else {
-		a.Newest = Newest(sorted)
-		a.Experimental = a.Newest != ""
-	}
+	a.Target, a.Experimental = a.Pick(nil, nil)
 	return a
 }
 

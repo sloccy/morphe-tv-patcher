@@ -38,6 +38,7 @@ type ADB interface {
 	Install(ctx context.Context, serial, apk string) (bool, string)
 	Uninstall(ctx context.Context, serial, pkg string) error
 	Shell(ctx context.Context, serial, cmd string) (string, error)
+	Playing(ctx context.Context, serial string) (bool, error)
 	Reachable(ctx context.Context, host string, known ...int) (int, bool)
 	Pair(ctx context.Context, host string, pairPort int, code string) error
 }
@@ -124,6 +125,18 @@ type Runner struct {
 func New(cfg config.Config, st *store.Store, a ADB, d Deps, notify func(context.Context, string, string)) *Runner {
 	return &Runner{Cfg: cfg, Store: st, ADB: a, Deps: d, Notify: notify, Now: time.Now, wake: make(chan Options, 1),
 		lists: map[string]*patches.List{}, listCache: map[string]*patches.List{}}
+}
+
+// appFor looks up an app in a bundle's list with its target version chosen for this setup: the
+// version most of the patches in use support, where the app's enable/disable overrides count.
+func (r *Runner) appFor(l *patches.List, pkg string) (patches.App, bool) {
+	a, ok := l.App(pkg)
+	if !ok {
+		return a, false
+	}
+	ov := r.Store.Override(pkg)
+	a.Target, a.Experimental = a.Pick(ov.Enable, ov.Disable)
+	return a, true
 }
 
 // Status returns a copy of the current status.
@@ -586,8 +599,8 @@ func (r *Runner) app(ctx context.Context, o Options, ld *loaded, pkg string, cs 
 	var out []Result
 	name := pkg
 	newest := ""
-	if a, ok := ld.list.App(pkg); ok {
-		name, newest = a.Name, a.Newest
+	if a, ok := r.appFor(ld.list, pkg); ok {
+		name, newest = a.Name, a.Target
 	}
 	res := func(c *conn, ok bool, msg string) Result {
 		return Result{Device: c.dev.Name, Package: pkg, Name: name, OK: ok, Message: msg}
@@ -654,6 +667,22 @@ func (r *Runner) appGroup(ctx context.Context, o Options, ld *loaded, pkg, name,
 	res := func(c *conn, ok bool, msg string) Result {
 		return Result{Device: c.dev.Name, Package: pkg, Name: name, OK: ok, Message: msg}
 	}
+	// A scheduled run leaves a TV alone while something is playing on it, before any download or
+	// patching; the next run tries again. Run now, Force and dry runs go ahead regardless.
+	if !o.Manual && !o.Force && !o.DryRun && !o.NoDevice {
+		var idle []*conn
+		for _, c := range gc {
+			if r.playing(ctx, c) {
+				out = append(out, res(c, true, fmt.Sprintf("%s on %s: update to %s is waiting, something is playing; the next scheduled run will try again", name, c.dev.Name, newest)))
+				continue
+			}
+			idle = append(idle, c)
+		}
+		if len(idle) == 0 {
+			return out
+		}
+		gc = idle
+	}
 	abis := gc[0].abis
 	sdk := 0
 	for _, c := range gc {
@@ -692,6 +721,14 @@ func (r *Runner) appGroup(ctx context.Context, o Options, ld *loaded, pkg, name,
 		return out
 	}
 	_ = r.Store.SetBuilds(pkg, newest, fetched.Available)
+	if filepath.Dir(fetched.Path) == filepath.Clean(r.Cfg.Cache()) {
+		_ = r.Store.UpdateApp(pkg, func(a *store.AppState) {
+			if a.CacheFiles == nil {
+				a.CacheFiles = map[string]string{}
+			}
+			a.CacheFiles[fetched.Path] = newest
+		})
+	}
 	if r.noteRecovered(pkg) {
 		*recovered = true
 	}
@@ -701,7 +738,7 @@ func (r *Runner) appGroup(ctx context.Context, o Options, ld *loaded, pkg, name,
 	_, _ = h.Write([]byte(key + "|" + src.ID))
 	out2 := filepath.Join(r.Cfg.Output(), fmt.Sprintf("%s-%s-%s-%s.apk", pkg, safe(newest), rel.Tag, strconv.FormatUint(uint64(h.Sum32()), 16)))
 	patchErr := r.Deps.Patch(ctx, morphe.Options{Jar: r.Cfg.MorpheJar, MPP: mpp, Input: fetched.Path, Out: out2,
-		Keystore: r.Cfg.Keystore(), BytecodeMode: r.Cfg.BytecodeMode, StripLibs: abis,
+		Keystore: r.Cfg.Keystore(), BytecodeMode: r.Cfg.BytecodeMode,
 		OptionsFile: ov.OptionsFile, Enable: ov.Enable, Disable: ov.Disable})
 	p := &patched{path: out2, err: patchErr, installedPkg: pkg}
 	if patchErr == nil {
@@ -745,6 +782,7 @@ func (r *Runner) appGroup(ctx context.Context, o Options, ld *loaded, pkg, name,
 		}
 		_ = r.Store.SetInstall(c.dev.ID, pkg, store.Install{APKVersion: newest, PatchesVersion: rel.Tag, PatchSource: src.ID,
 			InstalledPackage: p.installedPkg, Source: fetched.Detail, InstalledAt: r.Now().Format(time.RFC3339)})
+		r.dropOld(pkg, newest)
 		if prev == "" {
 			prev = "none"
 		}
@@ -758,6 +796,21 @@ func (r *Runner) appGroup(ctx context.Context, o Options, ld *loaded, pkg, name,
 		out = append(out, x)
 	}
 	return out
+}
+
+// playing connects to the TV and says whether something is playing on it. A TV that cannot be
+// reached, or a check that fails, counts as idle so the normal flow reports the problem and an
+// unreliable check can never hold updates back for good.
+func (r *Runner) playing(ctx context.Context, c *conn) bool {
+	if err := r.ensureConn(ctx, c); err != nil {
+		return false
+	}
+	busy, err := r.ADB.Playing(ctx, c.serial)
+	if err != nil {
+		slog.Warn("could not tell whether the TV is playing", "device", c.dev.Name, "err", err)
+		return false
+	}
+	return busy
 }
 
 // noteNoBuild records that a version has no build for a CPU list and reports whether this is
@@ -829,6 +882,36 @@ func (r *Runner) noteRecovered(key string) bool {
 		_ = r.Store.UpdateApp(key, func(a *store.AppState) { a.FetchFailures, a.LastFetchError, a.LastFetchAlert = 0, "", 0 })
 	}
 	return was
+}
+
+// dropOld runs after an app was installed at version: the downloaded bundles and patched files for
+// any other version are no longer needed, so they are deleted. Files you dropped into the input
+// folder are never touched.
+func (r *Runner) dropOld(pkg, version string) {
+	cache := filepath.Clean(r.Cfg.Cache())
+	_ = r.Store.UpdateApp(pkg, func(a *store.AppState) {
+		for p, v := range a.CacheFiles {
+			if v == version {
+				if _, err := os.Stat(p); err != nil {
+					delete(a.CacheFiles, p) // already gone
+				}
+				continue
+			}
+			if filepath.Dir(p) == cache {
+				_ = os.Remove(p)
+			}
+			delete(a.CacheFiles, p)
+		}
+	})
+	keep := pkg + "-" + safe(version) + "-"
+	for _, pat := range []string{pkg + "-*.apk", pkg + "-*.result.json"} {
+		old, _ := filepath.Glob(filepath.Join(r.Cfg.Output(), pat))
+		for _, f := range old {
+			if !strings.HasPrefix(filepath.Base(f), keep) {
+				_ = os.Remove(f)
+			}
+		}
+	}
 }
 
 // prune keeps the newest few patched files and bundles.
