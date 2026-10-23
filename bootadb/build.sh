@@ -8,8 +8,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 : "${ANDROID_HOME:?set ANDROID_HOME to the Android SDK}"
 
-BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-PLATFORM=$(ls -d "$ANDROID_HOME"/platforms/android-[0-9]* | sort -V | tail -1)
+BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | grep -E '^[0-9.]+$' | sort -V | tail -1)"
+PLATFORM="$ANDROID_HOME/platforms/$(ls "$ANDROID_HOME/platforms" | grep -E '^android-[0-9]+(\.[0-9]+)?$' | sort -V | tail -1)" # newest stable platform (no beta)
 API=${PLATFORM##*android-}
 API=${API%%[!0-9]*}
 VERSION_CODE=${VERSION_CODE:-$(date -u +%Y%m%d)}

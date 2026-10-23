@@ -124,6 +124,16 @@ or pinned with `signer_sha256`; `apksigner` checks it cryptographically.
 
 Each TV card has a **Test** button that connects the way a run does and shows the port and CPU, or tells you to turn Wireless debugging back on. The app list on each card can be collapsed (the line above it still says how many apps the TV gets).
 
+**Boot helper.** Android turns Wireless debugging off when a TV restarts. `bootadb/` is a tiny app
+(no libraries, no network access) that switches it back on at every boot and every 15 minutes. On each
+run tv-patcher installs it on every TV it reaches (and replaces it when the image carries a newer
+one), grants it the one permission it needs over ADB, and opens it once so Android lets it receive
+the boot broadcast. The **Test** button does the same and says whether it is installed; a card shows
+"boot helper ✓". It is built in CI (`bootadb/build.sh`, Android SDK tools only), signed with a
+throw-away key, and shipped inside the image at `/opt/bootadb/bootadb.apk` (`BOOT_HELPER_APK`). If a
+TV refuses it you get a message on the card and, on the second run in a row, a Telegram alert; apps
+are updated regardless.
+
 A TV that cannot be reached for two runs in a row sends a Telegram message saying to turn Wireless debugging back on (a reboot switches it off; the pairing is kept).
 
 Temporary download failures alert on Telegram only after 3 cycles in a row (then at most daily); a
