@@ -55,6 +55,8 @@ RUN groupadd --gid 65532 nonroot && useradd --uid 65532 --gid 65532 --no-create-
 
 COPY --from=tools --chown=65532:65532 /morphe.jar /opt/morphe/morphe.jar
 COPY --from=builder /build/tv-patcher /usr/local/bin/tv-patcher
+# the boot helper app tv-patcher puts on each TV (built by CI: bootadb/build.sh)
+COPY bootadb/out/bootadb.apk /opt/bootadb/bootadb.apk
 
 ARG BUILD_VERSION=dev
 ARG BUILD_COMMIT=unknown

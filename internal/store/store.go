@@ -170,6 +170,7 @@ type DeviceInfo struct {
 	SDK      int      `json:"sdk"`
 	SeenAt   string   `json:"seen_at"`
 	PairedAt string   `json:"paired_at,omitempty"` // set when pairing from the page succeeded
+	Helper   string   `json:"helper,omitempty"`    // version of the boot helper app on the device
 }
 
 type stateFile struct {
@@ -764,7 +765,7 @@ func (s *Store) DeviceInfo(dev string) (DeviceInfo, bool) {
 	if d == nil {
 		return DeviceInfo{}, false
 	}
-	return DeviceInfo{ABIs: append([]string{}, d.ABIs...), SDK: d.SDK, SeenAt: d.SeenAt, PairedAt: d.PairedAt}, true
+	return DeviceInfo{ABIs: append([]string{}, d.ABIs...), SDK: d.SDK, SeenAt: d.SeenAt, PairedAt: d.PairedAt, Helper: d.Helper}, true
 }
 
 // SetDeviceInfo records a device's CPU list and Android level (keeping when it was paired).

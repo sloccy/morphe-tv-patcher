@@ -29,6 +29,9 @@ type fakeADB struct {
 	uninstalled []string
 	pairErr     error
 	paired      []string
+	shells      []string // commands run through Shell
+	grantErr    string   // output of "pm grant" when it fails
+	helperVer   string   // version a successful helper install leaves on the device
 }
 
 func newADB() *fakeADB {
@@ -65,6 +68,9 @@ func (f *fakeADB) Install(ctx context.Context, s, apk string) (ok bool, output s
 		}
 	}
 	f.installs = append(f.installs, s+" "+base)
+	if base == "bootadb.apk" {
+		f.installed[s+"/com.sloccy.bootadb"] = f.helperVer
+	}
 	for pkg := range f.installMsg {
 		_ = pkg
 	}
@@ -72,7 +78,21 @@ func (f *fakeADB) Install(ctx context.Context, s, apk string) (ok bool, output s
 }
 func (f *fakeADB) Uninstall(ctx context.Context, s, pkg string) error {
 	f.uninstalled = append(f.uninstalled, s+" "+pkg)
+	delete(f.installed, s+"/"+pkg)
 	return nil
+}
+func (f *fakeADB) Shell(ctx context.Context, serial, cmd string) (string, error) {
+	f.shells = append(f.shells, cmd)
+	switch {
+	case strings.HasPrefix(cmd, "pm grant"):
+		if f.grantErr != "" {
+			return f.grantErr, nil
+		}
+		return "", nil
+	case strings.HasPrefix(cmd, "settings get global adb_wifi_enabled"):
+		return "1\n", nil
+	}
+	return "", nil
 }
 func (f *fakeADB) Pair(ctx context.Context, host string, port int, code string) error {
 	f.paired = append(f.paired, fmt.Sprintf("%s:%d %s", host, port, code))

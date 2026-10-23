@@ -282,6 +282,7 @@ function deviceCard(dev) {
     ? h("span", { class: "chip", title: "What the device reports; builds are chosen to match" },
         (dev.is64 ? "64-bit capable" : "32-bit") + " · " + dev.info.abis.join(", ") + " · Android API " + dev.info.sdk)
     : null;
+  const helperChip = dev.info && dev.info.helper ? h("span", { class: "chip", title: "A small app on the TV that switches Wireless debugging back on after a restart" }, "boot helper ✓") : null;
   const pairChip = paired ? h("span", { class: "chip" }, "paired") : (cpu ? null : h("span", { class: "chip warn" }, "not paired yet"));
 
   return h("section", { class: "card" },
@@ -289,7 +290,7 @@ function deviceCard(dev) {
       h("span", { class: "grow" },
         h("strong", {}, h("span", { class: "dot " + (last.length ? (offline ? "bad" : "ok") : "") }), dev.name),
         h("span", { class: "sub" }, "  " + dev.host),
-        pairChip, cpu),
+        pairChip, cpu, helperChip),
       h("button", { onclick: () => { openPair[dev.id] = !openPair[dev.id]; render(); } }, "Pair…"),
       h("button", { disabled: busy.has("test-" + dev.id), title: "Check that the TV can be reached over wireless debugging right now", onclick: () => doTest(dev) }, busy.has("test-" + dev.id) ? "Testing…" : "Test"),
       h("button", { disabled: busy.has("run-" + dev.id), onclick: () => doRun(dev.id) }, "Run now"),

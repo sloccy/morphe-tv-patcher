@@ -22,6 +22,10 @@ type Manifest struct {
 	Leanback bool
 	// Features lists <uses-feature android:name=...>.
 	Features []string
+	// Permissions lists <uses-permission android:name=...>.
+	Permissions []string
+	// Components lists the names of <receiver>, <service> and <activity> elements.
+	Components []string
 }
 
 const (
@@ -119,6 +123,14 @@ func collect(m *Manifest, name string, stack []string, attrs []attr) {
 	case "uses-feature":
 		if a, ok := get("name"); ok && a.isString {
 			m.Features = append(m.Features, a.value)
+		}
+	case "uses-permission":
+		if a, ok := get("name"); ok && a.isString {
+			m.Permissions = append(m.Permissions, a.value)
+		}
+	case "receiver", "service", "activity":
+		if a, ok := get("name"); ok && a.isString {
+			m.Components = append(m.Components, a.value)
 		}
 	case "category":
 		if a, ok := get("name"); ok && a.value == leanbackCategory && inIntentFilter(stack) {

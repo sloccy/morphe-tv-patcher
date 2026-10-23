@@ -20,6 +20,7 @@ import (
 	"github.com/sloccy/morphe-tv-patcher/internal/abi"
 	"github.com/sloccy/morphe-tv-patcher/internal/adb"
 	"github.com/sloccy/morphe-tv-patcher/internal/config"
+	"github.com/sloccy/morphe-tv-patcher/internal/helper"
 	"github.com/sloccy/morphe-tv-patcher/internal/morphe"
 	"github.com/sloccy/morphe-tv-patcher/internal/patches"
 	"github.com/sloccy/morphe-tv-patcher/internal/sources"
@@ -36,6 +37,7 @@ type ADB interface {
 	InstalledVersion(ctx context.Context, serial, pkg string) (string, error)
 	Install(ctx context.Context, serial, apk string) (bool, string)
 	Uninstall(ctx context.Context, serial, pkg string) error
+	Shell(ctx context.Context, serial, cmd string) (string, error)
 	Pair(ctx context.Context, host string, pairPort int, code string) error
 }
 
@@ -239,11 +241,33 @@ func (r *Runner) CheckRepo(ctx context.Context, repo string, prerelease bool) er
 	return nil
 }
 
+// helperStep keeps the boot helper current on a reachable device and reports it as a result line
+// only when it changed something or failed. It never stops the app updates.
+func (r *Runner) helperStep(ctx context.Context, c *conn) []Result {
+	res, err := r.ensureHelper(ctx, c)
+	key := "helper:" + c.dev.ID
+	line := Result{Device: c.dev.Name, Package: helper.Package, Name: "Boot helper"}
+	switch {
+	case err != nil:
+		line.Message = "boot helper: " + err.Error()
+		line.Alert = r.noteFailureAfter(key, err, false, min(2, r.Cfg.FailuresBeforeAlert))
+		return []Result{line}
+	case res.Installed:
+		r.noteRecovered(key)
+		line.OK, line.Changed = true, true
+		line.Message = fmt.Sprintf("installed the boot helper (version %s); it switches Wireless debugging back on after the TV restarts", res.Version)
+		return []Result{line}
+	}
+	r.noteRecovered(key)
+	return nil
+}
+
 // DeviceCheck is what a successful connection test found.
 type DeviceCheck struct {
-	Port int
-	ABIs []string
-	SDK  int
+	Port   int
+	ABIs   []string
+	SDK    int
+	Helper string // "installed (version N)", "not part of this build", or why it failed
 }
 
 // TestDevice connects to a device the way a run would (known port, mDNS, port scan) and reads
@@ -257,7 +281,18 @@ func (r *Runner) TestDevice(ctx context.Context, d store.Device) (DeviceCheck, e
 		return DeviceCheck{}, fmt.Errorf("could not reach %s at %s. The TV may be off or asleep, or Wireless debugging is switched off (a reboot does that): turn it on in Developer options. The pairing is kept", d.Name, d.Host)
 	}
 	r.noteRecovered("device:" + d.ID)
-	return DeviceCheck{Port: r.Store.Port(d.ID), ABIs: c.abis, SDK: c.sdk}, nil
+	chk := DeviceCheck{Port: r.Store.Port(d.ID), ABIs: c.abis, SDK: c.sdk}
+	switch res, err := r.ensureHelper(ctx, &c); {
+	case err != nil:
+		chk.Helper = "problem: " + err.Error()
+	case res.Skipped:
+		chk.Helper = "not part of this build"
+	case res.Installed:
+		chk.Helper = "installed just now (version " + res.Version + ")"
+	default:
+		chk.Helper = "installed (version " + res.Version + ")"
+	}
+	return chk, nil
 }
 
 // PairDevice registers this machine with a device's wireless debugging (one time), notes when
@@ -394,6 +429,7 @@ func (r *Runner) pass(ctx context.Context, o Options) []Result {
 				continue
 			}
 			r.noteRecovered("device:" + d.ID)
+			out = append(out, r.helperStep(ctx, &c)...)
 			c.apps = apps
 			conns = append(conns, c)
 		}

@@ -6,3 +6,4 @@
 *.keystore
 .env
 .DS_Store
+bootadb/out/

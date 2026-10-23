@@ -151,6 +151,11 @@ func (c *Client) shell(ctx context.Context, serial, cmd string) (string, error) 
 	return out, nil
 }
 
+// Shell runs a command on the device and returns its output.
+func (c *Client) Shell(ctx context.Context, serial, cmd string) (string, error) {
+	return c.shell(ctx, serial, cmd)
+}
+
 // ABIs returns ro.product.cpu.abilist.
 func (c *Client) ABIs(ctx context.Context, serial string) ([]string, error) {
 	out, err := c.shell(ctx, serial, "getprop ro.product.cpu.abilist")

@@ -696,6 +696,9 @@ func (s *Server) testDevice(w http.ResponseWriter, r *http.Request) {
 	if c.SDK > 0 {
 		msg += fmt.Sprintf(" · Android API %d", c.SDK)
 	}
+	if c.Helper != "" {
+		msg += " · boot helper " + c.Helper
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": msg})
 }
 

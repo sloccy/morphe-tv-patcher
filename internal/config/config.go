@@ -24,6 +24,9 @@ type Config struct {
 	FlareSolverrURL     string
 	DirectOK            bool // false with APKMIRROR_DIRECT_DISABLED=true (tests the other routes)
 	FailuresBeforeAlert int
+	// BootHelperAPK is the tiny app that switches Wireless debugging back on after a TV reboot;
+	// the image carries it. Empty or missing means the step is skipped.
+	BootHelperAPK string
 	// MirrorGap is the minimum time between APKMirror requests; MirrorCooldown is the first pause
 	// after it pushes back (doubling while it keeps doing so).
 	MirrorGap      time.Duration
@@ -83,6 +86,7 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		BytecodeMode:              def("BYTECODE_MODE", "STRIP_SAFE"),
 		FlareSolverrURL:           strings.TrimRight(def("FLARESOLVERR_URL", ""), "/"),
 		DirectOK:                  !flag("APKMIRROR_DIRECT_DISABLED"),
+		BootHelperAPK:             def("BOOT_HELPER_APK", "/opt/bootadb/bootadb.apk"),
 		WebBind:                   def("WEB_BIND", "0.0.0.0"),
 		AllowedHostSuffixes:       splitList(def("ALLOWED_HOST_SUFFIXES", "")),
 		PatchSourcesAllowedOwners: splitList(def("PATCH_SOURCES_ALLOWED_OWNERS", "")),

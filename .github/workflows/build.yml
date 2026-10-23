@@ -59,10 +59,41 @@ jobs:
           echo "morphe_sha256=$(gh api repos/MorpheApp/morphe-cli/releases/latest --jq '.assets[] | select(.name | test("desktop-.*-all[.]jar$")) | .digest')" >> "$GITHUB_OUTPUT"
           echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
 
+  # The boot helper: a tiny Android app that switches Wireless debugging back on after a TV
+  # restart. Built with the SDK tools on the runner, then baked into the image.
+  bootadb:
+    name: Build boot helper
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - name: Build and sign the APK
+        run: bootadb/build.sh
+
+      - name: Check the APK is the helper (package, permissions, receiver, version)
+        run: BOOTADB_APK="$PWD/bootadb/out/bootadb.apk" go test -count=1 -run TestTheBuiltAPKIsTheHelper -v ./internal/helper
+
+      - name: Keep the APK for the image build
+        uses: actions/upload-artifact@v7
+        with:
+          name: bootadb-apk
+          path: bootadb/out/bootadb.apk
+          if-no-files-found: error
+          retention-days: 3
+
   # On PRs: compile check only. On pushes: build natively per architecture, push by digest.
   build:
     name: Build ${{ matrix.arch }}
-    needs: [lint, tools]
+    needs: [lint, tools, bootadb]
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -89,6 +120,13 @@ jobs:
       - name: Compile check
         if: github.event_name == 'pull_request'
         run: go build ./...
+
+      - name: Get the boot helper APK
+        if: github.event_name != 'pull_request'
+        uses: actions/download-artifact@v8
+        with:
+          name: bootadb-apk
+          path: bootadb/out
 
       - name: Extract metadata
         if: github.event_name != 'pull_request'
@@ -230,6 +268,7 @@ jobs:
           docker run --rm "$IMG" version
           docker run --rm --entrypoint java "$IMG" -jar /opt/morphe/morphe.jar --version
           docker run --rm --entrypoint apksigner "$IMG" --version
+          docker run --rm --entrypoint ls "$IMG" -l /opt/bootadb/bootadb.apk
           docker run --rm --entrypoint adb "$IMG" version
           # the real Morphe call the patcher makes, against the official patches (no single maintainer to rely on)
           docker run --rm --entrypoint java "$IMG" -jar /opt/morphe/morphe.jar \
