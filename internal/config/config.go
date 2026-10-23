@@ -27,6 +27,15 @@ type Config struct {
 	// BootHelperAPK is the tiny app that switches Wireless debugging back on after a TV reboot;
 	// the image carries it. Empty or missing means the step is skipped.
 	BootHelperAPK string
+	// VerifyEvery is how often a scheduled run connects to a TV only to check what is really
+	// installed; in between it plans from its own records and connects when something needs
+	// installing. Run now and Force always connect.
+	VerifyEvery time.Duration
+	// BackgroundProcessLimit is the TV's "Background process limit" developer setting (0 = leave it
+	// alone). It is set over ADB whenever tv-patcher connects. PersistTVFlags also turns off
+	// Google's flag sync on the TV so the value survives a restart (off by default).
+	BackgroundProcessLimit int
+	PersistTVFlags         bool
 	// MirrorGap is the minimum time between APKMirror requests; MirrorCooldown is the first pause
 	// after it pushes back (doubling while it keeps doing so).
 	MirrorGap      time.Duration
@@ -104,6 +113,13 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	if c.MirrorCooldown, err = time.ParseDuration(def("APKMIRROR_COOLDOWN", "5m")); err != nil || c.MirrorCooldown < time.Second {
 		return c, fmt.Errorf("APKMIRROR_COOLDOWN must be a duration of at least 1s (e.g. 5m): %q", getenv("APKMIRROR_COOLDOWN"))
 	}
+	if c.VerifyEvery, err = time.ParseDuration(def("VERIFY_EVERY", "168h")); err != nil || c.VerifyEvery < time.Hour {
+		return c, fmt.Errorf("VERIFY_EVERY must be a duration of at least 1h (e.g. 168h): %q", getenv("VERIFY_EVERY"))
+	}
+	if c.BackgroundProcessLimit, err = strconv.Atoi(def("BACKGROUND_PROCESS_LIMIT", "0")); err != nil || c.BackgroundProcessLimit < 0 || c.BackgroundProcessLimit > 100 {
+		return c, fmt.Errorf("BACKGROUND_PROCESS_LIMIT must be 0 (off) to 100: %q", getenv("BACKGROUND_PROCESS_LIMIT"))
+	}
+	c.PersistTVFlags = flag("TV_PERSIST_FLAGS")
 	if c.WebPort, err = strconv.Atoi(def("WEB_PORT", "8093")); err != nil || c.WebPort < 1 || c.WebPort > 65535 {
 		return c, fmt.Errorf("WEB_PORT must be a port number: %q", getenv("WEB_PORT"))
 	}

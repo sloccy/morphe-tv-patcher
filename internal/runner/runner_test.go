@@ -29,16 +29,22 @@ type fakeADB struct {
 	uninstalled []string
 	pairErr     error
 	paired      []string
-	shells      []string // commands run through Shell
-	grantErr    string   // output of "pm grant" when it fails
-	helperVer   string   // version a successful helper install leaves on the device
+	shells      []string          // commands run through Shell
+	grantErr    string            // output of "pm grant" when it fails
+	helperVer   string            // version a successful helper install leaves on the device
+	connects    int               // adb connect calls (each one makes the real TV show a notice)
+	flags       map[string]string // device_config "namespace key" -> value
 }
 
 func newADB() *fakeADB {
 	return &fakeADB{down: map[string]bool{}, abis: map[string][]string{}, installed: map[string]string{}, installMsg: map[string]string{}}
 }
 
+func (f *fakeADB) Reachable(ctx context.Context, host string, known ...int) (int, bool) {
+	return 40000, !f.down[host]
+}
 func (f *fakeADB) Connect(ctx context.Context, host string, known ...int) (int, error) {
+	f.connects++
 	if f.down[host] {
 		return 0, errors.New("device unreachable")
 	}
@@ -88,6 +94,18 @@ func (f *fakeADB) Shell(ctx context.Context, serial, cmd string) (string, error)
 		if f.grantErr != "" {
 			return f.grantErr, nil
 		}
+		return "", nil
+	case strings.HasPrefix(cmd, "device_config get "):
+		if v, ok := f.flags[strings.TrimPrefix(cmd, "device_config get ")]; ok {
+			return v + "\n", nil
+		}
+		return "null\n", nil
+	case strings.HasPrefix(cmd, "device_config put "):
+		parts := strings.Fields(strings.TrimPrefix(cmd, "device_config put "))
+		if f.flags == nil {
+			f.flags = map[string]string{}
+		}
+		f.flags[parts[0]+" "+parts[1]] = parts[2]
 		return "", nil
 	case strings.HasPrefix(cmd, "settings get global adb_wifi_enabled"):
 		return "1\n", nil
@@ -271,8 +289,12 @@ func TestUpToDateSkipsAndForceReinstalls(t *testing.T) {
 	rg.adb.installed[d.Host+":40000/"+prime] = ""
 	rg.adb.installs = nil
 	rg.r.Run(context.Background(), Options{})
+	if len(rg.adb.installs) != 0 {
+		t.Error("a scheduled run goes by its records and does not connect just to look")
+	}
+	rg.r.Run(context.Background(), Options{Manual: true})
 	if len(rg.adb.installs) != 1 {
-		t.Error("an app that is no longer on the device must be reinstalled")
+		t.Error("Run now checks the TV, and an app that is no longer on it must be reinstalled")
 	}
 	// a newer patches release triggers a reinstall
 	rg.adb.installed[d.Host+":40000/"+prime] = "x"

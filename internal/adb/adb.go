@@ -112,6 +112,29 @@ func (c *Client) Connect(ctx context.Context, host string, known ...int) (int, e
 	return 0, ErrUnreachable
 }
 
+// Reachable looks for the wireless debugging port without opening an ADB session, so the TV
+// shows no "debugging connected" notice: a plain TCP connection to the remembered ports, then
+// the mDNS listing. It cannot tell whether this machine is still paired.
+func (c *Client) Reachable(ctx context.Context, host string, known ...int) (port int, ok bool) {
+	dialFn := c.Dial
+	if dialFn == nil {
+		dialFn = dial
+	}
+	for _, p := range known {
+		if p > 0 && dialFn(host, p) {
+			return p, true
+		}
+	}
+	if out, err := c.Run(ctx, "mdns", "services"); err == nil {
+		for _, m := range mdnsLine.FindAllStringSubmatch(out, -1) {
+			if p, _ := strconv.Atoi(m[2]); m[1] == host && dialFn(host, p) {
+				return p, true
+			}
+		}
+	}
+	return 0, false
+}
+
 func (c *Client) scan(host string) []int {
 	dialFn := c.Dial
 	if dialFn == nil {

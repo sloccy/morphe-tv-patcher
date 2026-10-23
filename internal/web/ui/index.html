@@ -292,7 +292,8 @@ function deviceCard(dev) {
         h("span", { class: "sub" }, "  " + dev.host),
         pairChip, cpu, helperChip),
       h("button", { onclick: () => { openPair[dev.id] = !openPair[dev.id]; render(); } }, "Pair…"),
-      h("button", { disabled: busy.has("test-" + dev.id), title: "Check that the TV can be reached over wireless debugging right now", onclick: () => doTest(dev) }, busy.has("test-" + dev.id) ? "Testing…" : "Test"),
+      h("button", { disabled: busy.has("test-" + dev.id), title: "Looks at the network only: nothing connects to the TV, so it shows no notice", onclick: () => doTest(dev, false) }, busy.has("test-" + dev.id) ? "Testing…" : "Test"),
+      h("button", { disabled: busy.has("test-" + dev.id), title: "Really connects: checks the pairing, reads the CPU and updates the boot helper. The TV shows its 'debugging connected' notice.", onclick: () => doTest(dev, true) }, "Full test"),
       h("button", { disabled: busy.has("run-" + dev.id), onclick: () => doRun(dev.id) }, "Run now"),
       h("button", { class: "danger", disabled: busy.has("rm-" + dev.id), onclick: () => doRemove(dev) }, "Remove")),
     pairForm,
@@ -490,10 +491,10 @@ async function doRun(device) {
   await reload(true);
 }
 
-async function doTest(dev) {
-  notes[dev.id] = { ok: true, text: "Testing the connection… (up to a minute if the TV is off)" }; safeRender();
+async function doTest(dev, full) {
+  notes[dev.id] = { ok: true, text: full ? "Connecting… (up to a minute if the TV is off)" : "Looking for the TV… (up to a minute if it is off)" }; safeRender();
   try {
-    const r = await api("POST", "/api/devices/" + encodeURIComponent(dev.id) + "/test");
+    const r = await api("POST", "/api/devices/" + encodeURIComponent(dev.id) + "/test" + (full ? "?full=1" : ""));
     notes[dev.id] = { ok: true, text: r.message };
   } catch (e) { notes[dev.id] = noteFrom(e); }
 }

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Keeps Wireless debugging switched on: sets the adb_wifi_enabled setting at every boot (and
-     every 15 minutes, in case the TV switched it off after a Wi-Fi change). No network access, no data. -->
+     every hour, in case the TV switched it off after a Wi-Fi change). No network access, no data. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.sloccy.bootadb">
 

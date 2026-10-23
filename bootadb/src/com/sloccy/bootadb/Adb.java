@@ -6,10 +6,12 @@ import android.content.ComponentName;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.provider.Settings;
+import android.util.Log;
 
-/** Turns Wireless debugging on and keeps the periodic re-check scheduled. */
+/** Turns Wireless debugging on (only when it is off) and keeps the hourly re-check scheduled. */
 final class Adb {
     private static final String KEY = "adb_wifi_enabled";
+    private static final String TAG = "BootAdb";
     private static final int JOB_ID = 1;
 
     private Adb() {}
@@ -21,20 +23,22 @@ final class Adb {
             if (Settings.Global.getInt(resolver, KEY, 0) == 1) {
                 return true;
             }
+            Log.i(TAG, "Wireless debugging was off, switching it on");
             return Settings.Global.putInt(resolver, KEY, 1);
         } catch (SecurityException e) {
-            return false; // the WRITE_SECURE_SETTINGS grant is missing
+            Log.w(TAG, "cannot switch Wireless debugging on: WRITE_SECURE_SETTINGS is not granted");
+            return false;
         }
     }
 
-    /** Makes sure the 15-minute re-check job exists (it survives reboots). */
+    /** Makes sure the hourly re-check job exists (it survives reboots). */
     static void schedule(Context context) {
         JobScheduler scheduler = context.getSystemService(JobScheduler.class);
         if (scheduler == null || scheduler.getPendingJob(JOB_ID) != null) {
             return;
         }
         scheduler.schedule(new JobInfo.Builder(JOB_ID, new ComponentName(context, KeepOnJob.class))
-                .setPeriodic(15 * 60 * 1000L)
+                .setPeriodic(60 * 60 * 1000L)
                 .setPersisted(true)
                 .build());
     }

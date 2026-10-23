@@ -41,9 +41,10 @@ type Backend interface {
 	Compat(ctx context.Context, st store.Settings, deviceIDs []string) ([]runner.Problem, []string)
 	CheckRepo(ctx context.Context, repo string, prerelease bool) error
 	RefreshLists(ctx context.Context)
-	TestDevice(ctx context.Context, d store.Device) (runner.DeviceCheck, error)
-	Warnings() []runner.Problem // apps saved devices are known not to be able to run (no network)
-	Learning() runner.Learning  // CPU checks still running in the background
+	TestDevice(ctx context.Context, d store.Device) (runner.DeviceCheck, error) // connects (full test)
+	CheckDevice(ctx context.Context, d store.Device) runner.QuietCheck          // no ADB session
+	Warnings() []runner.Problem                                                 // apps saved devices are known not to be able to run (no network)
+	Learning() runner.Learning                                                  // CPU checks still running in the background
 }
 
 // Server serves the API and the page.
@@ -670,7 +671,8 @@ func (s *Server) pair(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"message": msg})
 }
 
-// testDevice checks that the TV can be reached over wireless debugging right now.
+// testDevice answers the Test button. By default it only looks at the network, so the TV shows
+// no "debugging connected" notice; ?full=1 really connects (and installs the boot helper).
 func (s *Server) testDevice(w http.ResponseWriter, r *http.Request) {
 	var dev store.Device
 	for _, d := range s.Store.Settings().Devices {
@@ -684,6 +686,24 @@ func (s *Server) testDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
+	if r.URL.Query().Get("full") != "1" {
+		q := s.Backend.CheckDevice(ctx, dev)
+		if !q.Reachable {
+			fail(w, http.StatusBadGateway, fmt.Sprintf("No answer from %s at %s. The TV may be off or asleep, or Wireless debugging is switched off (a reboot does that): turn it on in Developer options. The pairing is kept.", dev.Name, dev.Host))
+			return
+		}
+		msg := fmt.Sprintf("%s answers on port %d, so Wireless debugging is on. Nothing connected, so the TV shows no notice", dev.Name, q.Port)
+		if q.Helper != "" {
+			msg += " · boot helper version " + q.Helper
+		}
+		if q.SeenAt != "" {
+			if t, err := time.Parse(time.RFC3339, q.SeenAt); err == nil {
+				msg += " · last full connection " + t.Local().Format("Jan 2 15:04")
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"message": msg + ". Full test also checks the pairing."})
+		return
+	}
 	c, err := s.Backend.TestDevice(ctx, dev)
 	if err != nil {
 		fail(w, http.StatusBadGateway, err.Error())
@@ -698,6 +718,9 @@ func (s *Server) testDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	if c.Helper != "" {
 		msg += " · boot helper " + c.Helper
+	}
+	if c.Tweaks != "" {
+		msg += " · " + c.Tweaks
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": msg})
 }
@@ -720,7 +743,7 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if !s.Backend.Trigger(runner.Options{DeviceID: in.Device, Force: in.Force}) {
+	if !s.Backend.Trigger(runner.Options{DeviceID: in.Device, Force: in.Force, Manual: true}) {
 		fail(w, http.StatusConflict, "a run is already queued")
 		return
 	}

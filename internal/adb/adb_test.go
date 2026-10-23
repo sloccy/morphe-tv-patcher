@@ -134,3 +134,29 @@ func TestPairInstallAndQueries(t *testing.T) {
 		t.Errorf("got %v", err)
 	}
 }
+
+func TestReachableNeverOpensAnADBSession(t *testing.T) {
+	var log []string
+	open := map[int]bool{41234: true}
+	c := &Client{Run: fake(41234, &log), Dial: func(_ string, p int) bool { return open[p] }}
+	// the remembered port answers: no adb command at all
+	if p, ok := c.Reachable(context.Background(), "10.0.0.6", 41234); !ok || p != 41234 || len(log) != 0 {
+		t.Fatalf("%d %v %v", p, ok, log)
+	}
+	// stale port: the mDNS listing finds the new one, and only for this host
+	if p, ok := c.Reachable(context.Background(), "10.0.0.6", 37000); !ok || p != 41234 {
+		t.Fatalf("%d %v", p, ok)
+	}
+	for _, l := range log {
+		if strings.HasPrefix(l, "connect") {
+			t.Errorf("must never run adb connect: %v", log)
+		}
+	}
+	if _, ok := c.Reachable(context.Background(), "10.0.0.9", 37000); ok {
+		t.Error("that host's advertised port is closed")
+	}
+	open[41234] = false
+	if _, ok := c.Reachable(context.Background(), "10.0.0.6", 41234); ok {
+		t.Error("nothing listening")
+	}
+}

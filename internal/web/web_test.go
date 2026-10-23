@@ -37,15 +37,23 @@ type fakeBackend struct {
 	warnings  []runner.Problem
 	learning  runner.Learning
 	testErr   error
+	quiet     runner.QuietCheck // what the quiet check finds
+	quietN    atomic.Int32
+	fullN     atomic.Int32
 	hold      chan struct{} // when set, Compat blocks until it is closed
 	compatN   atomic.Int32
 }
 
 func (f *fakeBackend) TestDevice(ctx context.Context, d store.Device) (runner.DeviceCheck, error) {
+	f.fullN.Add(1)
 	if f.testErr != nil {
 		return runner.DeviceCheck{}, f.testErr
 	}
 	return runner.DeviceCheck{Port: 41234, ABIs: []string{"arm64-v8a"}, SDK: 34}, nil
+}
+func (f *fakeBackend) CheckDevice(ctx context.Context, d store.Device) runner.QuietCheck {
+	f.quietN.Add(1)
+	return f.quiet
 }
 func (f *fakeBackend) Warnings() []runner.Problem { return f.warnings }
 func (f *fakeBackend) Learning() runner.Learning  { return f.learning }
@@ -281,7 +289,7 @@ func TestPairRunAndLog(t *testing.T) {
 	if code, _ := do(t, srv, "POST", "/api/run", ``, nil); code != 202 {
 		t.Errorf("run with no body: %d", code)
 	}
-	if len(fb.triggered) != 2 || fb.triggered[0].DeviceID != "tv" || !fb.triggered[0].Force {
+	if len(fb.triggered) != 2 || fb.triggered[0].DeviceID != "tv" || !fb.triggered[0].Force || !fb.triggered[0].Manual {
 		t.Errorf("%+v", fb.triggered)
 	}
 	fb.queueFull = true
@@ -779,15 +787,27 @@ func TestOverlappingSavesDoNotStartMoreWork(t *testing.T) {
 	}
 }
 
-func TestTestConnectionButton(t *testing.T) {
+func TestTestButtonIsQuietAndFullTestConnects(t *testing.T) {
 	srv, s, fb := setup(t)
 	_, _ = s.Store.AddDevice("TV", "10.0.0.6")
+	fb.quiet = runner.QuietCheck{Reachable: true, Port: 41234, Helper: "1234"}
 	code, b := do(t, srv, "POST", "/api/devices/tv/test", "", nil)
-	if code != 200 || !strings.Contains(b, "port 41234") || !strings.Contains(b, "arm64-v8a") || !strings.Contains(b, "API 34") {
+	if code != 200 || !strings.Contains(b, "port 41234") || !strings.Contains(b, "no notice") || !strings.Contains(b, "version 1234") {
+		t.Fatalf("%d %s", code, b)
+	}
+	if fb.fullN.Load() != 0 || fb.quietN.Load() != 1 {
+		t.Fatalf("the plain test must not connect: full %d quiet %d", fb.fullN.Load(), fb.quietN.Load())
+	}
+	fb.quiet = runner.QuietCheck{}
+	if code, b := do(t, srv, "POST", "/api/devices/tv/test", "", nil); code != 502 || !strings.Contains(b, "No answer") {
+		t.Errorf("%d %s", code, b)
+	}
+	code, b = do(t, srv, "POST", "/api/devices/tv/test?full=1", "", nil)
+	if code != 200 || !strings.Contains(b, "port 41234") || !strings.Contains(b, "arm64-v8a") || !strings.Contains(b, "API 34") || fb.fullN.Load() != 1 {
 		t.Fatalf("%d %s", code, b)
 	}
 	fb.testErr = errors.New("could not reach TV. Wireless debugging is switched off")
-	if code, b := do(t, srv, "POST", "/api/devices/tv/test", "", nil); code != 502 || !strings.Contains(b, "switched off") {
+	if code, b := do(t, srv, "POST", "/api/devices/tv/test?full=1", "", nil); code != 502 || !strings.Contains(b, "switched off") {
 		t.Errorf("%d %s", code, b)
 	}
 	if code, _ := do(t, srv, "POST", "/api/devices/ghost/test", "", nil); code != 404 {

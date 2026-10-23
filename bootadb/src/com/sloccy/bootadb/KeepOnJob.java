@@ -3,7 +3,7 @@ package com.sloccy.bootadb;
 import android.app.job.JobParameters;
 import android.app.job.JobService;
 
-/** Every 15 minutes: switch Wireless debugging back on if the TV turned it off. */
+/** Every hour: switch Wireless debugging back on if the TV turned it off. */
 public final class KeepOnJob extends JobService {
     @Override
     public boolean onStartJob(JobParameters params) {

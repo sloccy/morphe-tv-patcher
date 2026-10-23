@@ -38,6 +38,7 @@ type ADB interface {
 	Install(ctx context.Context, serial, apk string) (bool, string)
 	Uninstall(ctx context.Context, serial, pkg string) error
 	Shell(ctx context.Context, serial, cmd string) (string, error)
+	Reachable(ctx context.Context, host string, known ...int) (int, bool)
 	Pair(ctx context.Context, host string, pairPort int, code string) error
 }
 
@@ -65,6 +66,7 @@ type Options struct {
 	Package  string   // only this app
 	Packages []string // with NoDevice: the apps to patch
 	Force    bool     // reinstall even if up to date
+	Manual   bool     // started from the page (Run now): connect to the TVs and check what is really installed
 	DryRun   bool     // patch but do not install
 	NoDevice bool     // do not touch adb at all (implies DryRun)
 	ABIs     []string // with NoDevice: the CPU list to build for (default 32-bit)
@@ -268,6 +270,7 @@ type DeviceCheck struct {
 	ABIs   []string
 	SDK    int
 	Helper string // "installed (version N)", "not part of this build", or why it failed
+	Tweaks string // what was done about the TV settings, if anything
 }
 
 // TestDevice connects to a device the way a run would (known port, mDNS, port scan) and reads
@@ -291,6 +294,9 @@ func (r *Runner) TestDevice(ctx context.Context, d store.Device) (DeviceCheck, e
 		chk.Helper = "installed just now (version " + res.Version + ")"
 	default:
 		chk.Helper = "installed (version " + res.Version + ")"
+	}
+	for _, l := range r.tweaksStep(ctx, &c) {
+		chk.Tweaks = l.Message
 	}
 	return chk, nil
 }
@@ -377,6 +383,52 @@ type conn struct {
 	serial string
 	abis   []string
 	sdk    int
+	// connected is false while the run is planning from what is on record. The TV is only
+	// connected to (ensureConn) when something needs it, because every ADB session makes the
+	// TV show a notice.
+	connected bool
+	connErr   error    // why connecting failed this run, so it is tried and reported once
+	reported  bool     // the unreachable message has been given for this device
+	extra     []Result // lines from the connection-time steps (boot helper, TV settings)
+}
+
+// verifyDue says whether a scheduled run should connect to this TV just to check what is
+// really installed: when it has not been reached for VerifyEvery, or never.
+func (r *Runner) verifyDue(info store.DeviceInfo, known bool) bool {
+	if !known || len(info.ABIs) == 0 {
+		return true
+	}
+	seen, err := time.Parse(time.RFC3339, info.SeenAt)
+	return err != nil || r.Now().Sub(seen) > r.Cfg.VerifyEvery
+}
+
+// ensureConn connects to the TV once per run, and then runs the steps that belong to a
+// connection: keeping the boot helper current and the TV settings applied.
+func (r *Runner) ensureConn(ctx context.Context, c *conn) error {
+	if c.connected {
+		return nil
+	}
+	if c.connErr != nil {
+		return c.connErr
+	}
+	got, err := r.connect(ctx, c.dev)
+	if err != nil {
+		c.connErr = err
+		return err
+	}
+	c.serial, c.abis, c.sdk, c.connected = got.serial, got.abis, got.sdk, true
+	r.noteRecovered("device:" + c.dev.ID)
+	c.extra = append(c.extra, r.helperStep(ctx, c)...)
+	c.extra = append(c.extra, r.tweaksStep(ctx, c)...)
+	return nil
+}
+
+// unreachable is the result line for a TV that could not be connected to.
+func (r *Runner) unreachable(d store.Device, err error) Result {
+	// a TV that stays unreachable usually has Wireless debugging switched off (a reboot does that),
+	// so say so after two cycles in a row rather than waiting for the usual three
+	alert := r.noteFailureAfter("device:"+d.ID, err, false, min(2, r.Cfg.FailuresBeforeAlert))
+	return Result{Device: d.Name, Alert: alert, Message: fmt.Sprintf("%s (%s) is not reachable: %v. If the TV restarted, turn Wireless debugging back on in Developer options (the pairing is kept; only the switch resets).", d.Name, d.Host, err)}
 }
 
 // appKey is one app from one patch source; devices that picked the same pair share the work.
@@ -384,7 +436,6 @@ type appKey struct{ pkg, src string }
 
 func (r *Runner) pass(ctx context.Context, o Options) []Result {
 	var out []Result
-	fail := func(dev, msg string, alert bool) { out = append(out, Result{Device: dev, Message: msg, Alert: alert}) }
 
 	// connect
 	var conns []conn
@@ -420,16 +471,16 @@ func (r *Runner) pass(ctx context.Context, o Options) []Result {
 			if len(apps) == 0 {
 				continue
 			}
-			c, err := r.connect(ctx, d)
-			if err != nil {
-				// a TV that stays unreachable usually has Wireless debugging switched off (a reboot does that),
-				// so say so after two cycles in a row rather than waiting for the usual three
-				alert := r.noteFailureAfter("device:"+d.ID, err, false, min(2, r.Cfg.FailuresBeforeAlert))
-				fail(d.Name, fmt.Sprintf("%s (%s) is not reachable: %v. If the TV restarted, turn Wireless debugging back on in Developer options (the pairing is kept; only the switch resets).", d.Name, d.Host, err), alert)
-				continue
+			info, known := r.Store.DeviceInfo(d.ID)
+			c := conn{dev: d, abis: info.ABIs, sdk: info.SDK}
+			// Plan from what is on record. Connect now only for a manual run, a forced one, a TV
+			// not yet seen for VerifyEvery (or never); otherwise only when an install needs it.
+			if o.Manual || o.Force || r.verifyDue(info, known) {
+				if err := r.ensureConn(ctx, &c); err != nil {
+					out = append(out, r.unreachable(d, err))
+					continue
+				}
 			}
-			r.noteRecovered("device:" + d.ID)
-			out = append(out, r.helperStep(ctx, &c)...)
 			c.apps = apps
 			conns = append(conns, c)
 		}
@@ -496,6 +547,9 @@ func (r *Runner) pass(ctx context.Context, o Options) []Result {
 		}
 		out = append(out, r.app(ctx, o, ld, k.pkg, byApp[k])...)
 	}
+	for i := range conns {
+		out = append(out, conns[i].extra...)
+	}
 	if len(out) == 0 {
 		out = append(out, Result{OK: true, Message: "nothing to do: no device has any apps selected"})
 	}
@@ -554,6 +608,10 @@ func (r *Runner) app(ctx context.Context, o Options, ld *loaded, pkg string, cs 
 			ip := in.InstalledPackage
 			if ip == "" {
 				ip = pkg
+			}
+			if !c.connected { // not connected this run: the record is what we go by
+				out = append(out, res(c, true, fmt.Sprintf("%s on %s: up to date (%s, patches %s)", name, c.dev.Name, newest, rel.Tag)))
+				continue
 			}
 			if v, _ := r.ADB.InstalledVersion(ctx, c.serial, ip); v != "" {
 				out = append(out, res(c, true, fmt.Sprintf("%s on %s: up to date (%s, patches %s)", name, c.dev.Name, newest, rel.Tag)))
@@ -669,6 +727,15 @@ func (r *Runner) appGroup(ctx context.Context, o Options, ld *loaded, pkg, name,
 		prev := ""
 		if in, ok := r.Store.Install(c.dev.ID, pkg); ok {
 			prev = in.APKVersion
+		}
+		if err := r.ensureConn(ctx, c); err != nil {
+			x := Result{Device: c.dev.Name, Message: fmt.Sprintf("%s on %s: not installed, the TV is not reachable", name, c.dev.Name)}
+			if !c.reported { // the explanation and the alert once per TV, not once per app
+				x, c.reported = r.unreachable(c.dev, err), true
+			}
+			x.Package, x.Name = pkg, name
+			out = append(out, x)
+			continue
 		}
 		if err := r.install(ctx, c, pkg, p, ov); err != nil {
 			x := res(c, false, fmt.Sprintf("%s on %s: %v", name, c.dev.Name, err))

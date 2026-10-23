@@ -122,17 +122,30 @@ supported version cannot be found you are told, with the exact file to drop in.
 `armeabi-v7a`, and the publisher's signing certificate: learned from the first APKMirror download,
 or pinned with `signer_sha256`; `apksigner` checks it cryptographically.
 
-Each TV card has a **Test** button that connects the way a run does and shows the port and CPU, or tells you to turn Wireless debugging back on. The app list on each card can be collapsed (the line above it still says how many apps the TV gets).
+**Connections to the TV.** Android shows a "debugging connected" notice on the TV (and it can pull you
+out of a movie) for every ADB session, so tv-patcher connects as little as it can. A scheduled run
+plans from its own records and connects to a TV only when something has to be installed, when the TV
+has not been checked for `VERIFY_EVERY` (default 7 days, which also notices an app you removed by
+hand), or the first time. **Run now** always connects. Each TV card has two test buttons: **Test**
+only looks at the network (no ADB session, so no notice) and says whether Wireless debugging is
+answering; **Full test** really connects, checks the pairing, reads the CPU and updates the boot helper.
+The app list on each card can be collapsed (the line above it still says how many apps the TV gets).
 
 **Boot helper.** Android turns Wireless debugging off when a TV restarts. `bootadb/` is a tiny app
-(no libraries, no network access) that switches it back on at every boot and every 15 minutes. On each
-run tv-patcher installs it on every TV it reaches (and replaces it when the image carries a newer
-one), grants it the one permission it needs over ADB, and opens it once so Android lets it receive
-the boot broadcast. The **Test** button does the same and says whether it is installed; a card shows
-"boot helper ✓". It is built in CI (`bootadb/build.sh`, Android SDK tools only), signed with a
+(no libraries, no network access) that switches it back on at every boot and, if the TV turned it off
+again, once an hour (it only changes the setting when it finds it off). Whenever tv-patcher connects
+to a TV it installs the helper (and replaces it when the image carries a newer one), grants it the one
+permission it needs over ADB, and opens it once so Android lets it receive the boot broadcast. A card
+shows "boot helper ✓". It is built in CI (`bootadb/build.sh`, Android SDK tools only), signed with a
 throw-away key, and shipped inside the image at `/opt/bootadb/bootadb.apk` (`BOOT_HELPER_APK`). If a
 TV refuses it you get a message on the card and, on the second run in a row, a Telegram alert; apps
 are updated regardless.
+
+**Background process limit.** `BACKGROUND_PROCESS_LIMIT=4` sets the TV's "Background process limit"
+developer setting whenever tv-patcher connects (an app cannot do this; only ADB can). Android resets
+it when the TV restarts, so after a restart it stays unset until the next connection. Setting
+`TV_PERSIST_FLAGS=true` also turns off Google's flag sync on the TV so the value survives restarts;
+that is off by default because it affects the whole TV. `0` (the default) leaves the setting alone.
 
 A TV that cannot be reached for two runs in a row sends a Telegram message saying to turn Wireless debugging back on (a reboot switches it off; the pairing is kept).
 
@@ -150,6 +163,9 @@ wrong signature or a phone build alerts at once; a message follows when it recov
 | `FLARESOLVERR_URL` | | e.g. `http://127.0.0.1:8191` |
 | `APKMIRROR_MIN_INTERVAL` | `4s` | minimum gap between APKMirror requests |
 | `APKMIRROR_COOLDOWN` | `5m` | first pause after APKMirror pushes back (doubles, up to 1h) |
+| `VERIFY_EVERY` | `168h` | how often a scheduled run connects to a TV only to check what is installed |
+| `BACKGROUND_PROCESS_LIMIT` | `0` | TV background process limit to keep (0 = leave alone) |
+| `TV_PERSIST_FLAGS` | `false` | with the limit: also stop Google's flag sync so it survives restarts |
 | `PATCHES_REPO` / `PATCHES_PRERELEASE` | `ajstrick81/morphe-androidtv-patches` / `false` | seeds the patch sources on the first run only |
 | `PATCH_SOURCES_ALLOWED_OWNERS` | | limit repositories added from the page to these GitHub owners |
 | `BYTECODE_MODE` | `STRIP_SAFE` | Morphe `--bytecode-mode` |

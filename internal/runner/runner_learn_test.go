@@ -226,7 +226,7 @@ func TestBootHelperTroubleNeverStopsAppUpdates(t *testing.T) {
 	if lines[0].Alert {
 		t.Error("not on the first failure")
 	}
-	if l2 := helperLines(rg.r.Run(context.Background(), Options{})); len(l2) != 1 || !l2[0].Alert {
+	if l2 := helperLines(rg.r.Run(context.Background(), Options{Manual: true})); len(l2) != 1 || !l2[0].Alert {
 		t.Errorf("second failure alerts: %+v", l2)
 	}
 }
@@ -248,5 +248,123 @@ func TestTestButtonInstallsTheHelperAndSaysSo(t *testing.T) {
 	}
 	if c, _ = rg.r.TestDevice(context.Background(), d); !strings.HasPrefix(c.Helper, "installed (version") {
 		t.Errorf("%+v", c)
+	}
+}
+
+func TestScheduledRunsConnectOnlyWhenNeeded(t *testing.T) {
+	rg := newRig(t)
+	rg.device(t, "Bedroom", "10.0.0.7", prime)
+	rg.r.Cfg.VerifyEvery = 7 * 24 * time.Hour
+	rg.r.Run(context.Background(), Options{}) // first run: never seen, connects and installs
+	if rg.adb.connects == 0 || len(rg.adb.installs) != 1 {
+		t.Fatalf("first run: %d connects, installs %v", rg.adb.connects, rg.adb.installs)
+	}
+	rg.adb.connects = 0
+	res := rg.r.Run(context.Background(), Options{})
+	if rg.adb.connects != 0 || !strings.Contains(res[0].Message, "up to date") {
+		t.Fatalf("nothing to do must not touch the TV: %d connects, %+v", rg.adb.connects, res)
+	}
+	rg.tags[defSrc] = "v9" // a new patches release: one connection, shared by the whole run
+	rg.r.Run(context.Background(), Options{})
+	if rg.adb.connects != 1 {
+		t.Errorf("an update needs exactly one connection, got %d", rg.adb.connects)
+	}
+	rg.adb.connects = 0
+	rg.r.Run(context.Background(), Options{Manual: true})
+	rg.r.Run(context.Background(), Options{Force: true})
+	if rg.adb.connects != 2 {
+		t.Errorf("Run now and Force always connect: %d", rg.adb.connects)
+	}
+	rg.adb.connects = 0
+	now := rg.r.Now()
+	rg.r.Now = func() time.Time { return now.Add(8 * 24 * time.Hour) }
+	rg.r.Run(context.Background(), Options{})
+	if rg.adb.connects != 1 {
+		t.Errorf("a TV not seen for VerifyEvery is checked: %d", rg.adb.connects)
+	}
+}
+
+func TestAnUnreachableTVIsReportedOncePerRunNotOncePerApp(t *testing.T) {
+	rg := newRig(t)
+	d := rg.device(t, "Bedroom", "10.0.0.7", prime, netflix)
+	rg.r.Run(context.Background(), Options{}) // learns the TV, installs both
+	rg.adb.down["10.0.0.7"] = true
+	rg.tags[defSrc] = "v9" // both apps now need installing, but the TV is off
+	res := rg.r.Run(context.Background(), Options{})
+	alerts, msgs := 0, 0
+	for _, x := range res {
+		if strings.Contains(x.Message, "not reachable") || strings.Contains(x.Message, "not installed") {
+			msgs++
+		}
+		if x.Alert {
+			alerts++
+		}
+	}
+	if msgs < 2 || alerts > 1 {
+		t.Errorf("each app says it was not installed, the alert is once: %d messages, %d alerts: %+v", msgs, alerts, res)
+	}
+	if rg.st.App("device:"+d.ID).FetchFailures != 1 {
+		t.Errorf("one failed cycle, not one per app: %d", rg.st.App("device:"+d.ID).FetchFailures)
+	}
+}
+
+func TestBackgroundProcessLimitIsSetWhenConnectedAndOnlyWhenDifferent(t *testing.T) {
+	rg := newRig(t)
+	rg.r.Cfg.BackgroundProcessLimit = 4
+	rg.device(t, "Bedroom", "10.0.0.7", prime)
+	res := rg.r.Run(context.Background(), Options{})
+	var line *Result
+	for i := range res {
+		if res[i].Package == tweakPackage {
+			line = &res[i]
+		}
+	}
+	if line == nil || !line.OK || !strings.Contains(line.Message, "set to 4") || rg.adb.flags["activity_manager max_cached_processes"] != "4" {
+		t.Fatalf("%+v %v", line, rg.adb.flags)
+	}
+	for _, c := range rg.adb.shells {
+		if strings.Contains(c, "set_sync_disabled_for_tests") {
+			t.Error("Google's flag sync is only touched when asked")
+		}
+	}
+	rg.adb.shells = nil
+	for _, x := range rg.r.Run(context.Background(), Options{Manual: true}) {
+		if x.Package == tweakPackage {
+			t.Errorf("already 4: say nothing, %+v", x)
+		}
+	}
+	for _, c := range rg.adb.shells {
+		if strings.HasPrefix(c, "device_config put") {
+			t.Error("must not write when it already reads 4")
+		}
+	}
+	rg.r.Cfg.PersistTVFlags = true
+	rg.r.Run(context.Background(), Options{Manual: true})
+	if !strings.Contains(strings.Join(rg.adb.shells, "|"), "device_config set_sync_disabled_for_tests persistent") {
+		t.Error("opt-in persistence")
+	}
+}
+
+func TestNoProcessLimitConfiguredMeansNoSettingsTouched(t *testing.T) {
+	rg := newRig(t)
+	rg.device(t, "Bedroom", "10.0.0.7", prime)
+	rg.r.Run(context.Background(), Options{})
+	for _, c := range rg.adb.shells {
+		if strings.Contains(c, "device_config") {
+			t.Errorf("unexpected %s", c)
+		}
+	}
+}
+
+func TestQuietCheckNeverConnects(t *testing.T) {
+	rg := newRig(t)
+	d := rg.device(t, "Bedroom", "10.0.0.7", prime)
+	q := rg.r.CheckDevice(context.Background(), d)
+	if !q.Reachable || q.Port != 40000 || rg.adb.connects != 0 {
+		t.Fatalf("%+v connects %d", q, rg.adb.connects)
+	}
+	rg.adb.down["10.0.0.7"] = true
+	if q := rg.r.CheckDevice(context.Background(), d); q.Reachable || rg.adb.connects != 0 {
+		t.Fatalf("%+v", q)
 	}
 }

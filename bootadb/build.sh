@@ -12,7 +12,8 @@ BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | grep -E '^[0-9.
 PLATFORM="$ANDROID_HOME/platforms/$(ls "$ANDROID_HOME/platforms" | grep -E '^android-[0-9]+(\.[0-9]+)?$' | sort -V | tail -1)" # newest stable platform (no beta)
 API=${PLATFORM##*android-}
 API=${API%%[!0-9]*}
-VERSION_CODE=${VERSION_CODE:-$(date -u +%Y%m%d)}
+# minutes since 2026-01-01 UTC: grows with every build, so a rebuild always counts as newer
+VERSION_CODE=${VERSION_CODE:-$(( ($(date -u +%s) - 1767225600) / 60 ))}
 echo "build-tools $(basename "$BT"), platform $(basename "$PLATFORM"), versionCode $VERSION_CODE"
 
 rm -rf out && mkdir -p out/classes out/dex
