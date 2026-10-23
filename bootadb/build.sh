@@ -12,8 +12,11 @@ BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | grep -E '^[0-9.
 PLATFORM="$ANDROID_HOME/platforms/$(ls "$ANDROID_HOME/platforms" | grep -E '^android-[0-9]+(\.[0-9]+)?$' | sort -V | tail -1)" # newest stable platform (no beta)
 API=${PLATFORM##*android-}
 API=${API%%[!0-9]*}
-# minutes since 2026-01-01 UTC: grows with every build, so a rebuild always counts as newer
-VERSION_CODE=${VERSION_CODE:-$(( ($(date -u +%s) - 1767225600) / 60 ))}
+# The version comes from the app's own files, so rebuilding the same code (the weekly image
+# refresh) gives the same version and tv-patcher leaves the TV alone; a real change gives a new one.
+if command -v sha256sum >/dev/null; then HASH=sha256sum; else HASH="shasum -a 256"; fi
+SUM=$( (cat AndroidManifest.xml build.sh; find src -name '*.java' | LC_ALL=C sort | xargs cat) | $HASH | cut -c1-7)
+VERSION_CODE=${VERSION_CODE:-$(( 16#$SUM % 2000000000 + 1 ))}
 echo "build-tools $(basename "$BT"), platform $(basename "$PLATFORM"), versionCode $VERSION_CODE"
 
 rm -rf out && mkdir -p out/classes out/dex
