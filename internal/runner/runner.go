@@ -365,8 +365,10 @@ func (r *Runner) pass(ctx context.Context, o Options) []Result {
 			}
 			c, err := r.connect(ctx, d)
 			if err != nil {
-				alert := r.noteFailure("device:"+d.ID, err, false)
-				fail(d.Name, fmt.Sprintf("%s (%s) is not reachable: %v", d.Name, d.Host, err), alert)
+				// a TV that stays unreachable usually has Wireless debugging switched off (a reboot does that),
+				// so say so after two cycles in a row rather than waiting for the usual three
+				alert := r.noteFailureAfter("device:"+d.ID, err, false, min(2, r.Cfg.FailuresBeforeAlert))
+				fail(d.Name, fmt.Sprintf("%s (%s) is not reachable: %v. If the TV restarted, turn Wireless debugging back on in Developer options (the pairing is kept; only the switch resets).", d.Name, d.Host, err), alert)
 				continue
 			}
 			r.noteRecovered("device:" + d.ID)
@@ -672,6 +674,11 @@ func (r *Runner) install(ctx context.Context, c *conn, pkg string, p *patched, o
 // noteFailure counts a failed cycle for key and reports whether to alert: only after
 // FailuresBeforeAlert in a row (a wrong or tampered file alerts at once), then at most daily.
 func (r *Runner) noteFailure(key string, err error, fatal bool) bool {
+	return r.noteFailureAfter(key, err, fatal, r.Cfg.FailuresBeforeAlert)
+}
+
+// noteFailureAfter is noteFailure with its own number of failed cycles before the alert.
+func (r *Runner) noteFailureAfter(key string, err error, fatal bool, after int) bool {
 	now := r.Now()
 	alert := false
 	_ = r.Store.UpdateApp(key, func(a *store.AppState) {
@@ -682,7 +689,7 @@ func (r *Runner) noteFailure(key string, err error, fatal bool) bool {
 		}
 		a.LastFetchError = msg
 		cooled := now.Unix()-a.LastFetchAlert > int64(day/time.Second)
-		if cooled && (fatal || a.FetchFailures >= r.Cfg.FailuresBeforeAlert) {
+		if cooled && (fatal || a.FetchFailures >= after) {
 			alert = true
 			a.LastFetchAlert = now.Unix()
 		}

@@ -124,6 +124,8 @@ supported version cannot be found you are told, with the exact file to drop in.
 or pinned with `signer_sha256`; `apksigner` checks it cryptographically. APKPure files are refused
 until a signer is on record, because apkeep's docs warn APKPure has modified apps to spread malware.
 
+A TV that cannot be reached for two runs in a row sends a Telegram message saying to turn Wireless debugging back on (a reboot switches it off; the pairing is kept).
+
 Temporary download failures alert on Telegram only after 3 cycles in a row (then at most daily); a
 wrong signature or a phone build alerts at once; a message follows when it recovers.
 

@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -97,5 +98,24 @@ func TestFailedLookupsAreNotRepeatedAtOnce(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("a failure is remembered for a while; probed %d times", calls.Load())
+	}
+}
+
+func TestUnreachableTVAlertsOnTheSecondCycleAndSaysWhatToDo(t *testing.T) {
+	rg := newRig(t)
+	rg.device(t, "Bedroom", "10.0.0.7", prime)
+	rg.adb.down["10.0.0.7"] = true
+	alerts := make([]bool, 0, 3)
+	var msg string
+	for range 3 {
+		res := rg.r.Run(context.Background(), Options{})
+		alerts = append(alerts, res[0].Alert)
+		msg = res[0].Message
+	}
+	if alerts[0] || !alerts[1] || alerts[2] {
+		t.Fatalf("alert on the 2nd failed cycle only (then at most daily): %v", alerts)
+	}
+	if !strings.Contains(msg, "Wireless debugging") {
+		t.Errorf("tell the user what to do: %s", msg)
 	}
 }
