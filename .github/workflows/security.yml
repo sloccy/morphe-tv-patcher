@@ -31,7 +31,7 @@ concurrency:
 
 jobs:
   security:
-    uses: sloccy/shared-ci/.github/workflows/security.yml@v1
+    uses: sloccy/shared-ci/.github/workflows/security.yml@actions-bump
     with:
       dry_run: ${{ inputs.dry_run == true }}
       target_branch: ${{ inputs.target_branch || '' }}
