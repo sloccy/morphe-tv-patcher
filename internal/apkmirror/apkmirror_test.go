@@ -676,3 +676,84 @@ func TestProbeLearnsBuildsWithoutDownloading(t *testing.T) {
 		t.Fatalf("%+v %v files=%d", res, err, files)
 	}
 }
+
+// challengeSite answers 403 until a request carries the cookie value in *valid.
+func challengeSite(valid *atomic.Pointer[string]) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, _ := r.Cookie("cf_clearance")
+		if c == nil || c.Value != *valid.Load() {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = fmt.Fprint(w, "<title>Just a moment...</title>")
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, ".php") {
+			_, _ = fmt.Fprint(w, zipBytes)
+			return
+		}
+		_, _ = fmt.Fprint(w, "<html><title>real</title></html>")
+	}))
+}
+
+// counterSidecar hands out the cookie currently held in *issue and counts solves.
+func counterSidecar(issue *atomic.Pointer[string], solves *atomic.Int32) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		solves.Add(1)
+		v := *issue.Load()
+		_, _ = fmt.Fprintf(w, `{"status":"ok","solution":{"response":"<html><title>solved</title></html>","status":200,"userAgent":"Sidecar/1","cookies":[{"name":"cf_clearance","value":%q}]}}`, v)
+	}))
+}
+
+func TestFlareSolvesOnceForManyPages(t *testing.T) {
+	var valid, issue atomic.Pointer[string]
+	valid.Store(new("c1"))
+	issue.Store(new("c1"))
+	var solves atomic.Int32
+	site := challengeSite(&valid)
+	defer site.Close()
+	sc := counterSidecar(&issue, &solves)
+	defer sc.Close()
+
+	f := NewFlare(sc.URL)
+	for _, p := range []string{"/a", "/b", "/c"} {
+		if _, err := f.Page(context.Background(), site.URL+p, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dest := filepath.Join(t.TempDir(), "f.apkm")
+	if err := f.File(context.Background(), site.URL+"/d.php", site.URL, dest); err != nil {
+		t.Fatal(err)
+	}
+	if n := solves.Load(); n != 1 {
+		t.Errorf("solver called %d times, want 1", n)
+	}
+}
+
+func TestFlareSolvesAgainWhenClearanceExpires(t *testing.T) {
+	var valid, issue atomic.Pointer[string]
+	valid.Store(new("c1"))
+	issue.Store(new("c1"))
+	var solves atomic.Int32
+	site := challengeSite(&valid)
+	defer site.Close()
+	sc := counterSidecar(&issue, &solves)
+	defer sc.Close()
+
+	f := NewFlare(sc.URL)
+	if _, err := f.Page(context.Background(), site.URL+"/a", ""); err != nil {
+		t.Fatal(err)
+	}
+	valid.Store(new("c2"))
+	issue.Store(new("c2"))
+	if _, err := f.Page(context.Background(), site.URL+"/b", ""); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(t.TempDir(), "f.apkm")
+	valid.Store(new("c3"))
+	issue.Store(new("c3"))
+	if err := f.File(context.Background(), site.URL+"/d.php", site.URL, dest); err != nil {
+		t.Fatal(err)
+	}
+	if n := solves.Load(); n != 3 {
+		t.Errorf("solver called %d times, want 3", n)
+	}
+}

@@ -137,6 +137,12 @@ func (d *Direct) Page(ctx context.Context, url, referer string) (*Page, error) {
 	if err != nil {
 		return nil, err
 	}
+	return d.pageFrom(req)
+}
+
+// pageFrom sends a prepared request and parses the page it returns.
+func (d *Direct) pageFrom(req *http.Request) (*Page, error) {
+	url := req.URL.String()
 	resp, err := d.hc.Do(req)
 	if err != nil {
 		return nil, err
@@ -239,8 +245,35 @@ func (f *Flare) absorb(r *flaresolverr.Result) {
 	}
 }
 
-// Page implements Fetcher.
-func (f *Flare) Page(ctx context.Context, url, _ string) (*Page, error) {
+// borrowed builds a request that carries the solver's user agent and cookies, or nil when none
+// have been earned yet. The clearance cookie is tied to that user agent, so both travel together.
+func (f *Flare) borrowed(ctx context.Context, url, referer string) *http.Request {
+	if len(f.cookies) == 0 {
+		return nil
+	}
+	req, err := f.direct.request(ctx, url, referer)
+	if err != nil {
+		return nil
+	}
+	if f.ua != "" {
+		req.Header.Set("User-Agent", f.ua)
+	}
+	for k, v := range f.cookies {
+		req.AddCookie(&http.Cookie{Name: k, Value: v}) //nolint:gosec // a request cookie we send to the site; Secure/HttpOnly apply to Set-Cookie
+	}
+	return req
+}
+
+// Page implements Fetcher: reuse the earned clearance, and ask the browser again only when the
+// site challenges us anyway (no cookies yet, or they expired).
+func (f *Flare) Page(ctx context.Context, url, referer string) (*Page, error) {
+	if req := f.borrowed(ctx, url, referer); req != nil {
+		p, err := f.direct.pageFrom(req)
+		if err == nil || !errors.Is(err, ErrBlocked) {
+			return p, err
+		}
+		clear(f.cookies)
+	}
 	r, err := flaresolverr.Solve(ctx, f.hc, f.URL, url)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrBlocked, err)
@@ -252,20 +285,24 @@ func (f *Flare) Page(ctx context.Context, url, _ string) (*Page, error) {
 	return finishPage(url, r.HTML)
 }
 
-// File implements Fetcher.
+// File implements Fetcher: download with the earned clearance; if the file URL challenges us,
+// let the browser visit it once and try again.
 func (f *Flare) File(ctx context.Context, url, referer, dest string) error {
-	if r, err := flaresolverr.Solve(ctx, f.hc, f.URL, url); err == nil {
+	for attempt := 0; ; attempt++ {
+		if req := f.borrowed(ctx, url, referer); req != nil {
+			err := f.direct.save(req, dest)
+			if err == nil || !errors.Is(err, ErrBlocked) || attempt > 0 {
+				return err
+			}
+			clear(f.cookies)
+		}
+		r, serr := flaresolverr.Solve(ctx, f.hc, f.URL, url)
+		if serr != nil {
+			return fmt.Errorf("%w: %w", ErrBlocked, serr)
+		}
 		f.absorb(r)
+		if len(f.cookies) == 0 {
+			return fmt.Errorf("%w: solver returned no cookies for %s", ErrBlocked, url)
+		}
 	}
-	req, err := f.direct.request(ctx, url, referer)
-	if err != nil {
-		return err
-	}
-	if f.ua != "" {
-		req.Header.Set("User-Agent", f.ua)
-	}
-	for k, v := range f.cookies {
-		req.AddCookie(&http.Cookie{Name: k, Value: v}) //nolint:gosec // a request cookie we send to the site; Secure/HttpOnly apply to Set-Cookie
-	}
-	return f.direct.save(req, dest)
 }
