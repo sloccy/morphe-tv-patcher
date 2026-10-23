@@ -13,7 +13,7 @@ func TestDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Interval != 12*time.Hour || c.WebPort != 8093 || !c.DirectOK || c.FailuresBeforeAlert != 3 ||
+	if c.Interval != 6*time.Hour || c.WebPort != 8093 || !c.DirectOK || c.FailuresBeforeAlert != 3 ||
 		c.BytecodeMode != "STRIP_SAFE" || c.DataDir != "/data" || c.VerifyEvery != 168*time.Hour || c.BackgroundProcessLimit != 0 || c.PersistTVFlags {
 		t.Errorf("%+v", c)
 	}

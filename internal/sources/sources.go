@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sloccy/morphe-tv-patcher/internal/abi"
 	"github.com/sloccy/morphe-tv-patcher/internal/apkmirror"
 	"github.com/sloccy/morphe-tv-patcher/internal/store"
 	"github.com/sloccy/morphe-tv-patcher/internal/verify"
@@ -168,6 +169,17 @@ func Fetch(ctx context.Context, e *Env, a App, sdk int) (*Fetched, error) {
 			return finish(bestLocal.Verified, bestLocal.Detail), nil
 		}
 		return f, nil
+	}
+
+	// A cached or dropped file that is as good as any build the release offers ends the search:
+	// there is nothing better to fetch, so APKMirror is not visited at all.
+	if bestLocal != nil {
+		if builds, known := e.Store.Builds(a.Package, a.Version); known {
+			if best, ok := abi.BestRank(builds, a.ABIs); ok && bestLocal.Rank <= best {
+				slog.Info("using the file already on disk; the release offers nothing better", "package", a.Package, "version", a.Version, "from", bestLocal.Detail)
+				return finish(bestLocal.Verified, bestLocal.Detail), nil
+			}
+		}
 	}
 
 	// 3+. downloads

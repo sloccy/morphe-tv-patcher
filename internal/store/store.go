@@ -680,6 +680,32 @@ func (s *Store) UpdateApp(pkg string, fn func(*AppState)) error {
 	return s.write("state.json", s.state)
 }
 
+// CacheFileSet is every downloaded bundle path recorded for any app.
+func (s *Store) CacheFileSet() map[string]bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]bool{}
+	for _, a := range s.state.Apps {
+		for p := range a.CacheFiles {
+			out[p] = true
+		}
+	}
+	return out
+}
+
+// InstalledVersions lists the app version of every install on record.
+func (s *Store) InstalledVersions() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for _, in := range s.state.Installs {
+		if in.APKVersion != "" {
+			out = append(out, in.APKVersion)
+		}
+	}
+	return out
+}
+
 // Builds returns the CPU builds recorded for an app version, and whether any are recorded.
 func (s *Store) Builds(pkg, version string) ([]string, bool) {
 	s.mu.Lock()

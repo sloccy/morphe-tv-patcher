@@ -78,7 +78,7 @@ func (r *Runner) judge(st store.Settings, deviceIDs []string) (problems []Proble
 			if l == nil {
 				continue // a source that has not loaded: nothing to judge against
 			}
-			app, ok := r.appFor(l, e.Package)
+			app, ok := l.App(e.Package)
 			if !ok || app.Target == "" {
 				continue
 			}

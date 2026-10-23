@@ -158,41 +158,12 @@ func TestDownloadLimitsAndPerSourceFolders(t *testing.T) {
 	}
 }
 
-func TestPickMostSupportedThenNewest(t *testing.T) {
-	st := map[string][]string{"p": {"1.0", "2.0", "3.0"}}
-	details := map[string][]PatchCompat{"p": {
-		{Name: "Ads", Enabled: true, Versions: []string{"1.0", "2.0", "3.0"}},
-		{Name: "Pin", Enabled: true, Versions: []string{"1.0", "2.0"}},
-		{Name: "Clone", Enabled: false, Versions: []string{"3.0"}},
-		{Name: "Universal", Enabled: true},
-	}}
-	a, _ := FromCLIWithPatches("t", st, st, details, nil).App("p")
-	if a.Target != "2.0" { // 3.0 is newest but fewer applied patches support it
-		t.Fatalf("target %q, want 2.0", a.Target)
-	}
-	if v, _ := a.Pick([]string{"clone"}, nil); v != "3.0" { // enabling a patch for 3.0 ties it, newest wins
-		t.Errorf("with Clone enabled got %q, want 3.0", v)
-	}
-	if v, _ := a.Pick(nil, []string{"PIN"}); v != "3.0" { // dropping Pin ties 1.0/2.0/3.0 at one each
-		t.Errorf("with Pin disabled got %q, want 3.0", v)
-	}
-}
-
 func TestPickIgnoresExperimentalUnlessAlone(t *testing.T) {
 	stable := map[string][]string{"p": {"1.0"}}
 	all := map[string][]string{"p": {"1.0", "2.0"}}
-	details := map[string][]PatchCompat{"p": {{Name: "A", Enabled: true, Versions: []string{"2.0"}}}}
-	a, _ := FromCLIWithPatches("t", stable, all, details, nil).App("p")
+	a, _ := FromCLI("t", stable, all, nil).App("p")
 	if a.Target != "1.0" || a.Experimental {
-		t.Errorf("got %q experimental=%v, want stable 1.0 even though the patch names 2.0", a.Target, a.Experimental)
-	}
-}
-
-func TestParseListPatchDetails(t *testing.T) {
-	out := "Index: 0\nName: A\nDescription: x\nEnabled: true\nCompatible packages:\n\tPackage name: p\n\tCompatible versions:\n\t\t1.0\n\t\t2.0\n\nIndex: 1\nName: B\nEnabled: false\nCompatible packages:\n\tPackage name: p\n\tCompatible versions:\n\t\t2.0\n"
-	got := ParseListPatchDetails([]byte(out))["p"]
-	if len(got) != 2 || got[0].Name != "A" || !got[0].Enabled || len(got[0].Versions) != 2 || got[1].Name != "B" || got[1].Enabled || len(got[1].Versions) != 1 {
-		t.Errorf("got %+v", got)
+		t.Errorf("got %q experimental=%v, want stable 1.0 even though 2.0 is newer", a.Target, a.Experimental)
 	}
 }
 

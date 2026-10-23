@@ -4,14 +4,17 @@ Keeps Morphe-patched apps (Prime Video, Netflix, Disney+, and anything else the
 [morphe-androidtv-patches](https://github.com/ajstrick81/morphe-androidtv-patches) support) installed
 on your Google TVs. A small web page lets you add devices and tick apps; a scheduler does the rest:
 
-1. find the newest patches release and the app version to build: the stable version that the most
-   of your enabled patches support (the newest of those on a tie);
+1. find the newest patches release and the newest stable app version it supports;
 2. get that exact Android TV bundle (your drop folder, the cache, APKMirror, APKMirror through
    FlareSolverr) and verify it;
 3. patch it once with the Morphe CLI for the TV's CPU;
 4. install it over wireless ADB on every device that needs it, and tell you on Telegram. A scheduled
    run leaves a TV alone while something is playing on it and tries again at the next run; **Run now**
    always installs. After a successful update the older versions' downloads and patched files are deleted.
+   If the patches ever
+   roll the target back to a version older than the one installed, the installed one is kept (no downgrade).
+   A bundle already on disk is never downloaded again: the cache is not size-capped, and a cached file
+   is used without visiting APKMirror whenever the release offers no better build for the TV.
 
 Written in Go; the image adds the Java runtime, `adb` and `apksigner`.
 
@@ -33,7 +36,7 @@ volumes:
 ```
 
 Open `http://<host>:8093`, add a device (its IP), press **Pair…** and follow the prompt, tick apps,
-**Save**, then **Run now**. Saving never installs anything; the schedule (default every 12 hours) and
+**Save**, then **Run now**. Saving never installs anything; the schedule (default every 6 hours) and
 the button do.
 
 **No login.** Like your other LAN tools, the page is meant for the LAN/Tailscale only: anyone who can
@@ -163,7 +166,7 @@ wrong signature or a phone build alerts at once; a message follows when it recov
 | Variable | Default | |
 |---|---|---|
 | `DATA_DIR` | `/data` | settings, state, keystore, cache |
-| `INTERVAL` | `12h` | time between scheduled runs |
+| `INTERVAL` | `6h` | time between scheduled runs |
 | `WEB_PORT` / `WEB_BIND` | `8093` / `0.0.0.0` | |
 | `ALLOWED_HOST_SUFFIXES` | | extra `Host` names the page answers to |
 | `FLARESOLVERR_URL` | | e.g. `http://127.0.0.1:8191` |

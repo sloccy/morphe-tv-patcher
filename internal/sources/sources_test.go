@@ -272,3 +272,30 @@ func TestDeviceABIsAndPhonePolicyReachTheMirrorAndVerifier(t *testing.T) {
 		t.Errorf("req %+v want %+v", gotReq, gotWant)
 	}
 }
+
+func TestCachedFileThatIsAsGoodAsAnyBuildNeverVisitsAPKMirror(t *testing.T) {
+	r := newRig(t)
+	r.env.Verify = verifyByName(t)
+	_ = os.WriteFile(filepath.Join(r.env.CacheDir, "a32.apkm"), []byte("x"), 0o600)
+	visits := 0
+	r.env.Mirror = func(context.Context, apkmirror.AppRequest, apkmirror.Options) (apkmirror.Result, string, error) {
+		visits++
+		return apkmirror.Result{}, "", apkmirror.ErrBlocked
+	}
+	a := app
+	a.ABIs = []string{"arm64-v8a", "armeabi-v7a", "armeabi"} // a 64-bit device holding the 32-bit build
+
+	// the release is known to offer only the 32-bit build: nothing better exists, so no visit
+	_ = r.st.SetBuilds(a.Package, a.Version, []string{"armeabi-v7a"})
+	f, err := Fetch(context.Background(), r.env, a, 31)
+	if err != nil || filepath.Base(f.Path) != "a32.apkm" || visits != 0 {
+		t.Fatalf("%+v %v visits=%d", f, err, visits)
+	}
+
+	// once a 64-bit build is known to exist, the cached 32-bit file is not good enough: ask the site
+	_ = r.st.SetBuilds(a.Package, a.Version, []string{"armeabi-v7a", "arm64-v8a"})
+	_, _ = Fetch(context.Background(), r.env, a, 31)
+	if visits == 0 {
+		t.Error("a better build exists, so the site should have been asked")
+	}
+}

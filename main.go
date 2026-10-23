@@ -133,7 +133,7 @@ func setup() (*app, error) {
 			if l, err := patches.FetchList(ctx, a.hc, src.Repo, rel.Tag, cfg.GitHubToken); err == nil {
 				names = l.Names()
 			}
-			return patches.FromCLIWithPatches(rel.Tag, patches.ParseListPatches(stable), patches.ParseListPatches(all), patches.ParseListPatchDetails(all), names), nil
+			return patches.FromCLI(rel.Tag, patches.ParseListPatches(stable), patches.ParseListPatches(all), names), nil
 		},
 		PausedUntil: apkmirror.Shared.BlockedUntil,
 		Probe: func(ctx context.Context, src store.Source, pkg, name, version string) ([]string, error) {

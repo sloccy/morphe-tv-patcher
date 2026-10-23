@@ -11,6 +11,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -125,18 +126,6 @@ type Runner struct {
 func New(cfg config.Config, st *store.Store, a ADB, d Deps, notify func(context.Context, string, string)) *Runner {
 	return &Runner{Cfg: cfg, Store: st, ADB: a, Deps: d, Notify: notify, Now: time.Now, wake: make(chan Options, 1),
 		lists: map[string]*patches.List{}, listCache: map[string]*patches.List{}}
-}
-
-// appFor looks up an app in a bundle's list with its target version chosen for this setup: the
-// version most of the patches in use support, where the app's enable/disable overrides count.
-func (r *Runner) appFor(l *patches.List, pkg string) (patches.App, bool) {
-	a, ok := l.App(pkg)
-	if !ok {
-		return a, false
-	}
-	ov := r.Store.Override(pkg)
-	a.Target, a.Experimental = a.Pick(ov.Enable, ov.Disable)
-	return a, true
 }
 
 // Status returns a copy of the current status.
@@ -599,7 +588,7 @@ func (r *Runner) app(ctx context.Context, o Options, ld *loaded, pkg string, cs 
 	var out []Result
 	name := pkg
 	newest := ""
-	if a, ok := r.appFor(ld.list, pkg); ok {
+	if a, ok := ld.list.App(pkg); ok {
 		name, newest = a.Name, a.Target
 	}
 	res := func(c *conn, ok bool, msg string) Result {
@@ -616,6 +605,12 @@ func (r *Runner) app(ctx context.Context, o Options, ld *loaded, pkg string, cs 
 	var need []*conn
 	for _, c := range cs {
 		in, has := r.Store.Install(c.dev.ID, pkg)
+		if has && in.PatchSource == src.ID && in.APKVersion != "" && patches.VersionLess(newest, in.APKVersion) {
+			// this source now names an older version than the one it installed (a rollback): Android would
+			// refuse the downgrade, so keep what is there and do no download or patching
+			out = append(out, res(c, true, fmt.Sprintf("%s on %s: installed %s is newer than the target %s, keeping it", name, c.dev.Name, in.APKVersion, newest)))
+			continue
+		}
 		if !o.Force && has && in.APKVersion == newest && in.PatchesVersion == rel.Tag && !o.NoDevice &&
 			in.PatchSource == src.ID {
 			ip := in.InstalledPackage
@@ -884,14 +879,21 @@ func (r *Runner) noteRecovered(key string) bool {
 	return was
 }
 
-// dropOld runs after an app was installed at version: the downloaded bundles and patched files for
-// any other version are no longer needed, so they are deleted. Files you dropped into the input
+// dropOld runs after an app was installed at version: the downloaded bundles for older versions
+// (that no patch source still targets) and the patched files for any other version are no longer needed, so they are deleted. Files you dropped into the input
 // folder are never touched.
 func (r *Runner) dropOld(pkg, version string) {
 	cache := filepath.Clean(r.Cfg.Cache())
+	// another patch source may still aim at a different version of this app
+	wanted := map[string]bool{version: true}
+	for _, l := range r.Lists() {
+		if a, ok := l.App(pkg); ok {
+			wanted[a.Target] = true
+		}
+	}
 	_ = r.Store.UpdateApp(pkg, func(a *store.AppState) {
 		for p, v := range a.CacheFiles {
-			if v == version {
+			if wanted[v] || patches.VersionLess(version, v) { // needed, or newer than what was installed
 				if _, err := os.Stat(p); err != nil {
 					delete(a.CacheFiles, p) // already gone
 				}
@@ -917,7 +919,41 @@ func (r *Runner) dropOld(pkg, version string) {
 // prune keeps the newest few patched files and bundles.
 func (r *Runner) prune(pkg string) {
 	keepNewest(r.Cfg.Output(), []string{pkg + "-*.apk", pkg + "-*.result.json"}, 4)
-	keepNewest(r.Cfg.Cache(), []string{"*.apkm", "*.xapk", "*.apks"}, 6)
+	r.pruneCache()
+}
+
+// cacheMaxAge is how long a downloaded bundle that nothing on record points to is kept.
+const cacheMaxAge = 30 * day
+
+// pruneCache removes only bundles that cannot be needed again. A downloaded bundle is never
+// deleted just because the cache is "full": every app's current bundle stays, so a new patches
+// release or a new TV never means downloading it from APKMirror a second time. Bundles recorded
+// for an app are removed by dropOld once a newer version is installed. A file nothing records
+// (from before that tracking) stays while its name carries an installed version, and otherwise
+// goes after cacheMaxAge.
+func (r *Runner) pruneCache() {
+	tracked := r.Store.CacheFileSet()
+	versions := r.Store.InstalledVersions()
+	installed := make([]string, 0, len(versions))
+	for _, v := range versions {
+		installed = append(installed, "-"+patches.Slug(v)+"-")
+	}
+	entries, _ := os.ReadDir(r.Cfg.Cache())
+	for _, en := range entries {
+		switch filepath.Ext(en.Name()) {
+		case ".apkm", ".xapk", ".apks", ".apk":
+		default:
+			continue
+		}
+		p := filepath.Join(r.Cfg.Cache(), en.Name())
+		if en.IsDir() || tracked[p] || r.Now().Sub(mtime(p)) < cacheMaxAge {
+			continue
+		}
+		if slices.ContainsFunc(installed, func(v string) bool { return strings.Contains(en.Name(), v) }) {
+			continue
+		}
+		_ = os.Remove(p)
+	}
 }
 
 func keepNewest(dir string, patterns []string, keep int) {

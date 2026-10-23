@@ -104,8 +104,8 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		GitHubToken:               def("GITHUB_TOKEN", ""),
 	}
 	var err error
-	if c.Interval, err = time.ParseDuration(def("INTERVAL", "12h")); err != nil || c.Interval < time.Minute {
-		return c, fmt.Errorf("INTERVAL must be a duration of at least 1m (e.g. 12h): %q", getenv("INTERVAL"))
+	if c.Interval, err = time.ParseDuration(def("INTERVAL", "6h")); err != nil || c.Interval < time.Minute {
+		return c, fmt.Errorf("INTERVAL must be a duration of at least 1m (e.g. 6h): %q", getenv("INTERVAL"))
 	}
 	if c.MirrorGap, err = time.ParseDuration(def("APKMIRROR_MIN_INTERVAL", "4s")); err != nil || c.MirrorGap < 0 {
 		return c, fmt.Errorf("APKMIRROR_MIN_INTERVAL must be a duration (e.g. 4s): %q", getenv("APKMIRROR_MIN_INTERVAL"))

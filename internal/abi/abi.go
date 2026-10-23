@@ -49,6 +49,22 @@ func Rank(have map[string]bool, device []string) (rank int, ok bool) {
 	return 0, false
 }
 
+// BestRank is the best rank any of the offered builds could reach on the device (builds are ABI
+// names, "*" a universal build). ok is false when none of them runs on it or nothing is offered.
+func BestRank(builds, device []string) (rank int, ok bool) {
+	if len(builds) == 0 {
+		return 0, false
+	}
+	have := map[string]bool{}
+	for _, b := range builds {
+		if b == "*" {
+			return 0, true
+		}
+		have[b] = true
+	}
+	return Rank(have, device)
+}
+
 var token = regexp.MustCompile(`arm64-v8a|armeabi-v7a|armeabi|x86_64|x86|mips64|mips`)
 
 // Row describes the architectures APKMirror lists for one variant row of text, such as

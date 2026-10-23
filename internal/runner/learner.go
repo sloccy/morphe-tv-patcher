@@ -158,7 +158,7 @@ func (r *Runner) needs(st store.Settings, deviceIDs []string) []job {
 			if l == nil {
 				continue
 			}
-			app, ok := r.appFor(l, e.Package)
+			app, ok := l.App(e.Package)
 			if !ok || app.Target == "" || seen[jobKey(e.Package, app.Target)] {
 				continue
 			}

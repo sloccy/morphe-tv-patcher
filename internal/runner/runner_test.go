@@ -1209,3 +1209,85 @@ func TestPatchingNeverStripsNativeLibraries(t *testing.T) {
 		}
 	}
 }
+
+func writeAged(t *testing.T, path string, at time.Time) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, at, at); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCachePruneNeverDropsCurrentBundlesHoweverManyApps(t *testing.T) {
+	rg := newRig(t)
+	cache := rg.r.Cfg.Cache()
+	ancient := rg.now.Add(-400 * day)
+	for i := range 10 { // far more than the old cap of 6, all untouched for over a year
+		pkg := fmt.Sprintf("com.app%d", i)
+		p := filepath.Join(cache, pkg+"-1.0.apkm")
+		writeAged(t, p, ancient)
+		_ = rg.st.UpdateApp(pkg, func(a *store.AppState) { a.CacheFiles = map[string]string{p: "1.0"} })
+	}
+	untrackedOld := filepath.Join(cache, "mystery-9-9.apkm")
+	writeAged(t, untrackedOld, rg.now.Add(-40*day))
+	untrackedNew := filepath.Join(cache, "fresh-1-0.apkm")
+	writeAged(t, untrackedNew, rg.now.Add(-2*day))
+	untrackedInUse := filepath.Join(cache, "pub_app-2-5-abcd1234.apkm") // old, but names an installed version
+	writeAged(t, untrackedInUse, rg.now.Add(-90*day))
+	_ = rg.st.SetInstall("dev", "pub.app", store.Install{APKVersion: "2.5"})
+
+	rg.r.pruneCache()
+
+	left, _ := filepath.Glob(filepath.Join(cache, "com.app*.apkm"))
+	if len(left) != 10 {
+		t.Errorf("%d of 10 current bundles left; none may be deleted for being old or numerous", len(left))
+	}
+	if _, err := os.Stat(untrackedOld); err == nil {
+		t.Error("an unrecorded file untouched for over 30 days should go")
+	}
+	for _, kept := range []string{untrackedNew, untrackedInUse} {
+		if _, err := os.Stat(kept); err != nil {
+			t.Errorf("%s should stay", filepath.Base(kept))
+		}
+	}
+}
+
+func TestDropOldKeepsNewerAndStillTargetedVersions(t *testing.T) {
+	rg := newRig(t)
+	cache := rg.r.Cfg.Cache()
+	mk := func(name string) string { p := filepath.Join(cache, name); writeAged(t, p, rg.now); return p }
+	older, newer, targeted := mk("a-1.apkm"), mk("a-9.apkm"), mk("a-5.apkm")
+	_ = rg.st.UpdateApp(prime, func(a *store.AppState) {
+		a.CacheFiles = map[string]string{older: "1.0", newer: "9.0", targeted: "5.0"}
+	})
+	// a second patch source still aims at 5.0
+	rg.r.lists["other"] = patches.FromCLI("t", map[string][]string{prime: {"5.0"}}, map[string][]string{prime: {"5.0"}}, nil)
+
+	rg.r.dropOld(prime, "3.0")
+
+	if _, err := os.Stat(older); err == nil {
+		t.Error("an older version nothing targets should be deleted")
+	}
+	for _, kept := range []string{newer, targeted} {
+		if _, err := os.Stat(kept); err != nil {
+			t.Errorf("%s must stay", filepath.Base(kept))
+		}
+	}
+}
+
+func TestRolledBackTargetNeverDowngradesOrDownloads(t *testing.T) {
+	rg := newRig(t)
+	d := rg.device(t, "TV", "10.0.0.6", prime)
+	_ = rg.st.SetInstall(d.ID, prime, store.Install{APKVersion: "99.0.0", PatchesVersion: "v0", PatchSource: defSrc})
+	for _, o := range []Options{{}, {Manual: true}, {Force: true}} {
+		res := rg.r.Run(context.Background(), o)
+		if rg.fetches != 0 || rg.patches != 0 || len(rg.adb.installs) != 0 {
+			t.Fatalf("%+v: a rollback must not fetch, patch or install: %d %d %v", o, rg.fetches, rg.patches, rg.adb.installs)
+		}
+		if len(res) == 0 || !res[0].OK || res[0].Alert || !strings.Contains(res[0].Message, "keeping it") {
+			t.Errorf("%+v: want a quiet keeping-it line, got %+v", o, res)
+		}
+	}
+}

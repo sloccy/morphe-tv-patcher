@@ -100,3 +100,23 @@ func TestHelpers(t *testing.T) {
 		t.Error("Normalize must not hand out the shared default slice")
 	}
 }
+
+func TestBestRank(t *testing.T) {
+	dev := []string{"arm64-v8a", "armeabi-v7a"}
+	cases := []struct {
+		builds []string
+		rank   int
+		ok     bool
+	}{
+		{[]string{"armeabi-v7a"}, 1, true},
+		{[]string{"armeabi-v7a", "arm64-v8a"}, 0, true},
+		{[]string{"*"}, 0, true},
+		{[]string{"x86"}, 0, false},
+		{nil, 0, false},
+	}
+	for _, c := range cases {
+		if r, ok := BestRank(c.builds, dev); r != c.rank || ok != c.ok {
+			t.Errorf("BestRank(%v) = %d,%v want %d,%v", c.builds, r, ok, c.rank, c.ok)
+		}
+	}
+}
