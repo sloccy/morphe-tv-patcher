@@ -13,7 +13,7 @@ func TestDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Interval != 6*time.Hour || c.WebPort != 8093 || c.APKPureOK || !c.DirectOK || c.FailuresBeforeAlert != 3 ||
+	if c.Interval != 6*time.Hour || c.WebPort != 8093 || !c.DirectOK || c.FailuresBeforeAlert != 3 ||
 		c.BytecodeMode != "STRIP_SAFE" || c.DataDir != "/data" {
 		t.Errorf("%+v", c)
 	}
@@ -23,9 +23,9 @@ func TestDefaults(t *testing.T) {
 }
 
 func TestOverridesAndValidation(t *testing.T) {
-	c, err := FromEnv(env(map[string]string{"INTERVAL": "90m", "WEB_PORT": "9000", "APKPURE_ACKNOWLEDGE_DANGERS": "true",
+	c, err := FromEnv(env(map[string]string{"INTERVAL": "90m", "WEB_PORT": "9000",
 		"APKMIRROR_DIRECT_DISABLED": "1", "FLARESOLVERR_URL": "http://127.0.0.1:8191/"}))
-	if err != nil || c.Interval != 90*time.Minute || c.WebPort != 9000 || !c.APKPureOK || c.DirectOK || c.FlareSolverrURL != "http://127.0.0.1:8191" {
+	if err != nil || c.Interval != 90*time.Minute || c.WebPort != 9000 || c.DirectOK || c.FlareSolverrURL != "http://127.0.0.1:8191" {
 		t.Errorf("%+v %v", c, err)
 	}
 	for _, bad := range []map[string]string{{"INTERVAL": "soon"}, {"INTERVAL": "10s"}, {"WEB_PORT": "0"}, {"WEB_PORT": "x"}, {"FETCH_FAILURES_BEFORE_ALERT": "0"}} {

@@ -99,7 +99,7 @@ func setup() (*app, error) {
 	}
 	env := sources.DefaultEnv()
 	env.InputDir, env.CacheDir, env.Store = cfg.Input(), cfg.Cache(), a.st
-	env.FlareURL, env.DirectOK, env.APKPureOK = cfg.FlareSolverrURL, cfg.DirectOK, cfg.APKPureOK
+	env.FlareURL, env.DirectOK = cfg.FlareSolverrURL, cfg.DirectOK
 	for _, g := range []*apkmirror.Gate{apkmirror.Shared, apkmirror.SharedFlare} {
 		g.MinGap, g.Cooldown = cfg.MirrorGap, cfg.MirrorCooldown
 	}
@@ -304,7 +304,7 @@ func cmdFetch(args []string) error {
 	}
 	env := sources.DefaultEnv()
 	env.InputDir, env.CacheDir, env.Store = a.cfg.Input(), a.cfg.Cache(), a.st
-	env.FlareURL, env.DirectOK, env.APKPureOK = a.cfg.FlareSolverrURL, a.cfg.DirectOK, a.cfg.APKPureOK
+	env.FlareURL, env.DirectOK = a.cfg.FlareSolverrURL, a.cfg.DirectOK
 	ov := a.st.Override(*pkg)
 	f, err := sources.Fetch(ctx, &env, sources.App{Package: *pkg, Name: app.Name, Version: *ver, Sources: ov.Sources,
 		SignerPin: ov.SignerSHA256, SlugOverride: ov.APKMirror, ABIs: abi.Parse(*abiList), AllowPhone: srcCfg.AllowPhone}, *sdk)

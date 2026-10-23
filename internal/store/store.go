@@ -119,7 +119,7 @@ func Effective(st Settings, deviceID string) []EffectiveApp {
 // Override is a per-app tweak edited by hand in settings.json (the UI never touches it).
 type Override struct {
 	APKMirror      string   `json:"apkmirror,omitempty"` // publisher/app path, if detection picks wrongly
-	Sources        []string `json:"sources,omitempty"`   // order of: apkmirror, apkpure
+	Sources        []string `json:"sources,omitempty"`   // "apkmirror" (the only network source)
 	SignerSHA256   string   `json:"signer_sha256,omitempty"`
 	Enable         []string `json:"enable,omitempty"` // Morphe patch names
 	Disable        []string `json:"disable,omitempty"`

@@ -23,27 +23,20 @@ RUN --mount=type=cache,target=/go/pkg/mod \
       -ldflags="-s -w -X main.version=${BUILD_VERSION} -X main.commit=${BUILD_COMMIT}" \
       -o tv-patcher .
 
-# ── Stage 2: fetch the tools the patcher shells out to ───────────────────────
-# Morphe and apkeep are rebuilt at their latest release, like cloudflared in Lantern. CI passes
-# the resolved versions (the Morphe jar's file name carries its version) and a date that busts
-# the layer cache so the weekly rebuild really refreshes them.
+# ── Stage 2: fetch the Morphe CLI ─────────────────────────────────────────────
+# Morphe is rebuilt at its latest release, like cloudflared in Lantern. CI passes the resolved
+# version (the jar's file name carries it) and a date that busts the layer cache so the weekly
+# rebuild really refreshes it.
 FROM debian:trixie-slim AS tools
-ARG TARGETARCH
 ARG MORPHE_VERSION
-ARG APKEEP_VERSION
+ARG MORPHE_SHA256
 ARG TOOLS_REFRESH=unset
 RUN apt-get update -qq && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-RUN echo "tools refresh: ${TOOLS_REFRESH}" && test -n "${MORPHE_VERSION}" && test -n "${APKEEP_VERSION}" && \
+RUN echo "tools refresh: ${TOOLS_REFRESH}" && test -n "${MORPHE_VERSION}" && test -n "${MORPHE_SHA256}" && \
     curl -fsSL -o /morphe.jar \
       "https://github.com/MorpheApp/morphe-cli/releases/download/${MORPHE_VERSION}/morphe-desktop-${MORPHE_VERSION#v}-all.jar" && \
-    case "${TARGETARCH}" in \
-      amd64) t=x86_64-unknown-linux-gnu ;; \
-      arm64) t=aarch64-unknown-linux-gnu ;; \
-      *) echo "unsupported arch ${TARGETARCH}"; exit 1 ;; \
-    esac && \
-    curl -fsSL -o /apkeep "https://github.com/EFForg/apkeep/releases/download/${APKEEP_VERSION}/apkeep-${t}" && \
-    chmod +x /apkeep
+    echo "${MORPHE_SHA256#sha256:}  /morphe.jar" | sha256sum -c -
 
 # ── Stage 3: runtime ──────────────────────────────────────────────────────────
 # Morphe needs a Java runtime, adb and apksigner come from apt, so this is not distroless.
@@ -61,7 +54,6 @@ RUN groupadd --gid 65532 nonroot && useradd --uid 65532 --gid 65532 --no-create-
     chown -R 65532:65532 /opt/morphe /data
 
 COPY --from=tools --chown=65532:65532 /morphe.jar /opt/morphe/morphe.jar
-COPY --from=tools /apkeep /usr/local/bin/apkeep
 COPY --from=builder /build/tv-patcher /usr/local/bin/tv-patcher
 
 ARG BUILD_VERSION=dev

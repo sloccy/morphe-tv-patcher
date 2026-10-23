@@ -28,7 +28,7 @@ func newRig(t *testing.T) *rig {
 	r := &rig{st: st}
 	base := t.TempDir()
 	e := &Env{InputDir: filepath.Join(base, "input"), CacheDir: filepath.Join(base, "cache"), Store: st,
-		DirectOK: true, APKPureOK: true, PureAvailable: func() bool { return true }}
+		DirectOK: true}
 	_ = os.MkdirAll(e.CacheDir, 0o750)
 	e.Verify = func(ctx context.Context, path string, w verify.Want) (*verify.Verified, error) {
 		return &verify.Verified{Path: path, Source: w.Source, Signer: "aa", Package: w.Package, Version: w.Version}, nil
@@ -37,11 +37,6 @@ func newRig(t *testing.T) *rig {
 		p := filepath.Join(req.DestDir, "m.apkm")
 		_ = os.WriteFile(p, []byte("PK"), 0o600)
 		return apkmirror.Result{Path: p, Slug: "pub/app"}, "chrome", nil
-	}
-	e.Pure = func(ctx context.Context, pkg, version, dest string) (string, error) {
-		p := filepath.Join(dest, "p.xapk")
-		_ = os.WriteFile(p, []byte("PK"), 0o600)
-		return p, nil
 	}
 	r.env = e
 	return r
@@ -66,58 +61,26 @@ func TestAPKMirrorFirstLearnsSignerSlugAndProfile(t *testing.T) {
 	}
 }
 
-func TestFallsThroughDirectThenFlareThenAPKPure(t *testing.T) {
+func TestFallsThroughDirectThenFlare(t *testing.T) {
 	r := newRig(t)
 	r.env.FlareURL = "http://flare"
-	_ = r.st.UpdateApp("com.x", func(s *store.AppState) { s.SignerSHA256 = "aa" })
 	var order []string
 	r.env.Mirror = func(ctx context.Context, req apkmirror.AppRequest, o apkmirror.Options) (apkmirror.Result, string, error) {
 		if o.FlareURL != "" {
 			order = append(order, "flare")
-		} else {
-			order = append(order, "direct")
+			p := filepath.Join(req.DestDir, "f.apkm")
+			_ = os.WriteFile(p, []byte("PK"), 0o600)
+			return apkmirror.Result{Path: p, Slug: "pub/app"}, "flaresolverr", nil
 		}
+		order = append(order, "direct")
 		return apkmirror.Result{}, "", apkmirror.ErrBlocked
 	}
 	f, err := Fetch(context.Background(), r.env, app, 31)
-	if err != nil || f.Detail != "apkpure" {
+	if err != nil || !strings.Contains(f.Detail, "flaresolverr") {
 		t.Fatalf("%+v %v", f, err)
 	}
 	if strings.Join(order, ",") != "direct,flare" {
 		t.Errorf("order %v", order)
-	}
-}
-
-func TestAPKPureIsOffWithoutOptIn(t *testing.T) {
-	r := newRig(t)
-	r.env.APKPureOK = false
-	r.env.Mirror = func(context.Context, apkmirror.AppRequest, apkmirror.Options) (apkmirror.Result, string, error) {
-		return apkmirror.Result{}, "", apkmirror.ErrBlocked
-	}
-	r.env.Pure = func(context.Context, string, string, string) (string, error) {
-		t.Fatal("must not download")
-		return "", nil
-	}
-	_, err := Fetch(context.Background(), r.env, app, 31)
-	var fe *FetchError
-	if !errors.As(err, &fe) || fe.Fatal || !strings.Contains(fe.Error(), "APKPURE_ACKNOWLEDGE_DANGERS") {
-		t.Fatalf("got %v", err)
-	}
-}
-
-func TestMirrorOnlySourcesNeverTouchAPKPure(t *testing.T) {
-	r := newRig(t)
-	a := app
-	a.Sources = []string{"apkmirror"}
-	r.env.Mirror = func(context.Context, apkmirror.AppRequest, apkmirror.Options) (apkmirror.Result, string, error) {
-		return apkmirror.Result{}, "", apkmirror.ErrNotFound
-	}
-	r.env.Pure = func(context.Context, string, string, string) (string, error) {
-		t.Fatal("apkpure not allowed")
-		return "", nil
-	}
-	if _, err := Fetch(context.Background(), r.env, a, 31); err == nil {
-		t.Error("should fail")
 	}
 }
 
@@ -126,7 +89,6 @@ func TestSignatureMismatchIsFatalAndTheFileIsDeleted(t *testing.T) {
 	r.env.Verify = func(ctx context.Context, path string, w verify.Want) (*verify.Verified, error) {
 		return nil, &verify.Error{Kind: verify.KindSignature, Msg: "signer mismatch"}
 	}
-	r.env.APKPureOK = false
 	_, err := Fetch(context.Background(), r.env, app, 31)
 	var fe *FetchError
 	if !errors.As(err, &fe) || !fe.Fatal {
@@ -172,7 +134,6 @@ func TestCacheIgnoresOtherAppsFilesAndTheyAreNotFatal(t *testing.T) {
 	r.env.Mirror = func(context.Context, apkmirror.AppRequest, apkmirror.Options) (apkmirror.Result, string, error) {
 		return apkmirror.Result{}, "", apkmirror.ErrBlocked
 	}
-	r.env.APKPureOK = false
 	_, err := Fetch(context.Background(), r.env, app, 31)
 	var fe *FetchError
 	if !errors.As(err, &fe) || fe.Fatal {
@@ -225,7 +186,6 @@ func TestCachedBuildForAnotherCPUIsSkippedNotAnAlarm(t *testing.T) {
 	r.env.Mirror = func(context.Context, apkmirror.AppRequest, apkmirror.Options) (apkmirror.Result, string, error) {
 		return apkmirror.Result{}, "", apkmirror.ErrBlocked
 	}
-	r.env.APKPureOK = false
 	a := app
 	a.ABIs = []string{"armeabi-v7a", "armeabi"}
 	_, err := Fetch(context.Background(), r.env, a, 31)
@@ -271,7 +231,6 @@ func TestSecondBestCachedFileIsUsedWhenNothingBetterExists(t *testing.T) {
 	r.env.Mirror = func(context.Context, apkmirror.AppRequest, apkmirror.Options) (apkmirror.Result, string, error) {
 		return apkmirror.Result{}, "", apkmirror.ErrBlocked
 	}
-	r.env.APKPureOK = false
 	if f, err = Fetch(context.Background(), r.env, a, 31); err != nil || filepath.Base(f.Path) != "a32.apkm" {
 		t.Fatalf("%+v %v", f, err)
 	}
@@ -282,7 +241,6 @@ func TestNoBuildForThisCPUIsReportedAsSuch(t *testing.T) {
 	r.env.Mirror = func(context.Context, apkmirror.AppRequest, apkmirror.Options) (apkmirror.Result, string, error) {
 		return apkmirror.Result{}, "", errors.Join(apkmirror.ErrNoBuild, apkmirror.ErrNotFound)
 	}
-	r.env.APKPureOK = false
 	a := app
 	a.ABIs = []string{"arm64-v8a"}
 	_, err := Fetch(context.Background(), r.env, a, 31)

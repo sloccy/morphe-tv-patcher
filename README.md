@@ -6,11 +6,11 @@ on your Google TVs. A small web page lets you add devices and tick apps; a sched
 
 1. find the newest patches release and the newest app version it supports;
 2. get that exact Android TV bundle (your drop folder, the cache, APKMirror, APKMirror through
-   FlareSolverr, APKPure) and verify it;
+   FlareSolverr) and verify it;
 3. patch it once with the Morphe CLI for the TV's CPU;
 4. install it over wireless ADB on every device that needs it, and tell you on Telegram.
 
-Written in Go; the image adds the Java runtime, `adb`, `apksigner` and `apkeep`.
+Written in Go; the image adds the Java runtime, `adb` and `apksigner`.
 
 ## Run it
 
@@ -111,7 +111,6 @@ In order, the first file that passes every check wins:
 2. the cache;
 3. APKMirror, directly. Every APKMirror request (from runs and from background CPU checks) goes through one shared gate: one request at a time, a few seconds apart, and a shared pause (5 minutes, doubling up to an hour) as soon as the site says "slow down";
 4. APKMirror through a FlareSolverr sidecar (`FLARESOLVERR_URL`);
-5. APKPure through `apkeep`, only if you set `APKPURE_ACKNOWLEDGE_DANGERS=true`.
 
 Which CPU builds an app offers is learned in the background, one app at a time, only for apps you selected. Saving waits a few seconds for it; anything still unknown is saved anyway and shows up as a warning on the TV if it turns out the TV cannot run it. The page says "Checking which CPUs…" while this runs.
 
@@ -121,8 +120,7 @@ supported version cannot be found you are told, with the exact file to drop in.
 
 **Every file is verified:** right package and version, an Android TV launcher (rejects phone builds),
 `armeabi-v7a`, and the publisher's signing certificate: learned from the first APKMirror download,
-or pinned with `signer_sha256`; `apksigner` checks it cryptographically. APKPure files are refused
-until a signer is on record, because apkeep's docs warn APKPure has modified apps to spread malware.
+or pinned with `signer_sha256`; `apksigner` checks it cryptographically.
 
 Each TV card has a **Test** button that connects the way a run does and shows the port and CPU, or tells you to turn Wireless debugging back on. The app list on each card can be collapsed (the line above it still says how many apps the TV gets).
 
@@ -142,7 +140,6 @@ wrong signature or a phone build alerts at once; a message follows when it recov
 | `FLARESOLVERR_URL` | | e.g. `http://127.0.0.1:8191` |
 | `APKMIRROR_MIN_INTERVAL` | `4s` | minimum gap between APKMirror requests |
 | `APKMIRROR_COOLDOWN` | `5m` | first pause after APKMirror pushes back (doubles, up to 1h) |
-| `APKPURE_ACKNOWLEDGE_DANGERS` | `false` | allow APKPure (signer-checked) |
 | `PATCHES_REPO` / `PATCHES_PRERELEASE` | `ajstrick81/morphe-androidtv-patches` / `false` | seeds the patch sources on the first run only |
 | `PATCH_SOURCES_ALLOWED_OWNERS` | | limit repositories added from the page to these GitHub owners |
 | `BYTECODE_MODE` | `STRIP_SAFE` | Morphe `--bytecode-mode` |
@@ -180,5 +177,5 @@ golangci-lint run        # same config as Lantern
 
 CI (`build.yml`) lints, tests, builds amd64+arm64 natively, publishes to GHCR and smoke-tests the
 image. `security.yml` calls `sloccy/shared-ci` (nightly govulncheck fixes, weekly rebuild that picks
-up new Morphe and apkeep releases); it needs the repo secret `WORKFLOW_TOKEN`. `live-checks.yml` is
-a manual workflow that proves APKPure, FlareSolverr and app discovery work from a runner.
+up new Morphe releases); it needs the repo secret `WORKFLOW_TOKEN`. `live-checks.yml` is
+a manual workflow that proves FlareSolverr and app discovery work from a runner.

@@ -6,7 +6,7 @@ on:
     tags: ["v*.*.*"]
   pull_request:
     branches: [main, master]
-  # Rebuilds with no code change (new Morphe/apkeep release, base image patches) are dispatched
+  # Rebuilds with no code change (new Morphe release, base image patches) are dispatched
   # weekly by security.yml.
   workflow_dispatch:
 
@@ -47,7 +47,7 @@ jobs:
       contents: read
     outputs:
       morphe: ${{ steps.v.outputs.morphe }}
-      apkeep: ${{ steps.v.outputs.apkeep }}
+      morphe_sha256: ${{ steps.v.outputs.morphe_sha256 }}
       date: ${{ steps.v.outputs.date }}
     steps:
       - id: v
@@ -55,7 +55,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           echo "morphe=$(gh api repos/MorpheApp/morphe-cli/releases/latest --jq .tag_name)" >> "$GITHUB_OUTPUT"
-          echo "apkeep=$(gh api repos/EFForg/apkeep/releases/latest --jq .tag_name)" >> "$GITHUB_OUTPUT"
+          # the jar's checksum as GitHub reports it; the Dockerfile refuses a download that differs
+          echo "morphe_sha256=$(gh api repos/MorpheApp/morphe-cli/releases/latest --jq '.assets[] | select(.name | test("desktop-.*-all[.]jar$")) | .digest')" >> "$GITHUB_OUTPUT"
           echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
 
   # On PRs: compile check only. On pushes: build natively per architecture, push by digest.
@@ -127,7 +128,7 @@ jobs:
             BUILD_VERSION=${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
             BUILD_COMMIT=${{ github.sha }}
             MORPHE_VERSION=${{ needs.tools.outputs.morphe }}
-            APKEEP_VERSION=${{ needs.tools.outputs.apkeep }}
+            MORPHE_SHA256=${{ needs.tools.outputs.morphe_sha256 }}
             TOOLS_REFRESH=${{ needs.tools.outputs.date }}
 
       - name: Export digest
@@ -207,7 +208,7 @@ jobs:
             $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
 
   # Starts the published image and exercises the tools it shells out to, so a broken Morphe,
-  # apkeep or adb release is caught here and not on your TV.
+  # adb release is caught here and not on your TV.
   smoke:
     name: Smoke test image
     needs: publish
@@ -228,7 +229,6 @@ jobs:
           docker pull "$IMG"
           docker run --rm "$IMG" version
           docker run --rm --entrypoint java "$IMG" -jar /opt/morphe/morphe.jar --version
-          docker run --rm --entrypoint apkeep "$IMG" --version
           docker run --rm --entrypoint apksigner "$IMG" --version
           docker run --rm --entrypoint adb "$IMG" version
           # the real Morphe call the patcher makes, against the official patches (no single maintainer to rely on)

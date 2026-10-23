@@ -1,7 +1,7 @@
 name: Live checks
 
 # Manual. Runs the published image against the real sites to prove each way of getting an app
-# works from a GitHub runner: APKPure (with signer pins), FlareSolverr, and that every app the
+# works from a GitHub runner: FlareSolverr, and that every app the
 # patches support can be found on APKMirror.
 on:
   workflow_dispatch:
@@ -10,25 +10,6 @@ env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/morphe-tv-patcher:latest
 
 jobs:
-  apkpure:
-    name: APKPure only, whole pipeline
-    runs-on: ubuntu-latest
-    steps:
-      - name: Prepare data with the publisher signers recorded from APKMirror
-        run: |
-          mkdir -p data/state
-          cat > data/state/settings.json <<'JSON'
-          {"devices": [], "overrides": {
-            "com.amazon.amazonvideo.livingroom": {"signer_sha256": "2f19adeb284eb36f7f07786152b9a1d14b21653203ad0b04ebbf9c73ab6d7625"},
-            "com.disney.disneyplus": {"signer_sha256": "b4d251e979ea974d8f070feb5ab69fc4c2873f4e8add421ff63ad5f2789d63d4"}}}
-          JSON
-          sudo chown -R 65532:65532 data
-      - name: Fetch, verify and patch with APKMirror switched off
-        run: |
-          docker run --rm -v "$PWD/data:/data" \
-            -e APKMIRROR_DIRECT_DISABLED=true -e APKPURE_ACKNOWLEDGE_DANGERS=true \
-            "$IMAGE" once --no-device --app com.amazon.amazonvideo.livingroom,com.disney.disneyplus
-
   flaresolverr:
     name: APKMirror through FlareSolverr
     runs-on: ubuntu-latest

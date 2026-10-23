@@ -22,7 +22,6 @@ type Config struct {
 	Interval     time.Duration
 
 	FlareSolverrURL     string
-	APKPureOK           bool // APKPURE_ACKNOWLEDGE_DANGERS=true
 	DirectOK            bool // false with APKMIRROR_DIRECT_DISABLED=true (tests the other routes)
 	FailuresBeforeAlert int
 	// MirrorGap is the minimum time between APKMirror requests; MirrorCooldown is the first pause
@@ -83,7 +82,6 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		Prerelease:                flag("PATCHES_PRERELEASE"),
 		BytecodeMode:              def("BYTECODE_MODE", "STRIP_SAFE"),
 		FlareSolverrURL:           strings.TrimRight(def("FLARESOLVERR_URL", ""), "/"),
-		APKPureOK:                 flag("APKPURE_ACKNOWLEDGE_DANGERS"),
 		DirectOK:                  !flag("APKMIRROR_DIRECT_DISABLED"),
 		WebBind:                   def("WEB_BIND", "0.0.0.0"),
 		AllowedHostSuffixes:       splitList(def("ALLOWED_HOST_SUFFIXES", "")),

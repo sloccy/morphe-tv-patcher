@@ -95,7 +95,7 @@ type Facts struct {
 
 var abiSplit = regexp.MustCompile(`(?:^|/)(?:split_)?config\.(armeabi_v7a|arm64_v8a|x86_64|x86)\.apk$`)
 
-// PickBase chooses the main APK inside a bundle. APKMirror names it base.apk; APKPure XAPKs
+// PickBase chooses the main APK inside a bundle. APKMirror names it base.apk; other XAPK layouts
 // name it <package>.apk and call the splits config.*.apk (so the largest file is a split).
 func PickBase(zr *zip.Reader) (*zip.File, error) {
 	var tops []*zip.File

@@ -1,5 +1,5 @@
 // Package sources finds a verified app bundle: a file you dropped in, the cache, APKMirror
-// (direct, then through FlareSolverr), then APKPure. The first file that passes every check
+// (direct, then through FlareSolverr). The first file that passes every check
 // wins. Nothing is ever downgraded: if the newest supported version cannot be found, that is
 // reported instead of falling back to an older one.
 package sources
@@ -15,7 +15,6 @@ import (
 	"strings"
 
 	"github.com/sloccy/morphe-tv-patcher/internal/apkmirror"
-	"github.com/sloccy/morphe-tv-patcher/internal/apkpure"
 	"github.com/sloccy/morphe-tv-patcher/internal/store"
 	"github.com/sloccy/morphe-tv-patcher/internal/verify"
 )
@@ -25,7 +24,7 @@ type App struct {
 	Package      string
 	Name         string
 	Version      string
-	Sources      []string // order of "apkmirror", "apkpure"; default both
+	Sources      []string // "apkmirror" is the only network source; empty means the default
 	SignerPin    string   // from a settings override; otherwise the recorded signer is used
 	SlugOverride string
 	ABIs         []string // the device's ABIs in order of preference; nil = the 32-bit default
@@ -41,29 +40,24 @@ type Env struct {
 	Gate      *apkmirror.Gate // paces direct APKMirror requests (nil = unpaced, for tests)
 	FlareGate *apkmirror.Gate // paces requests made through FlareSolverr
 	DirectOK  bool            // APKMirror direct requests allowed
-	APKPureOK bool            // the user acknowledged apkeep's APKPure warning
 
-	Mirror        func(context.Context, apkmirror.AppRequest, apkmirror.Options) (apkmirror.Result, string, error)
-	Pure          func(ctx context.Context, pkg, version, destDir string) (string, error)
-	PureAvailable func() bool
-	Verify        func(ctx context.Context, path string, w verify.Want) (*verify.Verified, error)
+	Mirror func(context.Context, apkmirror.AppRequest, apkmirror.Options) (apkmirror.Result, string, error)
+	Verify func(ctx context.Context, path string, w verify.Want) (*verify.Verified, error)
 }
 
 // DefaultEnv wires the real implementations.
 func DefaultEnv() Env {
 	return Env{
-		DirectOK:      true,
-		Mirror:        apkmirror.Download,
-		Pure:          apkpure.Download,
-		PureAvailable: apkpure.Available,
-		Verify:        verify.Verify,
+		DirectOK: true,
+		Mirror:   apkmirror.Download,
+		Verify:   verify.Verify,
 	}
 }
 
 // Fetched is a verified bundle.
 type Fetched struct {
 	*verify.Verified
-	Detail        string   // "dropfolder", "cache", "apkmirror (chrome)", "apkpure", ...
+	Detail        string   // "dropfolder", "cache", "apkmirror (chrome)", ...
 	LearnedSigner bool     // first time we recorded this app's signer
 	Available     []string // CPU builds this version is known to offer (from the release page or the file)
 }
@@ -193,7 +187,7 @@ func Fetch(ctx context.Context, e *Env, a App, sdk int) (*Fetched, error) {
 	}
 	srcs := a.Sources
 	if len(srcs) == 0 {
-		srcs = []string{"apkmirror", "apkpure"}
+		srcs = []string{"apkmirror"}
 	}
 	app := e.Store.App(a.Package)
 	slug := a.SlugOverride
@@ -204,48 +198,34 @@ func Fetch(ctx context.Context, e *Env, a App, sdk int) (*Fetched, error) {
 		Hint: apkmirror.Hints[a.Package], ReleaseURL: e.Store.ReleaseURL(a.Package, a.Version), SDK: sdk, DestDir: e.CacheDir,
 		ABIs: a.ABIs, AllowPhone: a.AllowPhone}
 	for _, src := range srcs {
-		switch src {
-		case "apkmirror":
-			run := func(label string, o apkmirror.Options) *Fetched {
-				return download(label, verify.SourceAPKMirror, func() (string, string, error) {
-					res, used, err := e.Mirror(ctx, req, o)
-					if err != nil {
-						return "", "", err
-					}
-					if len(res.Available) > 0 {
-						seenAvail = res.Available
-					}
-					_ = e.Store.UpdateApp(a.Package, func(s *store.AppState) { s.Slug = res.Slug })
-					_ = e.Store.SetReleaseURL(a.Package, a.Version, res.ReleaseURL)
-					if o.FlareURL == "" {
-						_ = e.Store.SetLastProfile(used)
-					}
-					return res.Path, "apkmirror (" + used + ")", nil
-				})
-			}
-			if e.DirectOK {
-				if f := run("apkmirror", apkmirror.Options{ProfileHint: e.Store.LastProfile(), Gate: e.Gate, Priority: apkmirror.Foreground}); f != nil {
-					return withBest(f)
+		if src != "apkmirror" {
+			continue
+		}
+		run := func(label string, o apkmirror.Options) *Fetched {
+			return download(label, verify.SourceAPKMirror, func() (string, string, error) {
+				res, used, err := e.Mirror(ctx, req, o)
+				if err != nil {
+					return "", "", err
 				}
-			}
-			if e.FlareURL != "" {
-				if f := run("apkmirror via flaresolverr", apkmirror.Options{FlareURL: e.FlareURL, Gate: e.FlareGate, Priority: apkmirror.Foreground}); f != nil {
-					return withBest(f)
+				if len(res.Available) > 0 {
+					seenAvail = res.Available
 				}
-			}
-		case "apkpure":
-			switch {
-			case !e.APKPureOK:
-				attempts = append(attempts, "apkpure: off (set APKPURE_ACKNOWLEDGE_DANGERS=true to allow it)")
-			case !e.PureAvailable():
-				attempts = append(attempts, "apkpure: apkeep not installed")
-			default:
-				if f := download("apkpure", "apkpure", func() (string, string, error) {
-					p, err := e.Pure(ctx, a.Package, a.Version, e.CacheDir)
-					return p, "apkpure", err
-				}); f != nil {
-					return withBest(f)
+				_ = e.Store.UpdateApp(a.Package, func(s *store.AppState) { s.Slug = res.Slug })
+				_ = e.Store.SetReleaseURL(a.Package, a.Version, res.ReleaseURL)
+				if o.FlareURL == "" {
+					_ = e.Store.SetLastProfile(used)
 				}
+				return res.Path, "apkmirror (" + used + ")", nil
+			})
+		}
+		if e.DirectOK {
+			if f := run("apkmirror", apkmirror.Options{ProfileHint: e.Store.LastProfile(), Gate: e.Gate, Priority: apkmirror.Foreground}); f != nil {
+				return withBest(f)
+			}
+		}
+		if e.FlareURL != "" {
+			if f := run("apkmirror via flaresolverr", apkmirror.Options{FlareURL: e.FlareURL, Gate: e.FlareGate, Priority: apkmirror.Foreground}); f != nil {
+				return withBest(f)
 			}
 		}
 	}
