@@ -5,7 +5,9 @@ package web
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +20,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sloccy/morphe-tv-patcher/internal/abi"
@@ -38,6 +41,8 @@ type Backend interface {
 	Compat(ctx context.Context, st store.Settings, deviceIDs []string) ([]runner.Problem, []string)
 	CheckRepo(ctx context.Context, repo string, prerelease bool) error
 	RefreshLists(ctx context.Context)
+	Warnings() []runner.Problem // apps saved devices are known not to be able to run (no network)
+	Learning() runner.Learning  // CPU checks still running in the background
 }
 
 // Server serves the API and the page.
@@ -50,6 +55,8 @@ type Server struct {
 	// AllowedOwners restricts patch sources added from the page to these GitHub owners
 	// (lower case). Empty means any repository.
 	AllowedOwners []string
+
+	saving sync.Mutex // one change to apps or sets is checked at a time
 }
 
 const maxBody = 64 << 10
@@ -63,10 +70,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/log", s.log)
 	mux.HandleFunc("POST /api/devices", s.addDevice)
 	mux.HandleFunc("DELETE /api/devices/{id}", s.removeDevice)
-	mux.HandleFunc("PUT /api/devices/{id}/apps", s.setApps)
-	mux.HandleFunc("PUT /api/devices/{id}/sets", s.setDeviceSets)
-	mux.HandleFunc("POST /api/sets", s.addSet)
-	mux.HandleFunc("PUT /api/sets/{id}", s.updateSet)
+	mux.HandleFunc("PUT /api/devices/{id}/apps", s.exclusive(s.setApps))
+	mux.HandleFunc("PUT /api/devices/{id}/sets", s.exclusive(s.setDeviceSets))
+	mux.HandleFunc("POST /api/sets", s.exclusive(s.addSet))
+	mux.HandleFunc("PUT /api/sets/{id}", s.exclusive(s.updateSet))
 	mux.HandleFunc("DELETE /api/sets/{id}", s.removeSet)
 	mux.HandleFunc("POST /api/sources", s.addSource)
 	mux.HandleFunc("DELETE /api/sources/{id}", s.removeSource)
@@ -124,9 +131,23 @@ func (s *Server) hostOK(host string) bool {
 	return false
 }
 
+// exclusive lets one app/set change at a time be checked and saved; a second one that arrives
+// while it runs is told so at once instead of starting more work.
+func (s *Server) exclusive(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.saving.TryLock() {
+			fail(w, http.StatusConflict, "another change is still being checked; wait a moment and try again")
+			return
+		}
+		defer s.saving.Unlock()
+		h(w, r)
+	}
+}
+
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	b, _ := ui.ReadFile("ui/index.html")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
 	_, _ = w.Write(b)
 }
 
@@ -271,7 +292,27 @@ func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 		setRows = append(setRows, row)
 	}
 	out["sets"] = setRows
-	writeJSON(w, http.StatusOK, out)
+	out["learning"] = s.Backend.Learning()
+	warnings := s.Backend.Warnings()
+	if warnings == nil {
+		warnings = []runner.Problem{}
+	}
+	out["warnings"] = warnings
+	body, err := json.Marshal(out)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	sum := sha256.Sum256(body)
+	etag := `"` + hex.EncodeToString(sum[:8]) + `"`
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Cache-Control", "no-cache")
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(body)
 }
 
 func (s *Server) log(w http.ResponseWriter, r *http.Request) {

@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/html"
@@ -42,6 +43,9 @@ func (c *Client) base() string {
 }
 
 func (c *Client) pause(ctx context.Context, lo, hi time.Duration) {
+	if _, gated := c.F.(*Gated); gated {
+		return // the Gate already spaces requests
+	}
 	if c.Sleep != nil {
 		c.Sleep(ctx, lo, hi)
 		return
@@ -65,6 +69,7 @@ type AppRequest struct {
 	Version    string
 	KnownSlug  string // cached or overridden publisher/app path, tried first
 	Hint       string // built-in guess, tried next
+	ReleaseURL string // release page found for this exact version before; loaded directly
 	SDK        int    // device API level; 0 = unknown
 	DestDir    string
 	ABIs       []string // the device's ABIs in order of preference; nil = the 32-bit default
@@ -76,6 +81,8 @@ type AppRequest struct {
 type Result struct {
 	Path string
 	Slug string
+	// ReleaseURL is the release page of this version, worth remembering to skip the search.
+	ReleaseURL string
 	// Available lists the CPU builds the release offers (ABI names; "*" for a universal build).
 	// Empty when the release page does not say (single-variant releases).
 	Available []string
@@ -83,8 +90,10 @@ type Result struct {
 
 // NoBuildError is ErrNoBuild plus what the release does offer.
 type NoBuildError struct {
-	Available []string
-	Err       error
+	Available  []string
+	Slug       string // the app page that has the release
+	ReleaseURL string
+	Err        error
 }
 
 func (e *NoBuildError) Error() string { return e.Err.Error() }
@@ -298,13 +307,22 @@ func fileLink(p *Page) (string, error) {
 }
 
 // fetchSlug runs the whole chain for one candidate app page.
-func (c *Client) fetchSlug(ctx context.Context, req AppRequest, slug string) (path string, available []string, err error) {
-	rel, rp, err := c.FindRelease(ctx, slug, req.Version)
-	if err != nil {
-		return "", nil, err
+func (c *Client) fetchSlug(ctx context.Context, req AppRequest, slug string) (path, rel string, available []string, err error) {
+	var rp *Page
+	if req.ReleaseURL != "" && slug == req.KnownSlug {
+		if rp, err = c.F.Page(ctx, req.ReleaseURL, c.base()+"/"); err == nil {
+			rel = req.ReleaseURL
+		} else if !errors.Is(err, ErrNotFound) {
+			return "", "", nil, err
+		}
+	}
+	if rp == nil {
+		if rel, rp, err = c.FindRelease(ctx, slug, req.Version); err != nil {
+			return "", "", nil, err
+		}
 	}
 	if !strings.Contains(rp.Raw, req.Package) {
-		return "", nil, fmt.Errorf("%w: %s is a different app (page never mentions %s)", ErrNotFound, slug, req.Package)
+		return "", rel, nil, fmt.Errorf("%w: %s is a different app (page never mentions %s)", ErrNotFound, slug, req.Package)
 	}
 	available = AvailableABIs(rp)
 	slog.Info("apkmirror release page", "url", rel)
@@ -319,45 +337,45 @@ func (c *Client) fetchSlug(ctx context.Context, req AppRequest, slug string) (pa
 		variant = c.base() + vhref
 		vp, err := c.F.Page(ctx, variant, rel)
 		if err != nil {
-			return "", available, err
+			return "", rel, available, err
 		}
 		if btn, err = downloadButton(vp); err != nil {
-			return "", available, err
+			return "", rel, available, err
 		}
 	case errors.Is(err, ErrNotFound) && !hasVariantTable(rp):
 		// a release with a single variant has no table: the download button is on this page
 		if btn, err = downloadButton(rp); err != nil || !strings.Contains(btn, "/download/") {
-			return "", nil, fmt.Errorf("%w: no variants and no download button on the release page", ErrNotFound)
+			return "", rel, nil, fmt.Errorf("%w: no variants and no download button on the release page", ErrNotFound)
 		}
 	case errors.Is(err, ErrNoBuild):
-		return "", available, &NoBuildError{Available: available, Err: err}
+		return "", rel, available, &NoBuildError{Available: available, Err: err}
 	default:
-		return "", available, err
+		return "", rel, available, err
 	}
 	if req.DryRun {
-		return rel, available, nil
+		return rel, rel, available, nil
 	}
 	c.pause(ctx, 2*time.Second, 6*time.Second)
 	dlURL := c.base() + btn
 	dp, err := c.F.Page(ctx, dlURL, variant)
 	if err != nil {
-		return "", available, err
+		return "", rel, available, err
 	}
 	fl, err := fileLink(dp)
 	if err != nil {
-		return "", available, err
+		return "", rel, available, err
 	}
 	c.pause(ctx, 2*time.Second, 4*time.Second)
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(variantKey))
 	dest := filepath.Join(req.DestDir, fmt.Sprintf("%s-%s-%08x.apkm", slugFile(slug), patches.Slug(req.Version), h.Sum32()))
 	if have := existing(dest); have != "" {
-		return have, available, nil // the same release and variant is already cached
+		return have, rel, available, nil // the same release and variant is already cached
 	}
 	if err := c.F.File(ctx, c.base()+fl, dlURL, dest); err != nil {
-		return "", available, err
+		return "", rel, available, err
 	}
-	return fixExtension(dest), available, nil
+	return fixExtension(dest), rel, available, nil
 }
 
 // existing returns dest (or its plain-APK twin) if it is already on disk.
@@ -401,8 +419,13 @@ func slugFile(slug string) string { return strings.ReplaceAll(slug, "/", "_") }
 // ErrBlocked is returned as soon as it happens so the caller can rotate or back off.
 func (c *Client) Fetch(ctx context.Context, req AppRequest) (Result, error) {
 	c.pause(ctx, time.Second, 3*time.Second)
-	if _, err := c.F.Page(ctx, c.base()+"/", ""); err != nil { // warm-up: cookies before deep pages
-		return Result{}, err
+	if g, ok := c.F.(*Gated); !ok || g.needsWarmup() { // warm-up: cookies before deep pages
+		if _, err := c.F.Page(ctx, c.base()+"/", ""); err != nil {
+			return Result{}, err
+		}
+		if ok {
+			g.warmed()
+		}
 	}
 	tried := map[string]bool{}
 	var lastNotFound error
@@ -412,10 +435,13 @@ func (c *Client) Fetch(ctx context.Context, req AppRequest) (Result, error) {
 		}
 		tried[slug] = true
 		c.pause(ctx, 2*time.Second, 6*time.Second)
-		path, avail, err := c.fetchSlug(ctx, req, slug)
+		path, rel, avail, err := c.fetchSlug(ctx, req, slug)
+		if nb, ok := errors.AsType[*NoBuildError](err); ok {
+			nb.Slug, nb.ReleaseURL = slug, rel
+		}
 		switch {
 		case err == nil:
-			return Result{Path: path, Slug: slug, Available: avail}, true, nil
+			return Result{Path: path, Slug: slug, ReleaseURL: rel, Available: avail}, true, nil
 		case errors.Is(err, ErrNotFound):
 			slog.Info("apkmirror candidate rejected", "slug", slug, "err", err)
 			lastNotFound = err
@@ -526,12 +552,55 @@ type Options struct {
 	Backoff     []time.Duration // waits between blocked attempts (default 30s, 90s)
 	Base        string
 	Sleep       func(ctx context.Context, lo, hi time.Duration)
+	// Gate, when set, carries every request: one at a time, spaced, with a shared cool-down.
+	// With a Gate, a block is not retried on another profile (the cool-down applies to all).
+	Gate     *Gate
+	Priority Priority
+}
+
+var (
+	sessMu   sync.Mutex
+	sessions = map[string]*Gated{}
+)
+
+// session returns the long-lived gated fetcher for a route, so cookies and the warm-up are reused.
+func session(o Options, key string, mk func() Fetcher) *Gated {
+	sessMu.Lock()
+	defer sessMu.Unlock()
+	k := fmt.Sprintf("%p|%s|%s|%d", o.Gate, key, o.Base, o.Priority)
+	if g, ok := sessions[k]; ok {
+		return g
+	}
+	g := &Gated{F: mk(), G: o.Gate, Prio: o.Priority}
+	sessions[k] = g
+	return g
 }
 
 // Download gets the bundle. Direct mode rotates through browser profiles when blocked; with
 // FlareURL set it makes one attempt through the sidecar. It returns what worked ("chrome",
 // "flaresolverr", ...) for the caller to remember.
 func Download(ctx context.Context, req AppRequest, o Options) (Result, string, error) {
+	if o.Gate != nil {
+		name := o.ProfileHint
+		if o.FlareURL != "" {
+			name = "flaresolverr"
+		}
+		var g *Gated
+		if o.FlareURL != "" {
+			g = session(o, "flare|"+o.FlareURL, func() Fetcher { return NewFlare(o.FlareURL) })
+		} else {
+			p := Profiles[0]
+			for _, q := range Profiles {
+				if q.Name == o.ProfileHint {
+					p = q
+				}
+			}
+			name = p.Name
+			g = session(o, "direct|"+p.Name, func() Fetcher { return NewDirect(p) })
+		}
+		r, err := (&Client{F: g, Base: o.Base, Sleep: o.Sleep}).Fetch(ctx, req)
+		return r, name, err
+	}
 	if o.FlareURL != "" {
 		c := &Client{F: NewFlare(o.FlareURL), Base: o.Base, Sleep: o.Sleep}
 		r, err := c.Fetch(ctx, req)
@@ -571,14 +640,15 @@ func Download(ctx context.Context, req AppRequest, o Options) (Result, string, e
 
 // Probe finds out which CPU builds an app version offers without downloading anything. It
 // returns what the release lists, or nothing when APKMirror does not say (or cannot be reached).
-func Probe(ctx context.Context, req AppRequest, o Options) ([]string, error) {
+func Probe(ctx context.Context, req AppRequest, o Options) (Result, error) {
 	req.DryRun = true
 	res, _, err := Download(ctx, req, o)
 	if err == nil {
-		return res.Available, nil
+		return res, nil
 	}
 	if nb, ok := errors.AsType[*NoBuildError](err); ok {
-		return nb.Available, nil // the release exists; it just has no build for the default CPU
+		// the release exists; it just has no build for the default CPU
+		return Result{Slug: nb.Slug, ReleaseURL: nb.ReleaseURL, Available: nb.Available}, nil
 	}
-	return nil, err
+	return Result{}, err
 }

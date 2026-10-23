@@ -109,9 +109,11 @@ In order, the first file that passes every check wins:
 
 1. your drop folder `/data/work/input/<package>/` (any `.apkm`, `.xapk`, `.apk`);
 2. the cache;
-3. APKMirror, directly, rotating browser profiles with backoff when rate limited;
+3. APKMirror, directly. Every APKMirror request (from runs and from background CPU checks) goes through one shared gate: one request at a time, a few seconds apart, and a shared pause (5 minutes, doubling up to an hour) as soon as the site says "slow down";
 4. APKMirror through a FlareSolverr sidecar (`FLARESOLVERR_URL`);
 5. APKPure through `apkeep`, only if you set `APKPURE_ACKNOWLEDGE_DANGERS=true`.
+
+Which CPU builds an app offers is learned in the background, one app at a time, only for apps you selected. Saving waits a few seconds for it; anything still unknown is saved anyway and shows up as a warning on the TV if it turns out the TV cannot run it. The page says "Checking which CPUs…" while this runs.
 
 The APKMirror page for an app is found automatically (search by package name, an Android TV page
 first) and cached; `settings.json` can override a wrong guess. Nothing is downgraded: if the newest
@@ -134,6 +136,8 @@ wrong signature or a phone build alerts at once; a message follows when it recov
 | `WEB_PORT` / `WEB_BIND` | `8093` / `0.0.0.0` | |
 | `ALLOWED_HOST_SUFFIXES` | | extra `Host` names the page answers to |
 | `FLARESOLVERR_URL` | | e.g. `http://127.0.0.1:8191` |
+| `APKMIRROR_MIN_INTERVAL` | `4s` | minimum gap between APKMirror requests |
+| `APKMIRROR_COOLDOWN` | `5m` | first pause after APKMirror pushes back (doubles, up to 1h) |
 | `APKPURE_ACKNOWLEDGE_DANGERS` | `false` | allow APKPure (signer-checked) |
 | `PATCHES_REPO` / `PATCHES_PRERELEASE` | `ajstrick81/morphe-androidtv-patches` / `false` | seeds the patch sources on the first run only |
 | `PATCH_SOURCES_ALLOWED_OWNERS` | | limit repositories added from the page to these GitHub owners |

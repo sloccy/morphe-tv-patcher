@@ -25,6 +25,10 @@ type Config struct {
 	APKPureOK           bool // APKPURE_ACKNOWLEDGE_DANGERS=true
 	DirectOK            bool // false with APKMIRROR_DIRECT_DISABLED=true (tests the other routes)
 	FailuresBeforeAlert int
+	// MirrorGap is the minimum time between APKMirror requests; MirrorCooldown is the first pause
+	// after it pushes back (doubling while it keeps doing so).
+	MirrorGap      time.Duration
+	MirrorCooldown time.Duration
 
 	WebBind string
 	WebPort int
@@ -91,6 +95,12 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	var err error
 	if c.Interval, err = time.ParseDuration(def("INTERVAL", "6h")); err != nil || c.Interval < time.Minute {
 		return c, fmt.Errorf("INTERVAL must be a duration of at least 1m (e.g. 6h): %q", getenv("INTERVAL"))
+	}
+	if c.MirrorGap, err = time.ParseDuration(def("APKMIRROR_MIN_INTERVAL", "4s")); err != nil || c.MirrorGap < 0 {
+		return c, fmt.Errorf("APKMIRROR_MIN_INTERVAL must be a duration (e.g. 4s): %q", getenv("APKMIRROR_MIN_INTERVAL"))
+	}
+	if c.MirrorCooldown, err = time.ParseDuration(def("APKMIRROR_COOLDOWN", "5m")); err != nil || c.MirrorCooldown < time.Second {
+		return c, fmt.Errorf("APKMIRROR_COOLDOWN must be a duration of at least 1s (e.g. 5m): %q", getenv("APKMIRROR_COOLDOWN"))
 	}
 	if c.WebPort, err = strconv.Atoi(def("WEB_PORT", "8093")); err != nil || c.WebPort < 1 || c.WebPort > 65535 {
 		return c, fmt.Errorf("WEB_PORT must be a port number: %q", getenv("WEB_PORT"))

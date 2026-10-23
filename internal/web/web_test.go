@@ -34,7 +34,14 @@ type fakeBackend struct {
 	checkErr  error
 	checked   []string
 	refreshed atomic.Int32 // written by the background refresh, read by the test
+	warnings  []runner.Problem
+	learning  runner.Learning
+	hold      chan struct{} // when set, Compat blocks until it is closed
+	compatN   atomic.Int32
 }
+
+func (f *fakeBackend) Warnings() []runner.Problem { return f.warnings }
+func (f *fakeBackend) Learning() runner.Learning  { return f.learning }
 
 func (f *fakeBackend) Status() runner.Status { return f.status }
 func (f *fakeBackend) Trigger(o runner.Options) bool {
@@ -55,6 +62,10 @@ func (f *fakeBackend) PairDevice(ctx context.Context, d store.Device, port int, 
 	return f.cpuKnown, f.pairErr
 }
 func (f *fakeBackend) Compat(ctx context.Context, st store.Settings, ids []string) (problems []runner.Problem, unchecked []string) {
+	f.compatN.Add(1)
+	if f.hold != nil {
+		<-f.hold
+	}
 	if f.compatSaw == nil {
 		f.compatSaw = map[string][]string{}
 	}
@@ -707,5 +718,56 @@ func TestPairMessageMentionsTheCPUWhenRead(t *testing.T) {
 	fb.cpuKnown = false
 	if _, b := do(t, srv, "POST", "/api/devices/tv/pair", `{"pair_port":38000,"code":"123456"}`, nil); !strings.Contains(b, "could not be read") {
 		t.Errorf("%s", b)
+	}
+}
+
+func TestStateCarriesLearningAndWarningsAndAnETag(t *testing.T) {
+	srv, _, fb := setup(t)
+	fb.learning = runner.Learning{Pending: []string{"Netflix"}}
+	fb.warnings = []runner.Problem{{Device: "TV", Package: "com.netflix.ninja", Name: "Netflix", Reason: "x"}}
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/api/state", http.NoBody)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	etag := resp.Header.Get("ETag")
+	if etag == "" || !strings.Contains(string(b), `"pending":["Netflix"]`) || !strings.Contains(string(b), `"warnings":[{`) {
+		t.Fatalf("%q %s", etag, b)
+	}
+	if code, _ := do(t, srv, "GET", "/api/state", "", map[string]string{"If-None-Match": etag}); code != http.StatusNotModified {
+		t.Errorf("unchanged state should be 304, got %d", code)
+	}
+	fb.learning = runner.Learning{}
+	if code, _ := do(t, srv, "GET", "/api/state", "", map[string]string{"If-None-Match": etag}); code != 200 {
+		t.Errorf("changed state must be sent again, got %d", code)
+	}
+	if code, _ := do(t, srv, "GET", "/", "", nil); code != 200 {
+		t.Fatal(code)
+	}
+}
+
+func TestOverlappingSavesDoNotStartMoreWork(t *testing.T) {
+	srv, s, fb := setup(t)
+	_, _ = s.Store.AddDevice("TV", "10.0.0.6")
+	fb.hold = make(chan struct{})
+	body := `{"apps":["com.netflix.ninja"]}`
+	first := make(chan int, 1)
+	go func() { code, _ := do(t, srv, "PUT", "/api/devices/tv/apps", body, nil); first <- code }()
+	for fb.compatN.Load() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	for range 5 {
+		if code, b := do(t, srv, "PUT", "/api/devices/tv/apps", body, nil); code != http.StatusConflict || !strings.Contains(b, "still being checked") {
+			t.Errorf("%d %s", code, b)
+		}
+	}
+	close(fb.hold)
+	if code := <-first; code != 200 {
+		t.Errorf("the first save should finish normally: %d", code)
+	}
+	if fb.compatN.Load() != 1 {
+		t.Errorf("only one check ran, got %d", fb.compatN.Load())
 	}
 }

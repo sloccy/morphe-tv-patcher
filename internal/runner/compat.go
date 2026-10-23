@@ -3,7 +3,6 @@ package runner
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -20,17 +19,41 @@ type Problem struct {
 	Reason  string `json:"reason"`
 }
 
-// probeBudget bounds how long a save may spend asking APKMirror what CPU builds apps offer.
-const probeBudget = 25 * time.Second
+// learnWait bounds how long a save waits for the CPU checks it queued. Lookups run one at a
+// time through APKMirror's gate, so a couple of apps usually finish; the rest carry on in the
+// background and show up as warnings if they turn out to be a problem.
+const learnWait = 12 * time.Second
 
 // Compat checks what each of the given devices would receive (from the settings snapshot, which
 // may be a preview of an unsaved change) against what is known about its CPU and about the CPU
-// builds each app offers. problems are known mismatches. unchecked lists what could not be
-// judged (a device never reached, or an app whose builds could not be learned); those do not
-// block anything, a mismatch then shows up as the usual "no build for this CPU" on a run.
+// builds each app offers. Missing facts are queued for a background lookup, and Compat waits a
+// few seconds for them. problems are known mismatches. unchecked lists what could not be judged
+// (a device never reached, or an app whose builds are still being looked up); those do not block
+// anything, and a mismatch found later shows up as a warning.
 func (r *Runner) Compat(ctx context.Context, st store.Settings, deviceIDs []string) (problems []Problem, unchecked []string) {
-	ctx, cancel := context.WithTimeout(ctx, probeBudget)
-	defer cancel()
+	var waits []<-chan struct{}
+	for _, j := range r.needs(st, deviceIDs) {
+		waits = append(waits, r.want(ctx, j.src, j.pkg, j.name, j.version))
+	}
+	if len(waits) > 0 {
+		timer := time.NewTimer(learnWait)
+		defer timer.Stop()
+	wait:
+		for _, w := range waits {
+			select {
+			case <-w:
+			case <-timer.C:
+				break wait
+			case <-ctx.Done():
+				break wait
+			}
+		}
+	}
+	return r.judge(st, deviceIDs)
+}
+
+// judge compares devices with what is already known. It never touches the network.
+func (r *Runner) judge(st store.Settings, deviceIDs []string) (problems []Problem, unchecked []string) {
 	lists := r.Lists()
 	seenUnchecked := map[string]bool{}
 	note := func(msg string) {
@@ -39,7 +62,6 @@ func (r *Runner) Compat(ctx context.Context, st store.Settings, deviceIDs []stri
 			unchecked = append(unchecked, msg)
 		}
 	}
-	probed := map[string]bool{} // "pkg@version" already probed during this check
 	for _, id := range deviceIDs {
 		var dev store.Device
 		for _, d := range st.Devices {
@@ -65,23 +87,12 @@ func (r *Runner) Compat(ctx context.Context, st store.Settings, deviceIDs []stri
 				continue
 			}
 			builds, known := r.Store.Builds(e.Package, app.Newest)
-			key := e.Package + "@" + app.Newest
-			if !known && r.Deps.Probe != nil && !probed[key] {
-				probed[key] = true
-				src, _ := r.Store.Source(e.Source)
-				avail, err := r.Deps.Probe(ctx, src, e.Package, app.Name, app.Newest)
-				if err != nil {
-					slog.Info("could not learn which CPU builds an app offers", "package", e.Package, "err", err)
-				}
-				if len(avail) > 0 {
-					_ = r.Store.SetBuilds(e.Package, app.Newest, avail)
-					builds, known = avail, true
-				}
-			} else if !known && probed[key] {
-				builds, known = r.Store.Builds(e.Package, app.Newest)
-			}
 			if !known {
-				note(fmt.Sprintf("could not check which CPUs %s has builds for", app.Name))
+				if r.checking(e.Package, app.Newest) {
+					note(fmt.Sprintf("still checking which CPUs %s has builds for", app.Name))
+				} else {
+					note(fmt.Sprintf("could not check which CPUs %s has builds for", app.Name))
+				}
 				continue
 			}
 			if !runnable(builds, info.ABIs) {

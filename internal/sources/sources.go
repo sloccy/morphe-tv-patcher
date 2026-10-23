@@ -38,8 +38,10 @@ type Env struct {
 	CacheDir  string
 	Store     *store.Store
 	FlareURL  string
-	DirectOK  bool // APKMirror direct requests allowed
-	APKPureOK bool // the user acknowledged apkeep's APKPure warning
+	Gate      *apkmirror.Gate // paces direct APKMirror requests (nil = unpaced, for tests)
+	FlareGate *apkmirror.Gate // paces requests made through FlareSolverr
+	DirectOK  bool            // APKMirror direct requests allowed
+	APKPureOK bool            // the user acknowledged apkeep's APKPure warning
 
 	Mirror        func(context.Context, apkmirror.AppRequest, apkmirror.Options) (apkmirror.Result, string, error)
 	Pure          func(ctx context.Context, pkg, version, destDir string) (string, error)
@@ -199,7 +201,8 @@ func Fetch(ctx context.Context, e *Env, a App, sdk int) (*Fetched, error) {
 		slug = app.Slug
 	}
 	req := apkmirror.AppRequest{Package: a.Package, Name: a.Name, Version: a.Version, KnownSlug: slug,
-		Hint: apkmirror.Hints[a.Package], SDK: sdk, DestDir: e.CacheDir, ABIs: a.ABIs, AllowPhone: a.AllowPhone}
+		Hint: apkmirror.Hints[a.Package], ReleaseURL: e.Store.ReleaseURL(a.Package, a.Version), SDK: sdk, DestDir: e.CacheDir,
+		ABIs: a.ABIs, AllowPhone: a.AllowPhone}
 	for _, src := range srcs {
 		switch src {
 		case "apkmirror":
@@ -213,6 +216,7 @@ func Fetch(ctx context.Context, e *Env, a App, sdk int) (*Fetched, error) {
 						seenAvail = res.Available
 					}
 					_ = e.Store.UpdateApp(a.Package, func(s *store.AppState) { s.Slug = res.Slug })
+					_ = e.Store.SetReleaseURL(a.Package, a.Version, res.ReleaseURL)
 					if o.FlareURL == "" {
 						_ = e.Store.SetLastProfile(used)
 					}
@@ -220,12 +224,12 @@ func Fetch(ctx context.Context, e *Env, a App, sdk int) (*Fetched, error) {
 				})
 			}
 			if e.DirectOK {
-				if f := run("apkmirror", apkmirror.Options{ProfileHint: e.Store.LastProfile()}); f != nil {
+				if f := run("apkmirror", apkmirror.Options{ProfileHint: e.Store.LastProfile(), Gate: e.Gate, Priority: apkmirror.Foreground}); f != nil {
 					return withBest(f)
 				}
 			}
 			if e.FlareURL != "" {
-				if f := run("apkmirror via flaresolverr", apkmirror.Options{FlareURL: e.FlareURL}); f != nil {
+				if f := run("apkmirror via flaresolverr", apkmirror.Options{FlareURL: e.FlareURL, Gate: e.FlareGate, Priority: apkmirror.Foreground}); f != nil {
 					return withBest(f)
 				}
 			}

@@ -48,10 +48,12 @@ type Deps struct {
 	// reached (or is gone) so existing setups keep working.
 	Cached func(src store.Source) (*patches.Release, string, bool)
 	// Probe asks which CPU builds an app version offers without downloading it.
-	Probe     func(ctx context.Context, src store.Source, pkg, name, version string) ([]string, error)
-	Fetch     func(ctx context.Context, a sources.App, sdk int) (*sources.Fetched, error)
-	Patch     func(ctx context.Context, o morphe.Options) error
-	PackageOf func(path string) (string, error)
+	Probe func(ctx context.Context, src store.Source, pkg, name, version string) ([]string, error)
+	// PausedUntil says when APKMirror lookups resume after it asked us to slow down (zero = not paused).
+	PausedUntil func() time.Time
+	Fetch       func(ctx context.Context, a sources.App, sdk int) (*sources.Fetched, error)
+	Patch       func(ctx context.Context, o morphe.Options) error
+	PackageOf   func(path string) (string, error)
 }
 
 // Options select what a run does.
@@ -110,6 +112,7 @@ type Runner struct {
 	lists     map[string]*patches.List // patch source id -> the apps its latest bundle supports
 	listCache map[string]*patches.List // "<id>@<tag>@<repo>" -> parsed list, so a release is read once
 	wake      chan Options
+	learn     learner
 }
 
 // New makes a Runner.
@@ -220,6 +223,7 @@ func (r *Runner) RefreshLists(ctx context.Context) {
 			slog.Warn("patch source not loaded", "repo", src.Repo, "err", ld.err)
 		}
 	}
+	r.LearnSelected(ctx)
 }
 
 // CheckRepo says whether a GitHub repository publishes a patch bundle, without saving anything.

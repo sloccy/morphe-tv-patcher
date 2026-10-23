@@ -149,6 +149,9 @@ type AppState struct {
 	// learned from APKMirror or from a bundle we have. It lets the page refuse to give a device an
 	// app it cannot run without downloading anything.
 	Builds map[string][]string `json:"builds,omitempty"`
+	// ReleaseURLs remembers each version's APKMirror release page, which often differs from what
+	// the app's name suggests, so later lookups load it directly (one request, not several).
+	ReleaseURLs map[string]string `json:"release_urls,omitempty"`
 }
 
 // Install is what we put on one device.
@@ -683,6 +686,35 @@ func (s *Store) Builds(pkg, version string) ([]string, bool) {
 	}
 	b, ok := a.Builds[version]
 	return append([]string{}, b...), ok && len(b) > 0
+}
+
+// ReleaseURL returns the remembered APKMirror release page for an app version.
+func (s *Store) ReleaseURL(pkg, version string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if a := s.state.Apps[pkg]; a != nil {
+		return a.ReleaseURLs[version]
+	}
+	return ""
+}
+
+// SetReleaseURL remembers the release page of an app version (the newest few are kept).
+func (s *Store) SetReleaseURL(pkg, version, url string) error {
+	if url == "" || s.ReleaseURL(pkg, version) == url {
+		return nil
+	}
+	return s.UpdateApp(pkg, func(a *AppState) {
+		if a.ReleaseURLs == nil {
+			a.ReleaseURLs = map[string]string{}
+		}
+		if _, ok := a.ReleaseURLs[version]; !ok && len(a.ReleaseURLs) >= 6 {
+			for k := range a.ReleaseURLs {
+				delete(a.ReleaseURLs, k)
+				break
+			}
+		}
+		a.ReleaseURLs[version] = url
+	})
 }
 
 // SetBuilds records which CPU builds an app version offers. An empty list changes nothing.

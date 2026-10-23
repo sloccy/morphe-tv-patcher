@@ -62,6 +62,7 @@
 </style>
 </head>
 <body>
+<div id="errbar" class="msg bad" role="alert" style="display:none;margin:0;border-radius:0;position:sticky;top:0;z-index:10"></div>
 <main>
   <header>
     <div>
@@ -74,6 +75,7 @@
     </div>
   </header>
 
+  <div id="learning" class="sub" style="margin:0 0 8px"></div>
   <div id="devices"></div>
 
   <section class="card" id="sets"></section>
@@ -108,6 +110,31 @@ const setDraft = {};   // set id (or "__new") -> {name, apps: Map, devices: Set}
 const setNotes = {};   // set id -> {text, ok, problems, unchecked}
 const setOpen = {};    // set id -> true while its editor is expanded
 let sourceNote = null; // {text, ok}
+const busy = new Set(); // keys of actions whose request is still running (their buttons are disabled)
+let lastText = "";      // last /api/state body, so an unchanged poll does not redraw (and wipe typing)
+let pollTimer = null;
+
+function showError(msg) {
+  const bar = document.getElementById("errbar");
+  bar.textContent = msg ? msg : "";
+  bar.style.display = msg ? "" : "none";
+}
+window.addEventListener("error", ev => showError("Page error: " + ev.message + " (reload the page if this keeps happening)"));
+window.addEventListener("unhandledrejection", ev => showError("Page error: " + ((ev.reason && ev.reason.message) || ev.reason)));
+
+// run an action once at a time per key: its buttons show "…" and ignore clicks until it ends,
+// then the page is reloaded from the server whatever happened
+function once(keyOf, fn) {
+  return async (...args) => {
+    const key = keyOf(...args);
+    if (busy.has(key)) return;
+    busy.add(key);
+    safeRender();
+    try { await fn(...args); } catch (e) { showError("Action failed: " + e.message); }
+    finally { busy.delete(key); await reload(true); }
+  };
+}
+function safeRender() { try { render(); } catch (e) { showError("Page error while drawing: " + e.message); } }
 
 function h(tag, attrs, ...kids) {
   const el = document.createElement(tag);
@@ -235,7 +262,7 @@ function deviceCard(dev) {
     h("span", { class: "sub" }, "On the TV choose “Pair device with pairing code”, then enter the port and code it shows:"),
     h("input", { type: "number", id: "pp-" + dev.id, placeholder: "pairing port", min: 1024, max: 65535, style: "width:130px" }),
     h("input", { type: "text", id: "pc-" + dev.id, placeholder: "6-digit code", maxlength: 6, inputmode: "numeric", style: "width:120px" }),
-    h("button", { onclick: () => doPair(dev) }, "Pair")) : null;
+    h("button", { disabled: busy.has("pair-" + dev.id), onclick: () => doPair(dev) }, busy.has("pair-" + dev.id) ? "Pairing…" : "Pair")) : null;
 
   const paired = dev.info && dev.info.paired_at;
   const cpu = dev.info && dev.info.abis && dev.info.abis.length
@@ -251,17 +278,18 @@ function deviceCard(dev) {
         h("span", { class: "sub" }, "  " + dev.host),
         pairChip, cpu),
       h("button", { onclick: () => { openPair[dev.id] = !openPair[dev.id]; render(); } }, "Pair…"),
-      h("button", { onclick: () => doRun(dev.id) }, "Run now"),
-      h("button", { class: "danger", onclick: () => doRemove(dev) }, "Remove")),
+      h("button", { disabled: busy.has("run-" + dev.id), onclick: () => doRun(dev.id) }, "Run now"),
+      h("button", { class: "danger", disabled: busy.has("rm-" + dev.id), onclick: () => doRemove(dev) }, "Remove")),
     pairForm,
     setChecks,
     h("div", { class: "sub", style: "margin-top:8px" }, (state.sets || []).length ? "Extra apps for this TV only" : "Apps for this TV (create an app set to give the same apps to several TVs)"),
     apps,
     h("div", { class: "row" },
-      h("button", { class: "primary", disabled: !isDirty, onclick: () => doSave(dev) }, "Save"),
-      h("button", { disabled: sel.size === 0 || isDirty, title: "Move this TV's own apps into a new set that this TV uses", onclick: () => doMakeSet(dev) }, "Make a set from these apps"),
+      h("button", { class: "primary", disabled: !isDirty || busy.has("save-" + dev.id), onclick: () => doSave(dev) }, busy.has("save-" + dev.id) ? "Saving… (checking CPUs)" : "Save"),
+      h("button", { disabled: sel.size === 0 || isDirty || busy.has("mk-" + dev.id), title: "Move this TV's own apps into a new set that this TV uses", onclick: () => doMakeSet(dev) }, "Make a set from these apps"),
       h("span", { class: "sub" }, isDirty ? "Unsaved changes. Saving never installs anything." : "Saved. Installs happen on the next run.")),
     noteBlock(note),
+    (state.warnings || []).some(w => w.device === dev.name) ? h("ul", { class: "problems" }, (state.warnings || []).filter(w => w.device === dev.name).map(w => h("li", {}, "Won't be installed: " + w.reason))) : null,
     last.length ? h("ul", { class: "results" }, last.map(r => h("li", { class: r.ok ? "ok" : "bad" }, r.message))) : null);
 }
 
@@ -301,7 +329,7 @@ function setEditor(set, isNew) {
       " " + dv.name)) : h("span", { class: "sub" }, "Add a device first")),
     appGrid("s-" + set.id, d.apps, null, null, m => touch(() => { d.apps = m; })),
     h("div", { class: "row" },
-      h("button", { class: "primary", id: "save-" + set.id, disabled: !isNew && !d.dirty, onclick: () => doSaveSet(set, isNew) }, isNew ? "Create set" : "Save set"),
+      h("button", { class: "primary", id: "save-" + set.id, disabled: (!isNew && !d.dirty) || busy.has("set-" + set.id), onclick: () => doSaveSet(set, isNew) }, busy.has("set-" + set.id) ? "Saving… (checking CPUs)" : (isNew ? "Create set" : "Save set")),
       h("span", { class: "sub" }, "Saving pushes the apps to every TV ticked above on its next run.")),
     noteBlock(setNotes[set.id]));
 }
@@ -354,7 +382,11 @@ function render() {
   document.getElementById("sub").textContent =
     "patches " + (tags.length ? tags.join(" · ") : (st.patches_version || "?")) + " · " + (st.running ? "running…" : (st.finished_at && !st.finished_at.startsWith("0001") ? "last run " + when(st.finished_at) : "no run yet")) +
     (state.version ? " · " + state.version : "");
-  document.getElementById("runall").disabled = !!st.running;
+  document.getElementById("runall").disabled = !!st.running || busy.has("run-");
+  const lr = state.learning || {};
+  document.getElementById("learning").textContent = (lr.pending || []).length
+    ? "Checking which CPUs these apps have builds for: " + lr.pending.join(", ") + " (one APKMirror page at a time, so it takes a while)."
+    : (lr.paused_until && !lr.paused_until.startsWith("0001") ? "APKMirror asked us to slow down; CPU checks resume at " + new Date(lr.paused_until).toLocaleTimeString() + "." : "");
   const box = document.getElementById("devices");
   box.replaceChildren(...((state.devices || []).length
     ? state.devices.map(deviceCard)
@@ -367,12 +399,17 @@ function render() {
   for (const [id, v] of keep) { const e = document.getElementById(id); if (e) { if (e.type === "checkbox") e.checked = v; else e.value = v; } }
 }
 
-async function refresh() {
-  try { state = await api("GET", "/api/state"); render(); } catch (e) { document.getElementById("sub").textContent = "cannot reach the server: " + e.message; }
-  const running = state && state.status && state.status.running;
-  if (document.getElementById("logbox").open) loadLog();
-  setTimeout(refresh, running ? 4000 : 30000);
+// the one polling loop: quick while something is happening, slow otherwise, paused when hidden
+function schedule() {
+  clearTimeout(pollTimer);
+  const busyNow = state && ((state.status && state.status.running) || (state.learning && (state.learning.pending || []).length));
+  pollTimer = setTimeout(refresh, document.hidden ? 30000 : (busyNow ? 1500 : 3000));
 }
+async function refresh() {
+  await reload(false);
+  if (document.getElementById("logbox").open) loadLog();
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 
 async function loadLog() {
   try { const l = await api("GET", "/api/log"); const pre = document.getElementById("log"); pre.textContent = l.lines.join("\n") || "(empty)"; pre.scrollTop = pre.scrollHeight; } catch (e) { /* ignore */ }
@@ -394,7 +431,7 @@ async function doSave(dev) {
     }
     notes[dev.id] = { ok: true, text: "Saved.", unchecked };
   } catch (e) { notes[dev.id] = noteFrom(e); }
-  await reload();
+  await reload(true);
 }
 
 async function doMakeSet(dev) {
@@ -407,7 +444,7 @@ async function doMakeSet(dev) {
     delete dirty[dev.id];
     notes[dev.id] = { ok: true, text: "Created the set “" + name + "”. This TV uses it now; give it to other TVs under App sets." };
   } catch (e) { notes[dev.id] = noteFrom(e); }
-  await reload();
+  await reload(true);
 }
 
 async function doSaveSet(set, isNew) {
@@ -421,19 +458,19 @@ async function doSaveSet(set, isNew) {
     if (r.unchecked && r.unchecked.length) setNotes[isNew ? (r.set || {}).id : set.id] = { ok: true, text: "Saved.", unchecked: r.unchecked };
     for (const k of Object.keys(dirtySets)) delete dirtySets[k];
   } catch (e) { setNotes[set.id] = noteFrom(e); }
-  await reload();
+  await reload(true);
 }
 
 async function doRemoveSet(set) {
   const users = (state.devices || []).filter(d => (d.sets || []).includes(set.id)).map(d => d.name);
   if (!confirm("Delete the set “" + set.name + "”?" + (users.length ? " It is used by " + users.join(", ") + ". Their apps from this set are no longer kept up to date (nothing is uninstalled)." : ""))) return;
   try { await api("DELETE", "/api/sets/" + encodeURIComponent(set.id)); delete setDraft[set.id]; } catch (e) { alert(e.message); }
-  await reload();
+  await reload(true);
 }
 
 async function doRun(device) {
   try { await api("POST", "/api/run", { device: device || "", force: document.getElementById("force").checked }); } catch (e) { alert(e.message); }
-  await reload(); setTimeout(refresh, 1500);
+  await reload(true);
 }
 
 async function doPair(dev) {
@@ -450,7 +487,7 @@ async function doPair(dev) {
 async function doRemove(dev) {
   if (!confirm("Remove " + dev.name + "? Nothing is uninstalled from the TV.")) return;
   try { await api("DELETE", "/api/devices/" + encodeURIComponent(dev.id)); delete dirty[dev.id]; } catch (e) { alert(e.message); }
-  await reload();
+  await reload(true);
 }
 
 async function doAddSource() {
@@ -465,9 +502,8 @@ async function doAddSource() {
     const s = await api("POST", "/api/sources", body);
     sourceNote = { ok: true, text: "Added " + s.repo + ". Its apps appear on the device cards in a moment." };
     for (const id of ["newrepo", "newpre", "newphone", "newtrust"]) { const e = document.getElementById(id); if (e) { if (e.type === "checkbox") e.checked = false; else e.value = ""; } }
-    setTimeout(reload, 4000);
   } catch (e) { sourceNote = { ok: false, text: e.message }; }
-  await reload();
+  await reload(true);
 }
 
 async function doRemoveSource(src) {
@@ -477,10 +513,25 @@ async function doRemoveSource(src) {
     sourceNote = { ok: true, text: "Removed " + src.repo + (r.apps_dropped ? "; " + r.apps_dropped + " app choice(s) dropped." : ".") };
     for (const k of Object.keys(dirty)) delete dirty[k];
   } catch (e) { sourceNote = { ok: false, text: e.message }; }
-  await reload();
+  await reload(true);
 }
 
-async function reload() { try { state = await api("GET", "/api/state"); } catch (e) { /* keep old */ } render(); }
+// force: redraw even if nothing changed (after an action). A poll never redraws while the user is
+// typing in a field, so a pairing code is not wiped.
+async function reload(force) {
+  try {
+    const r = await fetch("/api/state", { cache: "no-cache" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const text = await r.text();
+    showError("");
+    const typing = document.activeElement && ["text", "number"].includes(document.activeElement.type) && document.activeElement.id && document.activeElement.closest("#devices");
+    if (force || (text !== lastText && !typing)) {
+      state = JSON.parse(text); lastText = text;
+      safeRender();
+    }
+  } catch (e) { showError("Cannot reach the server: " + e.message + " (retrying)"); }
+  schedule();
+}
 
 document.getElementById("runall").addEventListener("click", () => doRun(""));
 document.getElementById("adddev").addEventListener("click", async () => {
@@ -491,10 +542,21 @@ document.getElementById("adddev").addEventListener("click", async () => {
     msg.className = "msg ok"; msg.textContent = "Added. Use “Pair…” on its card next.";
     openPair[d.id] = true;
   } catch (e) { msg.className = "msg bad"; msg.textContent = e.message; }
-  await reload();
+  await reload(true);
 });
 document.getElementById("logbox").addEventListener("toggle", ev => { if (ev.target.open) loadLog(); });
 refresh();
+
+// every action runs once at a time and ends with a reload
+doSave = once(d => "save-" + d.id, doSave);
+doMakeSet = once(d => "mk-" + d.id, doMakeSet);
+doSaveSet = once(set => "set-" + set.id, doSaveSet);
+doRemoveSet = once(set => "rmset-" + set.id, doRemoveSet);
+doRun = once(d => "run-" + (d || ""), doRun);
+doPair = once(d => "pair-" + d.id, doPair);
+doRemove = once(d => "rm-" + d.id, doRemove);
+doAddSource = once(() => "addsrc", doAddSource);
+doRemoveSource = once(src => "rmsrc-" + src.id, doRemoveSource);
 </script>
 </body>
 </html>

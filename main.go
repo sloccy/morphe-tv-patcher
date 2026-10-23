@@ -100,6 +100,10 @@ func setup() (*app, error) {
 	env := sources.DefaultEnv()
 	env.InputDir, env.CacheDir, env.Store = cfg.Input(), cfg.Cache(), a.st
 	env.FlareURL, env.DirectOK, env.APKPureOK = cfg.FlareSolverrURL, cfg.DirectOK, cfg.APKPureOK
+	for _, g := range []*apkmirror.Gate{apkmirror.Shared, apkmirror.SharedFlare} {
+		g.MinGap, g.Cooldown = cfg.MirrorGap, cfg.MirrorCooldown
+	}
+	env.Gate, env.FlareGate = apkmirror.Shared, apkmirror.SharedFlare
 	// First run only: seed the patch repositories from PATCHES_REPO. After that the list lives in
 	// settings.json (backed up with the state volume) and every source can be removed.
 	if err := a.st.SeedSources(cfg.PatchesRepos, cfg.Prerelease); err != nil {
@@ -131,11 +135,24 @@ func setup() (*app, error) {
 			}
 			return patches.FromCLI(rel.Tag, patches.ParseListPatches(stable), patches.ParseListPatches(all), names), nil
 		},
+		PausedUntil: apkmirror.Shared.BlockedUntil,
 		Probe: func(ctx context.Context, src store.Source, pkg, name, version string) ([]string, error) {
 			// a quick look at the release page (no download), used to learn which CPU builds exist
-			return apkmirror.Probe(ctx, apkmirror.AppRequest{Package: pkg, Name: name, Version: version,
-				KnownSlug: a.st.App(pkg).Slug, Hint: apkmirror.Hints[pkg], AllowPhone: src.AllowPhone},
-				apkmirror.Options{ProfileHint: a.st.LastProfile(), Backoff: []time.Duration{time.Second}})
+			o := apkmirror.Options{ProfileHint: a.st.LastProfile(), Gate: apkmirror.Shared, Priority: apkmirror.Background}
+			if cfg.FlareSolverrURL != "" && !cfg.DirectOK {
+				o = apkmirror.Options{FlareURL: cfg.FlareSolverrURL, Gate: apkmirror.SharedFlare, Priority: apkmirror.Background}
+			}
+			res, err := apkmirror.Probe(ctx, apkmirror.AppRequest{Package: pkg, Name: name, Version: version,
+				KnownSlug: a.st.App(pkg).Slug, Hint: apkmirror.Hints[pkg], ReleaseURL: a.st.ReleaseURL(pkg, version),
+				AllowPhone: src.AllowPhone}, o)
+			if err != nil {
+				return nil, err
+			}
+			if res.Slug != "" {
+				_ = a.st.UpdateApp(pkg, func(s *store.AppState) { s.Slug = res.Slug })
+			}
+			_ = a.st.SetReleaseURL(pkg, version, res.ReleaseURL)
+			return res.Available, nil
 		},
 		Fetch: func(ctx context.Context, x sources.App, sdk int) (*sources.Fetched, error) {
 			return sources.Fetch(ctx, &env, x, sdk)
