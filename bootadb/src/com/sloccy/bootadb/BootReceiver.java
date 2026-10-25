@@ -8,7 +8,7 @@ import android.content.Intent;
 public final class BootReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context context, Intent intent) {
-        Adb.ensureOn(context);
+        Adb.ensureAll(context);
         Adb.schedule(context);
     }
 }

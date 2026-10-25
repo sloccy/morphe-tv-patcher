@@ -8,26 +8,49 @@ import android.content.Context;
 import android.provider.Settings;
 import android.util.Log;
 
-/** Turns Wireless debugging on (only when it is off) and keeps the hourly re-check scheduled. */
+/**
+ * Keeps Wireless debugging on and a few privacy settings off, and keeps the hourly re-check
+ * scheduled. A value is written only when it differs from what is wanted.
+ */
 final class Adb {
-    private static final String KEY = "adb_wifi_enabled";
     private static final String TAG = "BootAdb";
     private static final int JOB_ID = 1;
 
+    private static final boolean GLOBAL = true;
+    private static final boolean SECURE = false;
+
+    /** {table, key, wanted value}. */
+    private static final Object[][] WANTED = {
+        {GLOBAL, "adb_wifi_enabled", "1"},
+        {GLOBAL, "wifi_scan_always_enabled", "0"},
+        {GLOBAL, "network_recommendations_enabled", "0"},
+        {GLOBAL, "upload_apk_enable", "0"},
+        {GLOBAL, "package_verifier_user_consent", "-1"},
+        {GLOBAL, "send_action_app_error", "0"},
+        {SECURE, "location_mode", "0"},
+    };
+
     private Adb() {}
 
-    /** @return true when Wireless debugging is on (or was just switched on). */
-    static boolean ensureOn(Context context) {
+    /** Brings every wanted setting to its value. One rejected key does not stop the others. */
+    static void ensureAll(Context context) {
         ContentResolver resolver = context.getContentResolver();
-        try {
-            if (Settings.Global.getInt(resolver, KEY, 0) == 1) {
-                return true;
+        for (Object[] w : WANTED) {
+            boolean global = (Boolean) w[0];
+            String key = (String) w[1];
+            String want = (String) w[2];
+            try {
+                String have = global ? Settings.Global.getString(resolver, key) : Settings.Secure.getString(resolver, key);
+                if (want.equals(have)) {
+                    continue;
+                }
+                boolean ok = global ? Settings.Global.putString(resolver, key, want) : Settings.Secure.putString(resolver, key, want);
+                Log.i(TAG, key + ": " + have + " -> " + want + (ok ? "" : " (not accepted)"));
+            } catch (SecurityException e) {
+                Log.w(TAG, key + ": WRITE_SECURE_SETTINGS is not granted");
+            } catch (RuntimeException e) {
+                Log.w(TAG, key + ": " + e);
             }
-            Log.i(TAG, "Wireless debugging was off, switching it on");
-            return Settings.Global.putInt(resolver, KEY, 1);
-        } catch (SecurityException e) {
-            Log.w(TAG, "cannot switch Wireless debugging on: WRITE_SECURE_SETTINGS is not granted");
-            return false;
         }
     }
 

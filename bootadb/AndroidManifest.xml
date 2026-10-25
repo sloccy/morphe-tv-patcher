@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Keeps Wireless debugging switched on: sets the adb_wifi_enabled setting at every boot (and
-     every hour, in case the TV switched it off after a Wi-Fi change). No network access, no data. -->
+<!-- Keeps Wireless debugging switched on and a few tracking settings off (Wi-Fi scanning, location,
+     Play Protect uploads, crash reports, network recommendations): applied at every boot and every
+     hour, only when a value differs. No network access, no data. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.sloccy.bootadb">
 
@@ -12,7 +13,7 @@
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
 
     <application
-        android:label="Wireless debugging helper"
+        android:label="TV settings helper"
         android:allowBackup="false"
         android:supportsRtl="false">
 

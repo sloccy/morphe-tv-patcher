@@ -7,7 +7,7 @@ import android.app.job.JobService;
 public final class KeepOnJob extends JobService {
     @Override
     public boolean onStartJob(JobParameters params) {
-        Adb.ensureOn(this);
+        Adb.ensureAll(this);
         return false; // nothing left running
     }
 

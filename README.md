@@ -142,7 +142,10 @@ The app list on each card can be collapsed (the line above it still says how man
 
 **Boot helper.** Android turns Wireless debugging off when a TV restarts. `bootadb/` is a tiny app
 (no libraries, no network access) that switches it back on at every boot and, if the TV turned it off
-again, once an hour (it only changes the setting when it finds it off). Whenever tv-patcher connects
+again, once an hour (it only changes a setting when it finds it different). It also keeps these
+tracking settings off: `wifi_scan_always_enabled`, `network_recommendations_enabled`,
+`upload_apk_enable`, `package_verifier_user_consent` (-1), `send_action_app_error` and
+`location_mode`. It shows no messages; see `adb logcat -s BootAdb`. Whenever tv-patcher connects
 to a TV it installs the helper (and replaces it when the image carries a newer one), grants it the one
 permission it needs over ADB, and opens it once so Android lets it receive the boot broadcast. A card
 shows "boot helper ✓". It is built in CI (`bootadb/build.sh`, Android SDK tools only), signed with a
