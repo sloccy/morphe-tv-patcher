@@ -252,6 +252,14 @@ func TestCrossSiteProtections(t *testing.T) {
 	if code, _ := do(t, srv, "GET", "/api/health", "", map[string]string{"Host": "sloccy.com.evil.net"}); code != 403 {
 		t.Errorf("suffix must match the end: %d", code)
 	}
+	// a suffix written without the leading dot means the same thing: it still has to be a whole
+	// label, or an attacker registers evil-sloccy.com and rebinds it to this machine
+	s.AllowedHostSuffixes = []string{"sloccy.com"}
+	for host, want := range map[string]int{"sloccy.com": 200, "tv.sloccy.com": 200, "evil-sloccy.com": 403} {
+		if code, _ := do(t, srv, "GET", "/api/health", "", map[string]string{"Host": host}); code != want {
+			t.Errorf("%s: got %d, want %d", host, code, want)
+		}
+	}
 }
 
 func TestSecurityHeaders(t *testing.T) {

@@ -180,7 +180,7 @@ wrong signature or a phone build alerts at once; a message follows when it recov
 | `DATA_DIR` | `/data` | settings, state, keystore, cache |
 | `INTERVAL` | `6h` | time between scheduled runs |
 | `WEB_PORT` / `WEB_BIND` | `8093` / `0.0.0.0` | |
-| `ALLOWED_HOST_SUFFIXES` | | extra `Host` names the page answers to |
+| `ALLOWED_HOST_SUFFIXES` | | extra `Host` names the page answers to (whole labels: `example.com` and `.example.com` both match `tv.example.com`, never `evil-example.com`) |
 | `FLARESOLVERR_URL` | | e.g. `http://127.0.0.1:8191` |
 | `APKMIRROR_MIN_INTERVAL` | `4s` | minimum gap between APKMirror requests |
 | `APKMIRROR_COOLDOWN` | `5m` | first pause after APKMirror pushes back (doubles, up to 1h) |

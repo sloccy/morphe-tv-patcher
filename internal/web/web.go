@@ -127,7 +127,11 @@ func (s *Server) hostOK(host string) bool {
 		return true
 	}
 	for _, suf := range s.AllowedHostSuffixes {
-		if strings.HasSuffix(h, suf) {
+		// On a label boundary, so "example.com" cannot be matched by "evil-example.com": under DNS
+		// rebinding this check is the only one left (the browser sees the attacker's own origin,
+		// so Origin equals Host and a JSON body needs no preflight).
+		bare := strings.TrimPrefix(suf, ".")
+		if h == bare || strings.HasSuffix(h, "."+bare) {
 			return true
 		}
 	}
