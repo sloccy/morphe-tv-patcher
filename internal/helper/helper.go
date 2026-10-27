@@ -20,6 +20,9 @@ const (
 	Activity = Package + "/.MainActivity"
 	// Permission is what the helper needs to change the setting; tv-patcher grants it over ADB.
 	Permission = "android.permission.WRITE_SECURE_SETTINGS"
+	// JobID is the helper's hourly job (JOB_ID in bootadb/src/com/sloccy/bootadb/Adb.java).
+	// tv-patcher runs it once after installing the app, so the settings are applied right away.
+	JobID = "1"
 )
 
 // Bundle is the helper APK shipped in the image.

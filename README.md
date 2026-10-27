@@ -152,8 +152,11 @@ again, once an hour (it only changes a setting when it finds it different). It a
 tracking settings off: `wifi_scan_always_enabled`, `network_recommendations_enabled`,
 `upload_apk_enable`, `package_verifier_user_consent` (-1), `send_action_app_error` and
 `location_mode`. It shows no messages; see `adb logcat -s BootAdb`. Whenever tv-patcher connects
-to a TV it installs the helper (and replaces it when the image carries a newer one), grants it the one
-permission it needs over ADB, and opens it once so Android lets it receive the boot broadcast. A card
+to a TV it installs the helper (and replaces it when the image carries a newer one, or when the copy
+on the TV is not byte-for-byte the one it ships — the permission is only ever granted to its own
+APK), grants it the one permission it needs over ADB, and opens it once so Android lets it receive
+the boot broadcast. Opening it does nothing by itself: the activity is reachable by any app on the
+TV, so it only schedules the hourly job, which tv-patcher then runs once. A card
 shows "boot helper ✓". It is built in CI (`bootadb/build.sh`, Android SDK tools only), signed with a
 throw-away key, and shipped inside the image at `/opt/bootadb/bootadb.apk` (`BOOT_HELPER_APK`). If a
 TV refuses it you get a message on the card and, on the second run in a row, a Telegram alert; apps

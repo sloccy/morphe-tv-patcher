@@ -24,6 +24,7 @@ type fakeADB struct {
 	down        map[string]bool     // host -> unreachable
 	abis        map[string][]string // host -> abis
 	installed   map[string]string   // "serial/pkg" -> version
+	helperSHA   string              // sha256 of the helper APK the device holds
 	installMsg  map[string]string   // pkg -> failure output (first attempt)
 	installs    []string            // "serial pkg"
 	uninstalled []string
@@ -83,6 +84,7 @@ func (f *fakeADB) Install(ctx context.Context, s, apk string) (ok bool, output s
 	f.installs = append(f.installs, s+" "+base)
 	if base == "bootadb.apk" {
 		f.installed[s+"/com.sloccy.bootadb"] = f.helperVer
+		f.helperSHA, _ = fileSHA256(apk) // what sha256sum on the device would print afterwards
 	}
 	for pkg := range f.installMsg {
 		_ = pkg
@@ -116,9 +118,22 @@ func (f *fakeADB) Shell(ctx context.Context, serial, cmd string) (string, error)
 		return "", nil
 	case strings.HasPrefix(cmd, "settings get global adb_wifi_enabled"):
 		return "1\n", nil
+	case cmd == "pm path com.sloccy.bootadb":
+		if f.installed[serial+"/com.sloccy.bootadb"] == "" {
+			return "", nil
+		}
+		return "package:" + helperDevicePath + "\n", nil
+	case strings.HasPrefix(cmd, "sha256sum "):
+		if strings.TrimPrefix(cmd, "sha256sum ") != helperDevicePath {
+			return "", errors.New("no such file")
+		}
+		return f.helperSHA + "  " + helperDevicePath + "\n", nil
 	}
 	return "", nil
 }
+
+const helperDevicePath = "/data/app/~~abc==/com.sloccy.bootadb-1/base.apk"
+
 func (f *fakeADB) Pair(ctx context.Context, host string, port int, code string) error {
 	f.paired = append(f.paired, fmt.Sprintf("%s:%d %s", host, port, code))
 	return f.pairErr

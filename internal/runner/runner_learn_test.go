@@ -211,6 +211,34 @@ func TestRunUpgradesAnOldBootHelperByReinstalling(t *testing.T) {
 	}
 }
 
+func TestAnotherAppUnderTheHelpersNameIsReplacedBeforeTheGrant(t *testing.T) {
+	rg, _ := helperRig(t, 20261022)
+	const serial = "10.0.0.7:40000"
+	// An app squatting the package name can report a matching version (build.sh derives it from
+	// the public sources), but it is not the APK we ship, so it must never keep the permission.
+	rg.adb.installed[serial+"/com.sloccy.bootadb"] = "20261022"
+	rg.adb.helperSHA = strings.Repeat("ab", 32)
+	rg.r.Run(context.Background(), Options{})
+
+	found := false
+	for _, u := range rg.adb.uninstalled {
+		found = found || u == serial+" com.sloccy.bootadb"
+	}
+	grantedAfterInstall := false
+	for i, s := range rg.adb.shells {
+		if strings.HasPrefix(s, "pm grant") {
+			grantedAfterInstall = i > 0 && len(rg.adb.installs) > 0
+		}
+	}
+	if !found || !grantedAfterInstall {
+		t.Errorf("the impostor must be removed and ours installed before the grant: %v %v %v",
+			rg.adb.uninstalled, rg.adb.installs, rg.adb.shells)
+	}
+	if rg.adb.helperSHA == strings.Repeat("ab", 32) {
+		t.Error("the device should be holding our APK now")
+	}
+}
+
 func TestBootHelperTroubleNeverStopsAppUpdates(t *testing.T) {
 	rg, _ := helperRig(t, 20261022)
 	rg.adb.grantErr = "java.lang.SecurityException: grant failed"
