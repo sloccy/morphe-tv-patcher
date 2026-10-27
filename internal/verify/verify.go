@@ -274,7 +274,7 @@ func signerFacts(ctx context.Context, path string) (signer string, ok *bool, not
 // base's publisher certificate and must not be rejected by apksigner. It returns a false verdict and
 // the reason for the first split that fails, which Check then treats like any bad signature. One
 // split is on disk at a time.
-func checkSplits(ctx context.Context, dir string, splits []*zip.File, baseSigner string) (*bool, string, error) {
+func checkSplits(ctx context.Context, dir string, splits []*zip.File, baseSigner string) (verdict *bool, notes string, err error) {
 	if baseSigner == "" {
 		return nil, "", nil // Check reports the base's missing certificate, the clearer message
 	}
