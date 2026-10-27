@@ -39,6 +39,8 @@ const (
 	KindSignature Kind = "signature"
 	KindFormat    Kind = "format"
 	KindUnpinned  Kind = "unpinned"
+	// KindUnverifiable means the signature could not be checked at all (no apksigner installed).
+	KindUnverifiable Kind = "unverifiable"
 )
 
 // Error is a failed check.
@@ -51,7 +53,8 @@ func (e *Error) Error() string { return string(e.Kind) + ": " + e.Msg }
 
 // Fatal errors mean "wrong or tampered app", never "try again later".
 func (e *Error) Fatal() bool {
-	return e.Kind == KindSignature || e.Kind == KindLeanback || e.Kind == KindPackage
+	return e.Kind == KindSignature || e.Kind == KindLeanback || e.Kind == KindPackage ||
+		e.Kind == KindUnverifiable // retrying will not make apksigner appear
 }
 
 // Sources trusted to establish a signer when none is on record yet.
@@ -80,6 +83,9 @@ type Want struct {
 	ABIs    []string // the device's ABIs in order of preference; empty means the 32-bit default
 	// AllowPhone accepts builds without an Android TV launcher (phone apps). Off by default.
 	AllowPhone bool
+	// AllowUnverified accepts a file when apksigner is not installed, so no signature can be
+	// checked cryptographically. Off by default (ALLOW_UNVERIFIED_SIGNATURES).
+	AllowUnverified bool
 }
 
 // Facts are what Inspect learned from a file.
@@ -95,15 +101,21 @@ type Facts struct {
 
 var abiSplit = regexp.MustCompile(`(?:^|/)(?:split_)?config\.(armeabi_v7a|arm64_v8a|x86_64|x86)\.apk$`)
 
-// PickBase chooses the main APK inside a bundle. APKMirror names it base.apk; other XAPK layouts
-// name it <package>.apk and call the splits config.*.apk (so the largest file is a split).
-func PickBase(zr *zip.Reader) (*zip.File, error) {
+// topAPKs lists a bundle's top-level *.apk entries: the base plus the splits.
+func topAPKs(zr *zip.Reader) []*zip.File {
 	var tops []*zip.File
 	for _, f := range zr.File {
 		if !strings.Contains(f.Name, "/") && strings.HasSuffix(f.Name, ".apk") {
 			tops = append(tops, f)
 		}
 	}
+	return tops
+}
+
+// PickBase chooses the main APK inside a bundle. APKMirror names it base.apk; other XAPK layouts
+// name it <package>.apk and call the splits config.*.apk (so the largest file is a split).
+func PickBase(zr *zip.Reader) (*zip.File, error) {
+	tops := topAPKs(zr)
 	for _, f := range tops {
 		if f.Name == "base.apk" {
 			return f, nil
@@ -148,9 +160,20 @@ func Inspect(ctx context.Context, path string) (*Facts, error) {
 	}
 	defer func() { _ = zr.Close() }()
 
+	// A name may appear only once: Go reads the first entry of a duplicate pair and Java the last,
+	// so a bundle carrying base.apk twice could have one copy verified and the other patched.
+	seen := make(map[string]bool, len(zr.File))
+	for _, f := range zr.File {
+		if seen[f.Name] {
+			return nil, &Error{KindFormat, "duplicate entry " + f.Name}
+		}
+		seen[f.Name] = true
+	}
+
 	abis := map[string]bool{}
 	basePath := path
-	var tmp string
+	var dir string
+	var splits []*zip.File
 	plain := false
 	for _, f := range zr.File {
 		if f.Name == "AndroidManifest.xml" {
@@ -168,12 +191,17 @@ func Inspect(ctx context.Context, path string) (*Facts, error) {
 		if err != nil {
 			return nil, err
 		}
-		dir, err := os.MkdirTemp("", "base-*")
+		for _, f := range topAPKs(&zr.Reader) {
+			if f != bf {
+				splits = append(splits, f)
+			}
+		}
+		dir, err = os.MkdirTemp("", "base-*")
 		if err != nil {
 			return nil, err
 		}
 		defer func() { _ = os.RemoveAll(dir) }()
-		tmp = filepath.Join(dir, "base.apk")
+		tmp := filepath.Join(dir, "base.apk")
 		if err := extract(bf, tmp); err != nil {
 			return nil, err
 		}
@@ -208,20 +236,69 @@ func Inspect(ctx context.Context, path string) (*Facts, error) {
 	if err != nil {
 		return nil, &Error{KindFormat, "unreadable manifest: " + err.Error()}
 	}
-	fh, err := os.Open(basePath) //nolint:gosec // a file we just extracted or the caller's own path
+	signer, ok, notes, err := signerFacts(ctx, basePath)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = fh.Close() }()
-	st, _ := fh.Stat()
-	signer, serr := apk.SignerSHA256(fh, st.Size())
-	f := &Facts{Package: m.Package, Version: m.VersionName, Leanback: m.Leanback, ABIs: abis, Signer: signer}
-	ok, notes, certs := runAPKSigner(ctx, basePath)
-	f.SignerOK, f.SignerNotes = ok, notes
-	if serr != nil && f.Signer == "" {
-		f.Signer = certs // v1-only APK: take the certificate apksigner printed
+	f := &Facts{Package: m.Package, Version: m.VersionName, Leanback: m.Leanback, ABIs: abis,
+		Signer: signer, SignerOK: ok, SignerNotes: notes}
+	bad, why, err := checkSplits(ctx, dir, splits, signer)
+	if err != nil {
+		return nil, err
+	}
+	if bad != nil { // a split nobody can vouch for condemns the whole bundle
+		f.SignerOK, f.SignerNotes = bad, why
 	}
 	return f, nil
+}
+
+// signerFacts reads one APK's certificate digest and apksigner's verdict. The digest comes from the
+// signing block, falling back to the certificate apksigner printed (a v1-only APK has no block).
+func signerFacts(ctx context.Context, path string) (signer string, ok *bool, notes string, err error) {
+	fh, err := os.Open(path) //nolint:gosec // a file we just extracted or the caller's own path
+	if err != nil {
+		return "", nil, "", err
+	}
+	st, _ := fh.Stat()
+	signer, serr := apk.SignerSHA256(fh, st.Size())
+	_ = fh.Close()
+	ok, notes, certs := runAPKSigner(ctx, path)
+	if serr != nil && signer == "" {
+		signer = certs
+	}
+	return signer, ok, notes, nil
+}
+
+// checkSplits verifies the other APKs in a bundle, not just the base: Morphe merges the splits into
+// the patched app, so a split nobody checked is unchecked code on the TV. Every split must carry the
+// base's publisher certificate and must not be rejected by apksigner. It returns a false verdict and
+// the reason for the first split that fails, which Check then treats like any bad signature. One
+// split is on disk at a time.
+func checkSplits(ctx context.Context, dir string, splits []*zip.File, baseSigner string) (*bool, string, error) {
+	if baseSigner == "" {
+		return nil, "", nil // Check reports the base's missing certificate, the clearer message
+	}
+	no := false
+	for _, sf := range splits {
+		p := filepath.Join(dir, "split.apk")
+		if err := extract(sf, p); err != nil {
+			return nil, "", err
+		}
+		signer, ok, notes, err := signerFacts(ctx, p)
+		_ = os.Remove(p)
+		if err != nil {
+			return nil, "", err
+		}
+		switch {
+		case ok != nil && !*ok:
+			return &no, fmt.Sprintf("%s: apksigner rejected it: %s", sf.Name, notes), nil
+		case signer == "":
+			return &no, sf.Name + ": no signing certificate found", nil
+		case signer != baseSigner:
+			return &no, fmt.Sprintf("%s: signer %.16s… != the base apk's %.16s…", sf.Name, signer, baseSigner), nil
+		}
+	}
+	return nil, "", nil
 }
 
 func extract(f *zip.File, dest string) error {
@@ -260,7 +337,10 @@ func Check(f *Facts, w Want) error {
 	case f.Signer == "":
 		return &Error{KindSignature, "no signing certificate found"}
 	case f.SignerOK != nil && !*f.SignerOK:
-		return &Error{KindSignature, "apksigner verify failed: " + f.SignerNotes}
+		return &Error{KindSignature, "signature check failed: " + f.SignerNotes}
+	case f.SignerOK == nil && !w.AllowUnverified:
+		return &Error{KindUnverifiable, "apksigner is not installed, so the signature cannot be checked; " +
+			"install it or set ALLOW_UNVERIFIED_SIGNATURES=true"}
 	case pinned != "" && f.Signer != pinned:
 		return &Error{KindSignature, fmt.Sprintf("signer %.16s… != pinned %.16s…", f.Signer, pinned)}
 	case pinned == "" && source != SourceAPKMirror && source != SourceDropFolder:

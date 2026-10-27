@@ -129,7 +129,13 @@ dropping one can leave an app that will not install or starts and closes. The fi
 
 **Every file is verified:** right package and version, an Android TV launcher (rejects phone builds),
 `armeabi-v7a`, and the publisher's signing certificate: learned from the first APKMirror download,
-or pinned with `signer_sha256`; `apksigner` checks it cryptographically.
+or pinned with `signer_sha256`; `apksigner` checks it cryptographically. **Every APK inside a bundle**
+is checked, not just `base.apk`: Morphe merges the splits into the patched app, so each one must carry
+the base's certificate and pass `apksigner`, or the bundle is refused. A bundle that names the same
+entry twice is refused outright (Go would read the first copy and the Java patcher the last, so the
+file verified need not be the file patched). Without `apksigner` on `PATH` nothing can be checked
+cryptographically and files are refused; `ALLOW_UNVERIFIED_SIGNATURES=true` accepts them anyway
+(certificates are still compared), for runs outside the image.
 
 **Connections to the TV.** Android shows a "debugging connected" notice on the TV (and it can pull you
 out of a movie) for every ADB session, so tv-patcher connects as little as it can. A scheduled run
@@ -182,6 +188,7 @@ wrong signature or a phone build alerts at once; a message follows when it recov
 | `PATCH_SOURCES_ALLOWED_OWNERS` | | limit repositories added from the page to these GitHub owners |
 | `BYTECODE_MODE` | `STRIP_SAFE` | Morphe `--bytecode-mode` |
 | `FETCH_FAILURES_BEFORE_ALERT` | `3` | |
+| `ALLOW_UNVERIFIED_SIGNATURES` | `false` | accept app files when `apksigner` is not installed |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | | notifications |
 | `GITHUB_TOKEN` | | optional, avoids API rate limits |
 

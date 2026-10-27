@@ -24,6 +24,9 @@ type Config struct {
 	FlareSolverrURL     string
 	DirectOK            bool // false with APKMIRROR_DIRECT_DISABLED=true (tests the other routes)
 	FailuresBeforeAlert int
+	// AllowUnverifiedSignature accepts app files when apksigner is not installed, so no signature
+	// can be checked. The image always has apksigner; this is for runs without the Android SDK.
+	AllowUnverifiedSignature bool
 	// BootHelperAPK is the tiny app that switches Wireless debugging back on after a TV reboot;
 	// the image carries it. Empty or missing means the step is skipped.
 	BootHelperAPK string
@@ -95,6 +98,7 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		BytecodeMode:              def("BYTECODE_MODE", "STRIP_SAFE"),
 		FlareSolverrURL:           strings.TrimRight(def("FLARESOLVERR_URL", ""), "/"),
 		DirectOK:                  !flag("APKMIRROR_DIRECT_DISABLED"),
+		AllowUnverifiedSignature:  flag("ALLOW_UNVERIFIED_SIGNATURES"),
 		BootHelperAPK:             def("BOOT_HELPER_APK", "/opt/bootadb/bootadb.apk"),
 		WebBind:                   def("WEB_BIND", "0.0.0.0"),
 		AllowedHostSuffixes:       splitList(def("ALLOWED_HOST_SUFFIXES", "")),

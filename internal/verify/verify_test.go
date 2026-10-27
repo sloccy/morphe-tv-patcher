@@ -49,11 +49,16 @@ func mirrorBundle(t *testing.T, signer []byte, libs ...string) string {
 	for _, l := range libs {
 		files["lib/"+l+"/libx.so"] = []byte("so")
 	}
+	// the splits are real signed APKs, as they are in a bundle from APKMirror: every APK inside
+	// carries the publisher's certificate, and Inspect checks each one.
+	split := func(body string) []byte {
+		return apktest.SignedAPK(map[string][]byte{"part": []byte(body)}, signer)
+	}
 	return write(t, "app.apkm", apktest.Zip(map[string][]byte{
 		"info.json":                    []byte(`{"pname":"` + primePkg + `"}`),
 		"base.apk":                     apktest.SignedAPK(files, signer),
-		"split_config.xhdpi.apk":       []byte("s"),
-		"split_config.armeabi_v7a.apk": []byte("native"),
+		"split_config.xhdpi.apk":       split("s"),
+		"split_config.armeabi_v7a.apk": split("native"),
 	}))
 }
 
@@ -83,8 +88,8 @@ func TestInspectAPKPureXAPKPicksRightBase(t *testing.T) {
 	p := write(t, "x.xapk", apktest.Zip(map[string][]byte{
 		"manifest.json":          []byte(`{"package_name":"` + primePkg + `"}`),
 		primePkg + ".apk":        apktest.SignedAPK(map[string][]byte{"AndroidManifest.xml": manifest(t)}, der),
-		"config.armeabi_v7a.apk": big,
-		"config.en.apk":          []byte("e"),
+		"config.armeabi_v7a.apk": apktest.SignedAPK(map[string][]byte{"part": big}, der),
+		"config.en.apk":          apktest.SignedAPK(map[string][]byte{"part": []byte("e")}, der),
 	}))
 	f, err := Inspect(context.Background(), p)
 	if err != nil {
@@ -124,8 +129,10 @@ func TestInspectRejectsBadFiles(t *testing.T) {
 	}
 }
 
+// The rules are about the file, so these cases allow a missing apksigner; the gate for an
+// unverifiable file has its own case at the end of TestCheckRules.
 func want(source, pinned string) Want {
-	return Want{Package: "com.x", Version: "1.0", Source: source, Pinned: pinned}
+	return Want{Package: "com.x", Version: "1.0", Source: source, Pinned: pinned, AllowUnverified: true}
 }
 
 func facts() *Facts {
@@ -171,6 +178,66 @@ func TestCheckRules(t *testing.T) {
 			t.Errorf("%s: got %v (kind %v fatal %v), want %v fatal %v", c.name, err, e, e != nil && e.Fatal(), c.kind, c.fatal)
 		}
 	}
+
+	// Without apksigner nothing is checked cryptographically, so the file is refused unless the
+	// operator opted in with ALLOW_UNVERIFIED_SIGNATURES.
+	strict := want("apkmirror", "")
+	strict.AllowUnverified = false
+	var e *Error
+	if err := Check(facts(), strict); !errors.As(err, &e) || e.Kind != KindUnverifiable || !e.Fatal() {
+		t.Errorf("an unverifiable file must be refused, got %v", err)
+	}
+	if err := Check(facts(), want("apkmirror", "")); err != nil {
+		t.Errorf("with AllowUnverified it goes through: %v", err)
+	}
+}
+
+func TestInspectRejectsSplitsItCannotVouchFor(t *testing.T) {
+	noAPKSigner(t)
+	der, _ := apktest.Cert("pub")
+	other, _ := apktest.Cert("attacker")
+	base := apktest.SignedAPK(map[string][]byte{"AndroidManifest.xml": manifest(t)}, der)
+	w := Want{Package: primePkg, Version: primeVer, Source: "apkmirror", AllowUnverified: true}
+
+	for _, c := range []struct {
+		name  string
+		split []byte
+	}{
+		{"signed by another key", apktest.SignedAPK(map[string][]byte{"lib/armeabi-v7a/x.so": []byte("evil")}, other)},
+		{"not signed at all", apktest.Zip(map[string][]byte{"lib/armeabi-v7a/x.so": []byte("evil")})},
+	} {
+		p := write(t, "evil.apkm", apktest.Zip(map[string][]byte{
+			"base.apk":                     base,
+			"split_config.armeabi_v7a.apk": c.split,
+		}))
+		f, err := Inspect(context.Background(), p)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		// Morphe merges the splits into the patched app, so the bundle must be refused even though
+		// the base is the genuine, correctly signed file.
+		var e *Error
+		if err := Check(f, w); !errors.As(err, &e) || e.Kind != KindSignature || !e.Fatal() {
+			t.Errorf("a split %s must condemn the bundle, got %v", c.name, err)
+		}
+	}
+}
+
+func TestInspectRejectsDuplicateEntries(t *testing.T) {
+	noAPKSigner(t)
+	der, _ := apktest.Cert("pub")
+	good := apktest.SignedAPK(map[string][]byte{"AndroidManifest.xml": manifest(t)}, der)
+	evil := apktest.SignedAPK(map[string][]byte{"AndroidManifest.xml": manifest(t), "classes.dex": []byte("payload")}, der)
+	// Go reads the first entry of a duplicate pair, Java the last: one copy would be verified and
+	// the other patched, so the bundle is refused outright.
+	p := write(t, "dup.apkm", apktest.ZipEntries(
+		apktest.Entry{Name: "base.apk", Data: good},
+		apktest.Entry{Name: "base.apk", Data: evil},
+	))
+	var e *Error
+	if _, err := Inspect(context.Background(), p); !errors.As(err, &e) || e.Kind != KindFormat {
+		t.Errorf("got %v", err)
+	}
 }
 
 func TestAPKSignerVerdictAndV1Fallback(t *testing.T) {
@@ -188,7 +255,7 @@ func TestAPKSignerVerdictAndV1Fallback(t *testing.T) {
 	if err != nil || f.SignerOK == nil || *f.SignerOK {
 		t.Fatalf("expected a false verdict: %+v %v", f, err)
 	}
-	if err := Check(f, Want{Package: primePkg, Version: primeVer, Source: "apkmirror"}); err == nil || !strings.Contains(err.Error(), "apksigner") {
+	if err := Check(f, Want{Package: primePkg, Version: primeVer, Source: "apkmirror"}); err == nil || !strings.Contains(err.Error(), "DOES NOT VERIFY") {
 		t.Errorf("got %v", err)
 	}
 
@@ -226,7 +293,9 @@ func TestInspectRealBundles(t *testing.T) {
 		if f.Version != w[0] || f.Signer != w[1] || !f.Leanback || !f.ABIs["armeabi-v7a"] {
 			t.Errorf("%s: %+v", p, f)
 		}
-		if err := Check(f, Want{Package: f.Package, Version: w[0], Source: "apkmirror", Pinned: w[1]}); err != nil {
+		// AllowUnverified so this still runs on a machine without the Android SDK; with apksigner
+		// installed it also proves the real splits carry the base's certificate.
+		if err := Check(f, Want{Package: f.Package, Version: w[0], Source: "apkmirror", Pinned: w[1], AllowUnverified: true}); err != nil {
 			t.Errorf("%s: %v", p, err)
 		}
 	}
@@ -279,9 +348,10 @@ func TestVerifyReportsRank(t *testing.T) {
 	der, _ := apktest.Cert("pub")
 	p := write(t, "r.apkm", apktest.Zip(map[string][]byte{
 		"base.apk":                     apktest.SignedAPK(map[string][]byte{"AndroidManifest.xml": manifest(t)}, der),
-		"split_config.armeabi_v7a.apk": []byte("n"),
+		"split_config.armeabi_v7a.apk": apktest.SignedAPK(map[string][]byte{"part": []byte("n")}, der),
 	}))
-	w := Want{Package: primePkg, Version: primeVer, Source: "apkmirror", ABIs: []string{"arm64-v8a", "armeabi-v7a", "armeabi"}}
+	w := Want{Package: primePkg, Version: primeVer, Source: "apkmirror", AllowUnverified: true,
+		ABIs: []string{"arm64-v8a", "armeabi-v7a", "armeabi"}}
 	v, err := Verify(context.Background(), p, w)
 	if err != nil || v.Rank != 1 {
 		t.Errorf("a 32-bit build on a 64-bit-capable device is rank 1, got %+v %v", v, err)

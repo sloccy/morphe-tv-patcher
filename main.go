@@ -100,6 +100,7 @@ func setup() (*app, error) {
 	env := sources.DefaultEnv()
 	env.InputDir, env.CacheDir, env.Store = cfg.Input(), cfg.Cache(), a.st
 	env.FlareURL, env.DirectOK = cfg.FlareSolverrURL, cfg.DirectOK
+	env.AllowUnverified = cfg.AllowUnverifiedSignature
 	for _, g := range []*apkmirror.Gate{apkmirror.Shared, apkmirror.SharedFlare} {
 		g.MinGap, g.Cooldown = cfg.MirrorGap, cfg.MirrorCooldown
 	}
@@ -305,6 +306,7 @@ func cmdFetch(args []string) error {
 	env := sources.DefaultEnv()
 	env.InputDir, env.CacheDir, env.Store = a.cfg.Input(), a.cfg.Cache(), a.st
 	env.FlareURL, env.DirectOK = a.cfg.FlareSolverrURL, a.cfg.DirectOK
+	env.AllowUnverified = a.cfg.AllowUnverifiedSignature
 	ov := a.st.Override(*pkg)
 	f, err := sources.Fetch(ctx, &env, sources.App{Package: *pkg, Name: app.Name, Version: *ver, Sources: ov.Sources,
 		SignerPin: ov.SignerSHA256, SlugOverride: ov.APKMirror, ABIs: abi.Parse(*abiList), AllowPhone: srcCfg.AllowPhone}, *sdk)

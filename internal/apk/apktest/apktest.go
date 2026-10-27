@@ -60,6 +60,25 @@ func Zip(files map[string][]byte) []byte {
 	return buf.Bytes()
 }
 
+// Entry is one archive member. ZipEntries keeps the given order and allows a repeated name, which
+// the map form cannot express.
+type Entry struct {
+	Name string
+	Data []byte
+}
+
+// ZipEntries builds a zip archive with the given entries, in order, duplicate names included.
+func ZipEntries(entries ...Entry) []byte {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, e := range entries {
+		w, _ := zw.Create(e.Name)
+		_, _ = w.Write(e.Data)
+	}
+	_ = zw.Close()
+	return buf.Bytes()
+}
+
 // SignedAPK builds an APK from files and inserts a v2 signing block holding certDER.
 func SignedAPK(files map[string][]byte, certDER []byte) []byte {
 	z := Zip(files)

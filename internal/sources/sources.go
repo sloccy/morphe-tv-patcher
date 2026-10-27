@@ -41,6 +41,8 @@ type Env struct {
 	Gate      *apkmirror.Gate // paces direct APKMirror requests (nil = unpaced, for tests)
 	FlareGate *apkmirror.Gate // paces requests made through FlareSolverr
 	DirectOK  bool            // APKMirror direct requests allowed
+	// AllowUnverified accepts files when apksigner is not installed (ALLOW_UNVERIFIED_SIGNATURES).
+	AllowUnverified bool
 
 	Mirror func(context.Context, apkmirror.AppRequest, apkmirror.Options) (apkmirror.Result, string, error)
 	Verify func(ctx context.Context, path string, w verify.Want) (*verify.Verified, error)
@@ -92,7 +94,8 @@ func Fetch(ctx context.Context, e *Env, a App, sdk int) (*Fetched, error) {
 	var attempts, fatals []string
 	noBuild := false
 	want := func(source string) verify.Want {
-		return verify.Want{Package: a.Package, Version: a.Version, Source: source, Pinned: pinned, ABIs: a.ABIs, AllowPhone: a.AllowPhone}
+		return verify.Want{Package: a.Package, Version: a.Version, Source: source, Pinned: pinned, ABIs: a.ABIs,
+			AllowPhone: a.AllowPhone, AllowUnverified: e.AllowUnverified}
 	}
 	var seenAvail []string // what a release page said it offers (kept even when nothing was usable)
 	finish := func(v *verify.Verified, detail string) *Fetched {
