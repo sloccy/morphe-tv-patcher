@@ -731,14 +731,22 @@ func (r *Runner) appGroup(ctx context.Context, o Options, ld *loaded, pkg, name,
 	// patch once for this CPU list
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(key + "|" + src.ID))
-	out2 := filepath.Join(r.Cfg.Output(), fmt.Sprintf("%s-%s-%s-%s.apk", pkg, safe(newest), rel.Tag, strconv.FormatUint(uint64(h.Sum32()), 16)))
+	out2 := filepath.Join(r.Cfg.Output(), fmt.Sprintf("%s-%s-%s-%s.apk", pkg, safe(newest), safe(rel.Tag), strconv.FormatUint(uint64(h.Sum32()), 16)))
 	patchErr := r.Deps.Patch(ctx, morphe.Options{Jar: r.Cfg.MorpheJar, MPP: mpp, Input: fetched.Path, Out: out2,
 		Keystore: r.Cfg.Keystore(), BytecodeMode: r.Cfg.BytecodeMode,
 		OptionsFile: ov.OptionsFile, Enable: ov.Enable, Disable: ov.Disable})
 	p := &patched{path: out2, err: patchErr, installedPkg: pkg}
 	if patchErr == nil {
+		// A clone patch legitimately renames the package, but the name comes from the patched
+		// APK's own manifest and ends up in adb command lines and file paths, so take it only
+		// when it really looks like a package name.
 		if ip, err := r.Deps.PackageOf(out2); err == nil && ip != "" {
-			p.installedPkg = ip
+			if store.ValidPackage(ip) {
+				p.installedPkg = ip
+			} else {
+				slog.Warn("patched apk declares an implausible package name; keeping the original",
+					"package", pkg, "declared", ip)
+			}
 		}
 	}
 

@@ -207,9 +207,11 @@ var versionName = regexp.MustCompile(`versionName=(\S.*)`)
 
 // InstalledVersion returns the installed versionName, or "" if the package is not installed.
 func (c *Client) InstalledVersion(ctx context.Context, serial, pkg string) (string, error) {
-	out, err := c.shell(ctx, serial, "dumpsys package "+pkg)
+	// Separate arguments, not one string: adb hands a single string to the device's shell, and the
+	// package name can come from a patched APK's manifest.
+	out, err := c.Run(ctx, "-s", serial, "shell", "dumpsys", "package", pkg)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("adb shell dumpsys package %q: %s", pkg, firstLine(out, err))
 	}
 	if m := versionName.FindStringSubmatch(out); m != nil {
 		return strings.TrimSpace(m[1]), nil

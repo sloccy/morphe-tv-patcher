@@ -88,6 +88,35 @@ func TestValidHost(t *testing.T) {
 	}
 }
 
+func TestValidPackage(t *testing.T) {
+	good := []string{"com.a", "com.netflix.ninja", "com.netflix.ninja.clone", "a.b_c.d1"}
+	bad := []string{"", "com", "com.foo;id>/sdcard/p;", "../patches/evil", "-rf", "com.foo bar",
+		"com.foo/../bar", "com..foo", strings.Repeat("a.b", 100)}
+	for _, p := range good {
+		if !ValidPackage(p) {
+			t.Errorf("%q should be valid", p)
+		}
+	}
+	for _, p := range bad {
+		if ValidPackage(p) {
+			t.Errorf("%q should be invalid", p)
+		}
+	}
+
+	// the choke point for the page and for a hand-edited settings.json
+	s, _ := Open(t.TempDir())
+	d, _ := s.AddDevice("tv", "10.0.0.6")
+	if err := s.SetApps(d.ID, []AppChoice{{Package: "com.foo;id"}}); err == nil {
+		t.Error("an app with a bogus package name must be refused")
+	}
+	if len(s.Settings().Devices[0].Apps) != 0 {
+		t.Error("nothing should have been saved")
+	}
+	if err := s.SetInstall(d.ID, "com.a", Install{InstalledPackage: "com.a;id"}); err == nil {
+		t.Error("a bogus installed package must not reach state.json")
+	}
+}
+
 func TestConcurrentAccessAndNoTempFilesLeft(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := Open(dir)

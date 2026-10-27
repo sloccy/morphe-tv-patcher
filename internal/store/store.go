@@ -251,6 +251,12 @@ func ValidHost(h string) bool {
 
 var numeric = regexp.MustCompile(`^[0-9.]+$`)
 
+var packageRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$`)
+
+// ValidPackage accepts an Android package name and nothing else: the name reaches adb command
+// lines and file paths, so a shell metacharacter or a ".." in it must never get that far.
+func ValidPackage(p string) bool { return len(p) <= 200 && packageRE.MatchString(p) }
+
 // Settings returns a deep copy.
 func (s *Store) Settings() Settings {
 	s.mu.Lock()
@@ -365,8 +371,8 @@ func (s *Store) normalizeLocked(choices []AppChoice) ([]AppChoice, error) {
 	seen := map[string]bool{}
 	apps := []AppChoice{}
 	for _, c := range choices {
-		if c.Package == "" || len(c.Package) > 200 {
-			return nil, errors.New("every app needs a package name")
+		if !ValidPackage(c.Package) {
+			return nil, fmt.Errorf("%q is not a valid package name", c.Package)
 		}
 		if c.Source == "" && len(s.settings.Sources) > 0 {
 			c.Source = s.settings.Sources[0].ID
@@ -780,6 +786,9 @@ func (s *Store) Install(dev, pkg string) (Install, bool) {
 
 // SetInstall records a successful install.
 func (s *Store) SetInstall(dev, pkg string, in Install) error {
+	if in.InstalledPackage != "" && !ValidPackage(in.InstalledPackage) {
+		return fmt.Errorf("%q is not a valid package name", in.InstalledPackage)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.state.Installs[dev+"/"+pkg] = &in

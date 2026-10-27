@@ -338,6 +338,19 @@ func TestCloneInstalledPackageIsTrackedFromTheManifest(t *testing.T) {
 	}
 }
 
+func TestAnImplausiblePackageNameFromTheManifestIsIgnored(t *testing.T) {
+	rg := newRig(t)
+	d := rg.device(t, "TV", "10.0.0.6", netflix)
+	// the name reaches adb command lines and file paths, so a patch that renames the output to
+	// something shell-shaped must not be followed
+	rg.pkgName = func(string) string { return "com.netflix.ninja;id>/sdcard/p" }
+	rg.r.Run(context.Background(), Options{})
+	in, _ := rg.st.Install(d.ID, netflix)
+	if in.InstalledPackage != netflix {
+		t.Fatalf("want the original package, got %+v", in)
+	}
+}
+
 func TestFetchFailureAlertRules(t *testing.T) {
 	rg := newRig(t)
 	rg.device(t, "TV", "10.0.0.6", prime)

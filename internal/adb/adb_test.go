@@ -101,9 +101,11 @@ func TestPairInstallAndQueries(t *testing.T) {
 			return "armeabi-v7a,armeabi\n", nil
 		case args[2] == "shell" && strings.Contains(args[3], "version.sdk"):
 			return "31", nil
-		case args[2] == "shell" && strings.Contains(args[3], "dumpsys package com.a"):
+		// the package name must arrive as its own argument, never concatenated into the command
+		// string that the device's shell would re-parse
+		case args[2] == "shell" && args[3] == "dumpsys" && args[4] == "package" && args[5] == "com.a":
 			return "Packages:\n  versionCode=5\n  versionName=13.0.1 build 25028\n  flags=[ ]", nil
-		case args[2] == "shell" && strings.Contains(args[3], "dumpsys package com.none"):
+		case args[2] == "shell" && args[3] == "dumpsys" && args[4] == "package" && args[5] == "com.none":
 			return "Unable to find package: com.none", nil
 		}
 		return "", errors.New("unexpected " + strings.Join(args, " "))
