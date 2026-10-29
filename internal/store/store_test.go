@@ -150,9 +150,9 @@ func TestCorruptFileIsAnErrorNotSilentlyEmpty(t *testing.T) {
 func TestOverridesAreReadFromSettings(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, "settings.json"),
-		[]byte(`{"devices":[],"overrides":{"com.a":{"apkmirror":"pub/app","allow_uninstall":true}}}`), 0o600)
+		[]byte(`{"devices":[],"overrides":{"com.a":{"apkmirror":"pub/app","allow_uninstall":false}}}`), 0o600)
 	s, _ := Open(dir)
-	if o := s.Override("com.a"); o.APKMirror != "pub/app" || !o.AllowUninstall {
+	if o := s.Override("com.a"); o.APKMirror != "pub/app" || o.CanUninstall() {
 		t.Errorf("%+v", o)
 	}
 	if o := s.Override("com.zzz"); o.APKMirror != "" {

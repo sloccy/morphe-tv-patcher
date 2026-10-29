@@ -13,7 +13,7 @@ on your Google TVs. A small web page lets you add devices and tick apps; a sched
    run leaves a TV alone while something is playing on it and tries again at the next run; **Run now**
    always installs. After a successful update the older versions' downloads and patched files are deleted.
    If the patches ever
-   roll the target back to a version older than the one installed, the installed one is kept (no downgrade).
+   roll the target back to a version older than the one installed, the older build is still installed (the app is uninstalled first, so you log in again; `allow_uninstall: false` opts an app out). Only a patched app identical to the one already on the TV is left alone.
    A bundle already on disk is never downloaded again: the cache is not size-capped, and a cached file
    is used without visiting APKMirror whenever the release offers no better build for the TV.
 
@@ -53,8 +53,9 @@ good port, mDNS, then a port scan). Pair once from the page ("Pair device with p
 keys live in the data volume.
 
 Apps first installed by Morphe Manager are signed with Manager's key, so Android refuses to update
-them: uninstall them once (the page tells you), or set `allow_uninstall` for that app in
-`settings.json`. Never uninstall stock Netflix; the patched copy installs beside it as a clone.
+them, so tv-patcher uninstalls the app and reinstalls it (you log in again). The same goes for a
+downgrade, which Android refuses without an uninstall. Set `allow_uninstall` to `false` for an app in
+`settings.json` to opt out (you are told to uninstall by hand). Never uninstall stock Netflix; the patched copy installs beside it as a clone.
 
 ## Several TVs and app sets
 

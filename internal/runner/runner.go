@@ -603,12 +603,6 @@ func (r *Runner) app(ctx context.Context, o Options, ld *loaded, pkg string, cs 
 	var need []*conn
 	for _, c := range cs {
 		in, has := r.Store.Install(c.dev.ID, pkg)
-		if has && in.PatchSource == src.ID && in.APKVersion != "" && patches.VersionLess(newest, in.APKVersion) {
-			// this source now names an older version than the one it installed (a rollback): Android would
-			// refuse the downgrade, so keep what is there and do no download or patching
-			out = append(out, res(c, true, fmt.Sprintf("%s on %s: installed %s is newer than the target %s, keeping it", name, c.dev.Name, in.APKVersion, newest)))
-			continue
-		}
 		if !o.Force && has && in.APKVersion == newest && in.PatchesVersion == rel.Tag && !o.NoDevice &&
 			in.PatchSource == src.ID {
 			ip := in.InstalledPackage
@@ -857,9 +851,17 @@ func (r *Runner) install(ctx context.Context, c *conn, pkg string, p *patched, o
 	if ok {
 		return nil
 	}
-	if strings.Contains(msg, "UPDATE_INCOMPATIBLE") {
+	why := ""
+	switch {
+	case strings.Contains(msg, "UPDATE_INCOMPATIBLE"):
 		// signed with a different key than the installed copy (e.g. installed by Morphe Manager)
-		if ov.AllowUninstall && p.installedPkg != "com.netflix.ninja" {
+		why = "signature differs from the installed app"
+	case strings.Contains(msg, "VERSION_DOWNGRADE"):
+		// Android only goes back to an older version of a non-debuggable app by uninstalling first
+		why = "the installed app is newer than this build, and Android can only go back by uninstalling it"
+	}
+	if why != "" {
+		if ov.CanUninstall() && p.installedPkg != "com.netflix.ninja" {
 			if err := r.ADB.Uninstall(ctx, c.serial, p.installedPkg); err != nil {
 				return err
 			}
@@ -867,7 +869,7 @@ func (r *Runner) install(ctx context.Context, c *conn, pkg string, p *patched, o
 				return nil
 			}
 		} else {
-			return fmt.Errorf("signature differs from the installed app. Uninstall %s on the TV (you will have to log in again) or set allow_uninstall for %s in settings.json", p.installedPkg, pkg)
+			return fmt.Errorf("%s. Uninstall %s on the TV (you will have to log in again) or remove allow_uninstall=false for %s in settings.json", why, p.installedPkg, pkg)
 		}
 	}
 	if len(msg) > 300 {

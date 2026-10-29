@@ -124,8 +124,12 @@ type Override struct {
 	Enable         []string `json:"enable,omitempty"` // Morphe patch names
 	Disable        []string `json:"disable,omitempty"`
 	OptionsFile    string   `json:"options_file,omitempty"`
-	AllowUninstall bool     `json:"allow_uninstall,omitempty"`
+	AllowUninstall *bool    `json:"allow_uninstall,omitempty"` // default true; false opts an app out
 }
+
+// CanUninstall says whether tv-patcher may uninstall the app to get past a signature mismatch or
+// a downgrade. On unless the override sets allow_uninstall to false.
+func (o Override) CanUninstall() bool { return o.AllowUninstall == nil || *o.AllowUninstall }
 
 // Settings is settings.json.
 type Settings struct {

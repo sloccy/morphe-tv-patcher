@@ -440,36 +440,47 @@ func TestOneMessagePerAppNotPerDevice(t *testing.T) {
 	}
 }
 
-func TestSignatureConflictGuidanceAndAllowUninstall(t *testing.T) {
-	rg := newRig(t)
-	d := rg.device(t, "TV", "10.0.0.6", prime)
-	rg.adb.installMsg[prime] = "Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: signatures do not match]"
-	res := rg.r.Run(context.Background(), Options{})
-	if res[0].OK || !res[0].Alert || !strings.Contains(res[0].Message, "Uninstall") || len(rg.adb.uninstalled) != 0 {
-		t.Fatalf("%+v uninstalled %v", res, rg.adb.uninstalled)
-	}
-	// with allow_uninstall it removes the old copy and retries
-	dir := filepath.Dir(rg.r.Cfg.Cache())
-	_ = dir
-	settings := `{"sources":[{"id":"o-default","repo":"o/default"}],"devices":[{"id":"` + d.ID + `","name":"TV","host":"10.0.0.6","apps":["` + prime + `"]}],"overrides":{"` + prime + `":{"allow_uninstall":true}}}`
+func optOutUninstall(t *testing.T, rg *rig, d store.Device, pkg string) {
+	t.Helper()
+	settings := `{"sources":[{"id":"o-default","repo":"o/default"}],"devices":[{"id":"` + d.ID + `","name":"TV","host":"10.0.0.6","apps":["` + pkg + `"]}],"overrides":{"` + pkg + `":{"allow_uninstall":false}}}`
 	_ = os.WriteFile(filepath.Join(rg.r.Cfg.DataDir, "state", "settings.json"), []byte(settings), 0o600)
-	st, _ := store.Open(filepath.Join(rg.r.Cfg.DataDir, "state"))
+	st, err := store.Open(filepath.Join(rg.r.Cfg.DataDir, "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	rg.r.Store = st
-	rg.adb.installMsg[prime] = "Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE]"
-	res = rg.r.Run(context.Background(), Options{})
-	if !res[0].OK || len(rg.adb.uninstalled) != 1 || !strings.HasSuffix(rg.adb.uninstalled[0], prime) {
-		t.Errorf("%+v uninstalled %v", res, rg.adb.uninstalled)
+}
+
+func TestUninstallBeyondSignatureOrDowngrade(t *testing.T) {
+	for _, msg := range []string{
+		"Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: signatures do not match]",
+		"Failure [INSTALL_FAILED_VERSION_DOWNGRADE: Downgrade detected]",
+	} {
+		rg := newRig(t)
+		d := rg.device(t, "TV", "10.0.0.6", prime)
+		rg.adb.installMsg[prime] = msg
+		// opted out: guidance, nothing uninstalled
+		optOutUninstall(t, rg, d, prime)
+		res := rg.r.Run(context.Background(), Options{})
+		if res[0].OK || !res[0].Alert || !strings.Contains(res[0].Message, "allow_uninstall") || len(rg.adb.uninstalled) != 0 {
+			t.Fatalf("%s: %+v uninstalled %v", msg, res, rg.adb.uninstalled)
+		}
+		// default: removes the old copy and retries
+		rg = newRig(t)
+		rg.device(t, "TV", "10.0.0.6", prime)
+		rg.adb.installMsg[prime] = msg
+		res = rg.r.Run(context.Background(), Options{})
+		if !res[0].OK || len(rg.adb.uninstalled) != 1 || !strings.HasSuffix(rg.adb.uninstalled[0], prime) {
+			t.Errorf("%s: %+v uninstalled %v", msg, res, rg.adb.uninstalled)
+		}
 	}
 }
 
 func TestStockNetflixIsNeverUninstalled(t *testing.T) {
 	rg := newRig(t)
-	d := rg.device(t, "TV", "10.0.0.6", netflix)
-	settings := `{"sources":[{"id":"o-default","repo":"o/default"}],"devices":[{"id":"` + d.ID + `","name":"TV","host":"10.0.0.6","apps":["` + netflix + `"]}],"overrides":{"` + netflix + `":{"allow_uninstall":true}}}`
-	_ = os.WriteFile(filepath.Join(rg.r.Cfg.DataDir, "state", "settings.json"), []byte(settings), 0o600)
-	rg.r.Store, _ = store.Open(filepath.Join(rg.r.Cfg.DataDir, "state"))
+	rg.device(t, "TV", "10.0.0.6", netflix)
 	rg.pkgName = func(string) string { return "com.netflix.ninja" } // pretend the clone patch did not rename it
-	rg.adb.installMsg[netflix] = "Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE]"
+	rg.adb.installMsg[netflix] = "Failure [INSTALL_FAILED_VERSION_DOWNGRADE]"
 	res := rg.r.Run(context.Background(), Options{})
 	if res[0].OK || len(rg.adb.uninstalled) != 0 {
 		t.Errorf("%+v uninstalled %v", res, rg.adb.uninstalled)
@@ -1500,17 +1511,13 @@ func TestDropOldKeepsNewerAndStillTargetedVersions(t *testing.T) {
 	}
 }
 
-func TestRolledBackTargetNeverDowngradesOrDownloads(t *testing.T) {
+func TestRolledBackTargetDowngradesByUninstalling(t *testing.T) {
 	rg := newRig(t)
 	d := rg.device(t, "TV", "10.0.0.6", prime)
 	_ = rg.st.SetInstall(d.ID, prime, store.Install{APKVersion: "99.0.0", PatchesVersion: "v0", PatchSource: defSrc})
-	for _, o := range []Options{{}, {Manual: true}, {Force: true}} {
-		res := rg.r.Run(context.Background(), o)
-		if rg.fetches != 0 || rg.patches != 0 || len(rg.adb.installs) != 0 {
-			t.Fatalf("%+v: a rollback must not fetch, patch or install: %d %d %v", o, rg.fetches, rg.patches, rg.adb.installs)
-		}
-		if len(res) == 0 || !res[0].OK || res[0].Alert || !strings.Contains(res[0].Message, "keeping it") {
-			t.Errorf("%+v: want a quiet keeping-it line, got %+v", o, res)
-		}
+	rg.adb.installMsg[prime] = "Failure [INSTALL_FAILED_VERSION_DOWNGRADE]"
+	res := rg.r.Run(context.Background(), Options{})
+	if len(res) == 0 || !res[0].OK || len(rg.adb.uninstalled) != 1 || len(rg.adb.installs) == 0 {
+		t.Errorf("a rollback must uninstall and install the older build: %+v uninstalled %v", res, rg.adb.uninstalled)
 	}
 }
