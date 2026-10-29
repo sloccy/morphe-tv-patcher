@@ -5,6 +5,7 @@
 //	tv-patcher pair         register a device (command-line alternative to the web page)
 //	tv-patcher fetch        download and verify one app (debugging / CI)
 //	tv-patcher resolve      find the APKMirror page for apps without downloading (CI)
+//	tv-patcher digest       what an APK installs, to compare two builds (debugging)
 //	tv-patcher healthcheck  for the Docker HEALTHCHECK
 package main
 
@@ -26,6 +27,7 @@ import (
 
 	"github.com/sloccy/morphe-tv-patcher/internal/abi"
 	"github.com/sloccy/morphe-tv-patcher/internal/adb"
+	"github.com/sloccy/morphe-tv-patcher/internal/apk"
 	"github.com/sloccy/morphe-tv-patcher/internal/apkmirror"
 	"github.com/sloccy/morphe-tv-patcher/internal/config"
 	"github.com/sloccy/morphe-tv-patcher/internal/morphe"
@@ -62,12 +64,14 @@ func main() {
 		err = cmdFetch(args)
 	case "resolve":
 		err = cmdResolve(args)
+	case "digest":
+		err = cmdDigest(args)
 	case "healthcheck":
 		err = cmdHealth()
 	case "version":
 		fmt.Printf("tv-patcher %s (%s)\n", version, commit)
 	default:
-		err = fmt.Errorf("unknown command %q (run, once, pair, fetch, healthcheck, version)", cmd)
+		err = fmt.Errorf("unknown command %q (run, once, pair, fetch, resolve, digest, healthcheck, version)", cmd)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -342,6 +346,35 @@ func cmdHealth() error {
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 16))
 	if resp.StatusCode != http.StatusOK || string(b) != "ok" {
 		return fmt.Errorf("unhealthy: HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// cmdDigest prints what each APK installs: the identity the runner compares to decide whether a
+// new patches release really changed an app. Patching the same input twice must print the same id
+// even though sha256sum of the two files differs, which is what makes the comparison possible.
+func cmdDigest(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: digest FILE [FILE...]  (compare with sha256sum of the same files)")
+	}
+	first, same := "", true
+	for i, path := range args {
+		id, err := apk.ContentID(path)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s  %s\n", id, path)
+		if i == 0 {
+			first = id
+		}
+		same = same && id == first
+	}
+	if len(args) > 1 {
+		if same {
+			fmt.Println("same: these files install the same app, signed with the same key")
+		} else {
+			fmt.Println("different: these files do not install the same app")
+		}
 	}
 	return nil
 }

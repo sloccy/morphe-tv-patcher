@@ -81,7 +81,12 @@ func ZipEntries(entries ...Entry) []byte {
 
 // SignedAPK builds an APK from files and inserts a v2 signing block holding certDER.
 func SignedAPK(files map[string][]byte, certDER []byte) []byte {
-	z := Zip(files)
+	return SignZip(Zip(files), certDER)
+}
+
+// SignZip inserts a v2 signing block holding certDER into an existing archive, for tests that
+// build the archive themselves to control entry order, compression or timestamps.
+func SignZip(z, certDER []byte) []byte {
 	if certDER == nil {
 		return z
 	}

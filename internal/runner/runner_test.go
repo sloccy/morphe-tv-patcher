@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sloccy/morphe-tv-patcher/internal/apk/apktest"
 	"github.com/sloccy/morphe-tv-patcher/internal/config"
 	"github.com/sloccy/morphe-tv-patcher/internal/morphe"
 	"github.com/sloccy/morphe-tv-patcher/internal/patches"
@@ -158,6 +159,24 @@ type rig struct {
 	now         time.Time
 	cacheFetch  bool
 	stripLibs   [][]string // StripLibs of every patch call
+	// apkBody makes the bytes the fake patcher writes. Left nil it writes "apk", which has no
+	// identity at all, so a test written before builds had one behaves exactly as it did.
+	apkBody func(o morphe.Options) []byte
+	cert    []byte
+	dex     string // what the fake patcher puts in classes.dex: change it to change the build
+}
+
+// realAPKs makes the fake patcher write a genuine signed APK, so the runner can tell what it
+// built. rg.dex decides what is in it.
+func (rg *rig) realAPKs() {
+	rg.cert, _ = apktest.Cert("rig")
+	rg.dex = "dex one"
+	rg.apkBody = func(o morphe.Options) []byte {
+		return apktest.SignedAPK(map[string][]byte{
+			"AndroidManifest.xml": []byte("manifest"),
+			"classes.dex":         []byte(rg.dex),
+		}, rg.cert)
+	}
 }
 
 const (
@@ -208,7 +227,11 @@ func newRig(t *testing.T) *rig {
 		Patch: func(ctx context.Context, o morphe.Options) error {
 			rg.patches++
 			rg.stripLibs = append(rg.stripLibs, o.StripLibs)
-			return os.WriteFile(o.Out, []byte("apk"), 0o600)
+			body := []byte("apk")
+			if rg.apkBody != nil {
+				body = rg.apkBody(o)
+			}
+			return os.WriteFile(o.Out, body, 0o600)
 		},
 		Cached: func(src store.Source) (*patches.Release, string, bool) {
 			if rel := rg.cached[src.ID]; rel != nil {
@@ -1114,13 +1137,185 @@ func TestPairingSavesWhenAndReadsTheCPU(t *testing.T) {
 	}
 }
 
+// TestAReleaseThatChangesNothingInstallsNothing is what all of this is for: a new patch bundle
+// carries a new tag for every app, while usually only changing the patches of one or two of them.
+func TestAReleaseThatChangesNothingInstallsNothing(t *testing.T) {
+	rg := newRig(t)
+	rg.realAPKs()
+	d := rg.device(t, "TV", "10.0.0.6", prime)
+	rg.r.Run(context.Background(), Options{})
+	if len(rg.adb.installs) != 1 {
+		t.Fatalf("the first run installs: %v", rg.adb.installs)
+	}
+	in, _ := rg.st.Install(d.ID, prime)
+	if in.ContentID == "" {
+		t.Fatal("an install has to record what it put on the device")
+	}
+	installedAt := in.InstalledAt
+
+	// a new patches release that leaves this app's patches alone
+	rg.tags[defSrc] = "v1.43.0"
+	rg.adb.installs, rg.patches, rg.fetches, rg.notes = nil, 0, 0, nil
+	connects := rg.adb.connects
+	res := rg.r.Run(context.Background(), Options{})
+
+	if rg.patches != 1 {
+		t.Errorf("the app has to be built once to find out whether it changed: %d", rg.patches)
+	}
+	if len(rg.adb.installs) != 0 {
+		t.Errorf("nothing changed, so nothing should be installed: %v", rg.adb.installs)
+	}
+	if rg.adb.connects != connects {
+		t.Error("the TV should not be connected to at all, so it shows no notice")
+	}
+	if len(rg.notes) != 0 {
+		t.Errorf("nothing happened, so no alert should go out: %v", rg.notes)
+	}
+	var line *Result
+	for i := range res {
+		if res[i].Package == prime {
+			line = &res[i]
+		}
+	}
+	if line == nil || !line.OK || line.Changed || line.Alert {
+		t.Errorf("want one quiet, unchanged line: %+v", res)
+	}
+	if in, _ = rg.st.Install(d.ID, prime); in.PatchesVersion != "v1.43.0" {
+		t.Errorf("the new release must be recorded, or every run repeats the work: %+v", in)
+	}
+	if in.InstalledAt != installedAt {
+		t.Error("nothing was installed, so the install time must not move")
+	}
+
+	// from here the cheap up-to-date check takes over: no download and no patching at all
+	rg.patches, rg.fetches = 0, 0
+	rg.r.Run(context.Background(), Options{})
+	if rg.fetches != 0 || rg.patches != 0 {
+		t.Errorf("the next run should be free: %d fetches, %d patch runs", rg.fetches, rg.patches)
+	}
+}
+
+func TestAReleaseThatReallyChangesTheAppIsInstalled(t *testing.T) {
+	rg := newRig(t)
+	rg.realAPKs()
+	rg.device(t, "TV", "10.0.0.6", prime)
+	rg.r.Run(context.Background(), Options{})
+	rg.tags[defSrc] = "v1.43.0"
+	rg.dex = "dex two" // this release does change this app
+	rg.adb.installs, rg.notes = nil, nil
+	res := rg.r.Run(context.Background(), Options{})
+	if len(rg.adb.installs) != 1 {
+		t.Errorf("a real change has to be installed: %v", rg.adb.installs)
+	}
+	changed := false
+	for _, x := range res {
+		changed = changed || (x.Package == prime && x.OK && x.Changed && x.Alert)
+	}
+	if !changed || len(rg.notes) != 1 {
+		t.Errorf("and reported: %+v %v", res, rg.notes)
+	}
+}
+
+// TestIdenticalInputsAreNotPatchedTwice: patching is minutes of CPU, so a build that was already
+// made for the same inputs is reused.
+func TestIdenticalInputsAreNotPatchedTwice(t *testing.T) {
+	rg := newRig(t)
+	rg.realAPKs()
+	rg.device(t, "A", "10.0.0.1", prime)
+	rg.r.Run(context.Background(), Options{})
+	// a second TV with the same CPU joins: it needs the build that is already on disk
+	rg.device(t, "B", "10.0.0.2", prime)
+	rg.patches, rg.adb.installs = 0, nil
+	rg.r.Run(context.Background(), Options{})
+	if rg.patches != 0 {
+		t.Errorf("the build on disk should have been reused: %d patch runs", rg.patches)
+	}
+	if len(rg.adb.installs) != 1 || !strings.HasPrefix(rg.adb.installs[0], "10.0.0.2:") {
+		t.Errorf("the new TV still gets the app: %v", rg.adb.installs)
+	}
+}
+
+// TestChangedSettingsRebuild covers settings that decided the output but were not noticed before:
+// the bytecode mode and the per-app patch selection.
+func TestChangedSettingsRebuild(t *testing.T) {
+	rg := newRig(t)
+	rg.realAPKs()
+	rg.device(t, "A", "10.0.0.1", prime)
+	rg.r.Run(context.Background(), Options{})
+	rg.device(t, "B", "10.0.0.2", prime)
+	rg.patches = 0
+	rg.r.Run(context.Background(), Options{})
+	if rg.patches != 0 {
+		t.Fatalf("the identical build should have been reused: %d patch runs", rg.patches)
+	}
+	rg.device(t, "C", "10.0.0.3", prime)
+	rg.r.Cfg.BytecodeMode = "FULL"
+	rg.patches = 0
+	rg.r.Run(context.Background(), Options{})
+	if rg.patches != 1 {
+		t.Errorf("a changed bytecode mode has to rebuild: %d patch runs", rg.patches)
+	}
+}
+
+func TestForceRebuildsAndReinstalls(t *testing.T) {
+	rg := newRig(t)
+	rg.realAPKs()
+	rg.device(t, "TV", "10.0.0.6", prime)
+	rg.r.Run(context.Background(), Options{})
+	rg.patches, rg.adb.installs = 0, nil
+	rg.r.Run(context.Background(), Options{Force: true})
+	if rg.patches != 1 || len(rg.adb.installs) != 1 {
+		t.Errorf("force has to rebuild and reinstall: %d patch runs, %v", rg.patches, rg.adb.installs)
+	}
+}
+
+// TestRunNowPutsBackAnAppRemovedByHand: the skip goes by what is on record, but a run that is
+// talking to the TV anyway asks it first.
+func TestRunNowPutsBackAnAppRemovedByHand(t *testing.T) {
+	rg := newRig(t)
+	rg.realAPKs()
+	d := rg.device(t, "TV", "10.0.0.6", prime)
+	rg.r.Run(context.Background(), Options{})
+	rg.adb.installed[d.Host+":40000/"+prime] = "" // taken off the TV by hand
+	rg.tags[defSrc] = "v1.43.0"
+	rg.adb.installs = nil
+	rg.r.Run(context.Background(), Options{})
+	if len(rg.adb.installs) != 0 {
+		t.Errorf("a scheduled run goes by its records and never connects: %v", rg.adb.installs)
+	}
+	rg.r.Run(context.Background(), Options{Manual: true})
+	if len(rg.adb.installs) != 1 {
+		t.Errorf("Run now asks the TV and puts the app back: %v", rg.adb.installs)
+	}
+}
+
+// TestDryRunNeverSkips: a dry run is asked to build, so it says what it built.
+func TestDryRunNeverSkips(t *testing.T) {
+	rg := newRig(t)
+	rg.realAPKs()
+	rg.device(t, "TV", "10.0.0.6", prime)
+	rg.r.Run(context.Background(), Options{})
+	rg.adb.installs = nil
+	res := rg.r.Run(context.Background(), Options{DryRun: true, Force: true})
+	dry := false
+	for _, x := range res {
+		dry = dry || (x.Package == prime && x.OK && x.Changed && strings.Contains(x.Message, "dry run"))
+	}
+	if !dry || len(rg.adb.installs) != 0 {
+		t.Errorf("a dry run reports its build and installs nothing: %+v %v", res, rg.adb.installs)
+	}
+}
+
 func TestBusyTVIsLeftAloneUntilARunFindsItIdle(t *testing.T) {
 	rg := newRig(t)
 	rg.device(t, "TV", "10.0.0.6", prime)
 	rg.adb.playing["10.0.0.6"] = true
 	res := rg.r.Run(context.Background(), Options{})
-	if rg.fetches != 0 || rg.patches != 0 || len(rg.adb.installs) != 0 {
-		t.Errorf("a playing TV must not trigger work: %d fetches, %d patches, %v", rg.fetches, rg.patches, rg.adb.installs)
+	// What must not happen while something is playing is the install. Patching happens on this
+	// machine and costs the TV nothing, and it is what tells us whether the TV needs anything at
+	// all, so it is no longer held back.
+	if len(rg.adb.installs) != 0 {
+		t.Errorf("a playing TV must not be installed to: %v", rg.adb.installs)
 	}
 	if len(res) == 0 || !res[0].OK || res[0].Alert || !strings.Contains(res[0].Message, "waiting") {
 		t.Errorf("want a quiet waiting line, got %+v", res)

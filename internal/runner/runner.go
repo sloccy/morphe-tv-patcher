@@ -6,14 +6,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -662,22 +660,6 @@ func (r *Runner) appGroup(ctx context.Context, o Options, ld *loaded, pkg, name,
 	res := func(c *conn, ok bool, msg string) Result {
 		return Result{Device: c.dev.Name, Package: pkg, Name: name, OK: ok, Message: msg}
 	}
-	// A scheduled run leaves a TV alone while something is playing on it, before any download or
-	// patching; the next run tries again. Run now, Force and dry runs go ahead regardless.
-	if !o.Manual && !o.Force && !o.DryRun && !o.NoDevice {
-		var idle []*conn
-		for _, c := range gc {
-			if r.playing(ctx, c) {
-				out = append(out, res(c, true, fmt.Sprintf("%s on %s: update to %s is waiting, something is playing; the next scheduled run will try again", name, c.dev.Name, newest)))
-				continue
-			}
-			idle = append(idle, c)
-		}
-		if len(idle) == 0 {
-			return out
-		}
-		gc = idle
-	}
 	abis := gc[0].abis
 	sdk := 0
 	for _, c := range gc {
@@ -728,13 +710,29 @@ func (r *Runner) appGroup(ctx context.Context, o Options, ld *loaded, pkg, name,
 		*recovered = true
 	}
 
-	// patch once for this CPU list
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(key + "|" + src.ID))
-	out2 := filepath.Join(r.Cfg.Output(), fmt.Sprintf("%s-%s-%s-%s.apk", pkg, safe(newest), safe(rel.Tag), strconv.FormatUint(uint64(h.Sum32()), 16)))
-	patchErr := r.Deps.Patch(ctx, morphe.Options{Jar: r.Cfg.MorpheJar, MPP: mpp, Input: fetched.Path, Out: out2,
-		Keystore: r.Cfg.Keystore(), BytecodeMode: r.Cfg.BytecodeMode,
-		OptionsFile: ov.OptionsFile, Enable: ov.Enable, Disable: ov.Disable})
+	// Patch once for this CPU list, unless this very build was made before and its result is
+	// still on disk. id identifies what came out, so the devices below can tell whether they
+	// already have it.
+	out2 := r.outputPath(pkg, newest, rel.Tag, key, src.ID)
+	bk := r.buildKey(pkg, newest, src.ID, mpp, key, fetched.Path, ov)
+	var patchErr error
+	id := ""
+	if !o.Force {
+		id = r.reuse(pkg, bk, out2)
+	}
+	if id != "" {
+		slog.Info("reusing the patched apk already built from these inputs", "package", pkg,
+			"version", newest, "file", filepath.Base(out2))
+	} else {
+		patchErr = r.Deps.Patch(ctx, morphe.Options{Jar: r.Cfg.MorpheJar, MPP: mpp, Input: fetched.Path, Out: out2,
+			Keystore: r.Cfg.Keystore(), BytecodeMode: r.Cfg.BytecodeMode,
+			OptionsFile: ov.OptionsFile, Enable: ov.Enable, Disable: ov.Disable})
+		if patchErr == nil {
+			if id = contentID(pkg, out2); id != "" {
+				_ = r.Store.SetPatchedID(pkg, bk, id)
+			}
+		}
+	}
 	p := &patched{path: out2, err: patchErr, installedPkg: pkg}
 	if patchErr == nil {
 		// A clone patch legitimately renames the package, but the name comes from the patched
@@ -764,9 +762,34 @@ func (r *Runner) appGroup(ctx context.Context, o Options, ld *loaded, pkg, name,
 			out = append(out, x)
 			continue
 		}
-		prev := ""
+		prev, cur := "", store.Install{}
 		if in, ok := r.Store.Install(c.dev.ID, pkg); ok {
-			prev = in.APKVersion
+			prev, cur = in.APKVersion, in
+		}
+		// This release changes nothing for this app: the rebuild is the very APK the device
+		// already has. Record the new release and leave the TV alone, so no connection is made,
+		// nothing shows on the screen and the app is not restarted. A run that is connected to the
+		// TV anyway asks it first, the way the up-to-date check does, so Run now still notices an
+		// app that was removed by hand.
+		if !o.Force && id != "" && cur.ContentID == id && cur.APKVersion == newest && r.stillThere(ctx, c, cur, pkg) {
+			cur.PatchesVersion, cur.PatchSource = rel.Tag, src.ID
+			_ = r.Store.SetInstall(c.dev.ID, pkg, cur)
+			msg := fmt.Sprintf("%s on %s: patches %s change nothing for it, keeping the installed %s",
+				name, c.dev.Name, rel.Tag, newest)
+			x := res(c, true, msg)
+			if *recovered { // or the news that the download problem is over never goes out
+				x.Message, x.Alert, *recovered = "recovered, "+msg, true, false
+			}
+			out = append(out, x)
+			continue
+		}
+		// Nothing playing on the TV may be interrupted by an install; the next scheduled run tries
+		// again. Run now, Force and dry runs go ahead regardless. This is asked only once it is
+		// clear the device really needs the new build, so a release that changes nothing for an app
+		// never reaches the TV at all.
+		if !o.Manual && !o.Force && r.playing(ctx, c) {
+			out = append(out, res(c, true, fmt.Sprintf("%s on %s: update to %s is waiting, something is playing; the next scheduled run will try again", name, c.dev.Name, newest)))
+			continue
 		}
 		if err := r.ensureConn(ctx, c); err != nil {
 			x := Result{Device: c.dev.Name, Message: fmt.Sprintf("%s on %s: not installed, the TV is not reachable", name, c.dev.Name)}
@@ -784,7 +807,8 @@ func (r *Runner) appGroup(ctx context.Context, o Options, ld *loaded, pkg, name,
 			continue
 		}
 		_ = r.Store.SetInstall(c.dev.ID, pkg, store.Install{APKVersion: newest, PatchesVersion: rel.Tag, PatchSource: src.ID,
-			InstalledPackage: p.installedPkg, Source: fetched.Detail, InstalledAt: r.Now().Format(time.RFC3339)})
+			InstalledPackage: p.installedPkg, Source: fetched.Detail, InstalledAt: r.Now().Format(time.RFC3339),
+			ContentID: id})
 		r.dropOld(pkg, newest)
 		if prev == "" {
 			prev = "none"
@@ -912,6 +936,13 @@ func (r *Runner) dropOld(pkg, version string) {
 			}
 			delete(a.CacheFiles, p)
 		}
+		// a remembered build of a version that is gone can never be reused again
+		for k := range a.Patched {
+			v, _, ok := strings.Cut(k, "|")
+			if !ok || (!wanted[v] && !patches.VersionLess(version, v)) {
+				delete(a.Patched, k)
+			}
+		}
 	})
 	keep := pkg + "-" + safe(version) + "-"
 	for _, pat := range []string{pkg + "-*.apk", pkg + "-*.result.json"} {
@@ -924,9 +955,12 @@ func (r *Runner) dropOld(pkg, version string) {
 	}
 }
 
-// prune keeps the newest few patched files and bundles.
+// prune keeps the newest few patched files and bundles. Each kind is counted on its own: with
+// both in one budget an app built for several CPU lists lost one of its APKs to the result files
+// of another, and with it the chance to reuse that build.
 func (r *Runner) prune(pkg string) {
-	keepNewest(r.Cfg.Output(), []string{pkg + "-*.apk", pkg + "-*.result.json"}, 4)
+	keepNewest(r.Cfg.Output(), []string{pkg + "-*.apk"}, 4)
+	keepNewest(r.Cfg.Output(), []string{pkg + "-*.result.json"}, 4)
 	r.pruneCache()
 }
 

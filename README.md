@@ -8,7 +8,8 @@ on your Google TVs. A small web page lets you add devices and tick apps; a sched
 2. get that exact Android TV bundle (your drop folder, the cache, APKMirror, APKMirror through
    FlareSolverr) and verify it;
 3. patch it once with the Morphe CLI for the TV's CPU;
-4. install it over wireless ADB on every device that needs it, and tell you on Telegram. A scheduled
+4. install it over wireless ADB on every device that needs it, and tell you on Telegram. A new patches
+   release that does not change a given app is noticed and that app is not re-installed at all. A scheduled
    run leaves a TV alone while something is playing on it and tries again at the next run; **Run now**
    always installs. After a successful update the older versions' downloads and patched files are deleted.
    If the patches ever
@@ -124,6 +125,25 @@ The APKMirror page for an app is found automatically (search by package name, an
 first) and cached; `settings.json` can override a wrong guess. Nothing is downgraded: if the newest
 supported version cannot be found you are told, with the exact file to drop in.
 
+**A patches release that changes nothing is not re-installed.** A new bundle usually only changes the
+patches of one or two apps, but its release tag changes for all of them, and nothing in the bundle says
+which app a change belongs to. So every selected app is still patched once per release, and the result
+is then compared with what the TV already has. Not by hashing the file: the patcher rebuilds the archive
+and signs it again every run, so two identical builds are never byte-identical. What is hashed is what
+the APK *installs* — every entry's name, checksum and size, plus the signing certificate. If that matches,
+the TV is left alone: no ADB session, no notice on the screen, no restart of the app, no Telegram message.
+The record is updated with the new release, so the next scheduled run does not even download. A different
+signing key (a regenerated keystore) counts as a different build and is installed. Because the comparison
+goes by the record, an app taken off a TV by hand is noticed on the next **Run now** or within
+`VERIFY_EVERY`, not immediately. `tv-patcher digest FILE [FILE...]` prints that identity for any APK, which
+is how you can check for yourself that patching the same input twice really does produce the same app.
+
+**The same inputs are not patched twice.** What a build depends on — the app file, the patch bundle, the
+CPU list, `BYTECODE_MODE`, the keystore and the per-app `enable`/`disable`/`options_file` — is remembered
+together with the file it produced. A later run with the same inputs (a dry run, a TV that was unreachable
+last cycle, a newly added TV) reuses that file instead of spending minutes patching again; `--force`
+always rebuilds. Changing `BYTECODE_MODE` or an override now rebuilds, where before it changed nothing.
+
 **Nothing is stripped:** patched apps keep every native-library architecture (no `--striplibs`), because
 dropping one can leave an app that will not install or starts and closes. The files are larger.
 
@@ -141,7 +161,8 @@ cryptographically and files are refused; `ALLOW_UNVERIFIED_SIGNATURES=true` acce
 out of a movie) for every ADB session, so tv-patcher connects as little as it can. A scheduled run
 plans from its own records and connects to a TV only when something has to be installed, when the TV
 has not been checked for `VERIFY_EVERY` (default 7 days, which also notices an app you removed by
-hand), or the first time. **Run now** always connects. Each TV card has two test buttons: **Test**
+hand), or the first time. The "something is playing" check happens just before installing, not before
+downloading, so a release that changes nothing for an app never reaches the TV at all. **Run now** always connects. Each TV card has two test buttons: **Test**
 only looks at the network (no ADB session, so no notice) and says whether Wireless debugging is
 answering; **Full test** really connects, checks the pairing, reads the CPU and updates the boot helper.
 The app list on each card can be collapsed (the line above it still says how many apps the TV gets).
@@ -210,6 +231,7 @@ tv-patcher once [--device ID] [--app PKG,PKG] [--force] [--dry-run] [--no-device
 tv-patcher pair --device ID --pair-port N --code 123456
 tv-patcher fetch --package PKG [--version V] [--source ID] [--abi LIST]   download and verify one app
 tv-patcher resolve [--package PKG] [--source ID] find apps on APKMirror, no download
+tv-patcher digest FILE [FILE...]  what an APK installs; with two files, whether they are the same app
 tv-patcher healthcheck | version
 ```
 

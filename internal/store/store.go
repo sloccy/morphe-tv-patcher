@@ -155,6 +155,10 @@ type AppState struct {
 	// CacheFiles maps each bundle we downloaded into the cache to the app version it holds, so the
 	// ones for older versions can be deleted once the newer one is installed.
 	CacheFiles map[string]string `json:"cache_files,omitempty"`
+	// Patched maps a build key (everything that decides what patching produces: the app version,
+	// the patch bundle, the CPU list, the patch options) to the ContentID of the APK it produced,
+	// so an identical build is never made twice.
+	Patched map[string]string `json:"patched,omitempty"`
 }
 
 // Install is what we put on one device.
@@ -165,6 +169,9 @@ type Install struct {
 	InstalledPackage string `json:"installed_package,omitempty"` // may differ from the app (Netflix clone)
 	Source           string `json:"source,omitempty"`
 	InstalledAt      string `json:"installed_at,omitempty"`
+	// ContentID identifies the patched APK that is on the device (apk.ContentID). A rebuild with
+	// the same id installs nothing: the device already has that exact app.
+	ContentID string `json:"content_id,omitempty"`
 }
 
 // DeviceInfo is what we learned about a device the last time we reached it.
@@ -770,6 +777,40 @@ func (s *Store) SetBuilds(pkg, version string, abis []string) error {
 			}
 		}
 		a.Builds[version] = append([]string{}, abis...)
+	})
+}
+
+// maxPatchedKeys is how many build keys an app remembers; a patches release that changes nothing
+// for an app adds one, so a handful covers every build still on disk.
+const maxPatchedKeys = 8
+
+// PatchedID returns the ContentID of the APK a build key produced before, or "" when that exact
+// build was never made (or is no longer remembered).
+func (s *Store) PatchedID(pkg, key string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if a := s.state.Apps[pkg]; a != nil {
+		return a.Patched[key]
+	}
+	return ""
+}
+
+// SetPatchedID remembers what a build key produced (the newest few keys are kept).
+func (s *Store) SetPatchedID(pkg, key, id string) error {
+	if key == "" || id == "" || s.PatchedID(pkg, key) == id {
+		return nil
+	}
+	return s.UpdateApp(pkg, func(a *AppState) {
+		if a.Patched == nil {
+			a.Patched = map[string]string{}
+		}
+		if _, ok := a.Patched[key]; !ok && len(a.Patched) >= maxPatchedKeys {
+			for k := range a.Patched {
+				delete(a.Patched, k)
+				break
+			}
+		}
+		a.Patched[key] = id
 	})
 }
 

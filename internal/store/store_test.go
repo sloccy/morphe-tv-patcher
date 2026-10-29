@@ -463,3 +463,60 @@ func TestSetsSurviveRestartAndOldFilesLoad(t *testing.T) {
 		t.Errorf("a file without sets keeps working; its apps are the device's extras: %s", got)
 	}
 }
+
+func TestPatchedBuildsAreRememberedAndBounded(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := Open(dir)
+	if s.PatchedID("com.a", "1|aaa") != "" {
+		t.Fatal("nothing built yet")
+	}
+	_ = s.SetPatchedID("com.a", "1|aaa", "")
+	_ = s.SetPatchedID("com.a", "", "1:deadbeef")
+	if s.PatchedID("com.a", "1|aaa") != "" {
+		t.Error("an id or a key that is missing is not knowledge")
+	}
+	_ = s.SetPatchedID("com.a", "1|aaa", "1:deadbeef")
+	if s.PatchedID("com.a", "1|aaa") != "1:deadbeef" {
+		t.Errorf("got %q", s.PatchedID("com.a", "1|aaa"))
+	}
+	for i := range maxPatchedKeys + 4 {
+		_ = s.SetPatchedID("com.a", fmt.Sprintf("2|%d", i), fmt.Sprintf("1:%d", i))
+	}
+	again, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(again.state.Apps["com.a"].Patched); n > maxPatchedKeys {
+		t.Errorf("the file would grow for ever: %d keys kept", n)
+	}
+	if again.PatchedID("com.a", fmt.Sprintf("2|%d", maxPatchedKeys+3)) == "" {
+		t.Error("the newest build must survive a restart")
+	}
+}
+
+func TestInstallRemembersWhatIsOnTheDevice(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := Open(dir)
+	in := Install{APKVersion: "1.2.3", PatchesVersion: "v1", PatchSource: "o-x", ContentID: "1:abc",
+		InstalledAt: "2026-10-28T00:00:00Z"}
+	if err := s.SetInstall("tv", "com.a", in); err != nil {
+		t.Fatal(err)
+	}
+	again, _ := Open(dir)
+	got, ok := again.Install("tv", "com.a")
+	if !ok || got != in {
+		t.Errorf("%+v", got)
+	}
+	// a state.json from before builds had an identity still loads, with no identity
+	if err := os.WriteFile(filepath.Join(dir, "state.json"),
+		[]byte(`{"installs":{"tv/com.a":{"apk_version":"1.2.3","patches_version":"v1"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok = old.Install("tv", "com.a"); !ok || got.ContentID != "" || got.APKVersion != "1.2.3" {
+		t.Errorf("%+v %v", got, ok)
+	}
+}
