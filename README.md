@@ -184,12 +184,14 @@ standby bucket. It keeps these tracking settings off: `wifi_scan_always_enabled`
 `location_mode`. It shows no messages; see `adb logcat -s BootAdb`, which it writes to on every
 check even when nothing needed changing, so an empty log means it has never run. **Full test** also
 reports how many of its two jobs Android has registered and the last line it logged. Whenever tv-patcher connects
-to a TV it installs the helper (and replaces it when the image carries a newer one, or when the app
-on the TV does not install what the one it ships installs — the permission is only ever granted to
-its own app. What is compared is every entry's checksum and size, not the file's bytes: the build
-signs with a throw-away key it makes fresh each time, so comparing bytes would reinstall the helper
-on every TV every time a new image is published, and the weekly rebuild publishes one whether or
-not the helper changed. An app whose entries match ours is our app, whoever signed it),
+to a TV it installs the helper (and **updates it over the top** when the image carries a newer one,
+or when the app on the TV does not install what the one it ships installs — the permission is only
+ever granted to its own app. What is compared is every entry's checksum and size, not the file's
+bytes, so re-signing the same code changes nothing and the weekly image rebuild touches no TV. An
+app whose entries match ours is our app, whoever signed it. Removing the app first is the fallback
+for an update Android refuses, which means a changed signing certificate or a lower versionCode;
+it costs the helper its permission grant, its Doze exemption and both its jobs, so the card says
+"replaced" rather than "updated" when it happens),
 grants it the one permission it needs over ADB, and opens it once so Android lets it receive
 the boot broadcast. Starting it is also what applies the settings, and it happens on every
 connection, not only after an install: the activity is no longer exported or in the launcher, so
@@ -198,8 +200,16 @@ jobs, which left every setting to the jobs and to the boot receiver — and on a
 restarted that meant the helper applied nothing at all. Because nothing on the TV ever
 opens the helper, Android would file it under "rare" and defer its jobs for hours, so tv-patcher also
 puts it on the Doze whitelist and in the active standby bucket whenever it connects. A card
-shows "boot helper ✓" and "pairing kept ✓". It is built in CI (`bootadb/build.sh`, Android SDK tools only), signed with a
-throw-away key, and shipped inside the image at `/opt/bootadb/bootadb.apk` (`BOOT_HELPER_APK`). If a
+shows "boot helper ✓" and "pairing kept ✓". It is built in CI (`bootadb/build.sh`, Android SDK tools
+only) and shipped inside the image at `/opt/bootadb/bootadb.apk` (`BOOT_HELPER_APK`). Its version is
+the integer in `bootadb/version`, bumped by hand when the app changes (CI refuses a change to the
+helper without it) so Android will take the update. Signing uses the `BOOTADB_KEYSTORE_B64` /
+`BOOTADB_KEYSTORE_PASS` repository secrets: the same certificate on every build is what lets a TV
+take an update over the top, and without the secret the build still works but falls back to a
+throw-away key, so each TV has to replace the helper once instead. Losing that key costs exactly
+one such replace per TV, which is why it needs no ceremony — the helper is identified by what it
+installs, never by who signed it. The keystore that signs the *patched apps* is a different, secret
+thing that never leaves the data volume. If a
 TV refuses it you get a message on the card and, on the second run in a row, a Telegram alert; apps
 are updated regardless.
 

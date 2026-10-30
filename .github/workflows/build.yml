@@ -69,6 +69,20 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 2 # enough to see what the last commit changed
+
+      # bootadb/version is what lets Android update the helper over the top instead of the app
+      # having to be uninstalled, so it has to go up whenever the app changes.
+      - name: The helper's version must be bumped when the helper changes
+        run: |
+          git rev-parse HEAD~1 >/dev/null 2>&1 || exit 0
+          app=$(git diff --name-only HEAD~1 HEAD -- bootadb/AndroidManifest.xml bootadb/src)
+          ver=$(git diff --name-only HEAD~1 HEAD -- bootadb/version)
+          if [ -n "$app" ] && [ -z "$ver" ]; then
+            echo "::error::$app changed but bootadb/version did not. Bump it, or every TV has to uninstall the helper to take the update."
+            exit 1
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -76,8 +90,20 @@ jobs:
           go-version-file: "go.mod"
           cache: true
 
+      # Signing every build with the same certificate is what lets a TV take the helper as an
+      # update instead of having to remove it first. Without the secret the build still works and
+      # falls back to a throw-away key, so a fork or a missing secret is not a failure.
       - name: Build and sign the APK
-        run: bootadb/build.sh
+        env:
+          BOOTADB_KEYSTORE_B64: ${{ secrets.BOOTADB_KEYSTORE_B64 }}
+          BOOTADB_KEYSTORE_PASS: ${{ secrets.BOOTADB_KEYSTORE_PASS }}
+        run: |
+          if [ -n "${BOOTADB_KEYSTORE_B64:-}" ]; then
+            ks=$(mktemp)
+            printf %s "$BOOTADB_KEYSTORE_B64" | base64 -d > "$ks"
+            export BOOTADB_KEYSTORE="$ks"
+          fi
+          bootadb/build.sh
 
       - name: Check the APK is the helper (package, permissions, receiver, version)
         run: BOOTADB_APK="$PWD/bootadb/out/bootadb.apk" go test -count=1 -run TestTheBuiltAPKIsTheHelper -v ./internal/helper

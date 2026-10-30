@@ -114,13 +114,17 @@ func (f *fakeADB) Install(ctx context.Context, s, apk string) (ok bool, output s
 			return false, msg
 		}
 	}
+	// Android refuses to update an app over one signed with a different certificate, which is
+	// what an app squatting the package name would be. Model that: a different file already on
+	// the device means the update is refused and the caller has to remove the app first.
+	if base == "bootadb.apk" && f.installed[s+"/com.sloccy.bootadb"] != "" &&
+		f.deviceAPK != "" && f.deviceAPK != apk {
+		return false, "Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: Existing package signatures do not match]"
+	}
 	f.installs = append(f.installs, s+" "+base)
 	if base == "bootadb.apk" {
 		f.installed[s+"/com.sloccy.bootadb"] = f.helperVer
 		f.deviceAPK = apk // the TV now holds this very file
-	}
-	for pkg := range f.installMsg {
-		_ = pkg
 	}
 	return true, "Success"
 }

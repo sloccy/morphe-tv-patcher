@@ -18,7 +18,10 @@ import (
 type HelperResult struct {
 	Skipped   bool   // no helper APK in this build, nothing to do
 	Version   string // version now on the device
-	Installed bool   // it was (re)installed this time
+	Installed bool   // it was installed or updated this time
+	// Replaced is true when the update had to be done by removing the app first, which loses its
+	// permission grant, its Doze exemption and its jobs until they are set up again.
+	Replaced bool
 	// KeyExpiry is what the TV's adb_allowed_connection_time reads. "0" means the pairing keys
 	// never expire, which is what the helper asks for; anything else is a countdown to being
 	// unpaired (7 days by default) and makes tv-patcher connect inside that window.
@@ -45,12 +48,20 @@ func (r *Runner) ensureHelper(ctx context.Context, c *conn) (HelperResult, error
 		return res, err
 	}
 	if have != b.Version || !r.helperIsOurs(ctx, c, b) {
-		if have != "" { // every build is signed with a new key, so an update is a reinstall
+		// Update over the top first. Removing the app costs it the permission grant, the Doze
+		// exemption and both of its scheduled jobs, and stops MY_PACKAGE_REPLACED from firing,
+		// which is one of the few things that makes the helper apply its settings by itself.
+		ok, out := r.ADB.Install(ctx, c.serial, b.Path)
+		if !ok && have != "" {
+			// A different signing certificate or a lower versionCode cannot be updated over, so
+			// the app has to go. That is the one-off cost of changing either.
 			if err := r.ADB.Uninstall(ctx, c.serial, helper.Package); err != nil {
 				return res, err
 			}
+			res.Replaced = true
+			ok, out = r.ADB.Install(ctx, c.serial, b.Path)
 		}
-		if ok, out := r.ADB.Install(ctx, c.serial, b.Path); !ok {
+		if !ok {
 			return res, fmt.Errorf("installing the boot helper failed: %s", firstLine(out))
 		}
 		res.Installed = true

@@ -228,16 +228,42 @@ func TestAHelperThatIsInstalledButHasNeverRunIsStarted(t *testing.T) {
 	}
 }
 
-func TestRunUpgradesAnOldBootHelperByReinstalling(t *testing.T) {
+// Updating over the top keeps the helper's permission grant, its Doze exemption and its jobs, and
+// lets MY_PACKAGE_REPLACED fire so the new code applies its settings by itself. Removing the app
+// first threw all of that away on every published image.
+func TestRunUpdatesAnOldBootHelperInPlace(t *testing.T) {
 	rg, _ := helperRig(t, 20261101)
-	rg.adb.installed["10.0.0.7:40000/com.sloccy.bootadb"] = "20261022"
-	rg.r.Run(context.Background(), Options{})
+	const serial = "10.0.0.7:40000"
+	rg.adb.installed[serial+"/com.sloccy.bootadb"] = "20261022"
+	lines := helperLines(rg.r.Run(context.Background(), Options{}))
+	if len(rg.adb.uninstalled) != 0 {
+		t.Errorf("an update must not remove the app: %v", rg.adb.uninstalled)
+	}
+	if rg.adb.installed[serial+"/com.sloccy.bootadb"] != "20261101" {
+		t.Errorf("and must still land the new version: %v", rg.adb.installed)
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0].Message, "updated the boot helper") {
+		t.Fatalf("say which happened: %+v", lines)
+	}
+}
+
+func TestAnUpdateAndroidRefusesFallsBackToReplacing(t *testing.T) {
+	rg, _ := helperRig(t, 20261101)
+	const serial = "10.0.0.7:40000"
+	rg.adb.installed[serial+"/com.sloccy.bootadb"] = "20261022"
+	// What Android answers when the certificate changed or the versionCode went down. The fake
+	// refuses the first install of this package and accepts the next.
+	rg.adb.installMsg["bootadb"] = "Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE]"
+	lines := helperLines(rg.r.Run(context.Background(), Options{}))
 	found := false
 	for _, u := range rg.adb.uninstalled {
 		found = found || strings.HasSuffix(u, "com.sloccy.bootadb")
 	}
-	if !found || rg.adb.installed["10.0.0.7:40000/com.sloccy.bootadb"] != "20261101" {
-		t.Errorf("old copy removed and new installed: %v %v", rg.adb.uninstalled, rg.adb.installed)
+	if !found || rg.adb.installed[serial+"/com.sloccy.bootadb"] != "20261101" {
+		t.Errorf("it must remove the app and install again: %v %v", rg.adb.uninstalled, rg.adb.installed)
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0].Message, "replaced the boot helper") {
+		t.Fatalf("and say that it had to, since the grant and the jobs went with it: %+v", lines)
 	}
 }
 

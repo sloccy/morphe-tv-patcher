@@ -261,7 +261,13 @@ func (r *Runner) helperStep(ctx context.Context, c *conn) []Result {
 	case res.Installed:
 		r.noteRecovered(key)
 		line.OK, line.Changed = true, true
-		line.Message = fmt.Sprintf("installed the boot helper (version %s); it switches Wireless debugging back on after the TV restarts", res.Version)
+		how := "updated"
+		if res.Replaced {
+			// Worth saying: it means the app was removed first, so its grant, its Doze exemption
+			// and its jobs were all set up again from nothing.
+			how = "replaced"
+		}
+		line.Message = fmt.Sprintf("%s the boot helper (version %s); it switches Wireless debugging back on after the TV restarts and stops the TV expiring this server's pairing", how, res.Version)
 		return []Result{line}
 	}
 	r.noteRecovered(key)

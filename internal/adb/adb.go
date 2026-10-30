@@ -340,7 +340,9 @@ func (c *Client) Pull(ctx context.Context, serial, devicePath, localPath string)
 	return nil
 }
 
-// Install runs `adb install -r`. ok is false with the adb output on failure.
+// Install runs `adb install -r`, so it updates an app that is already there. ok is false with the
+// adb output on failure, which is what Android answers with when the update cannot be done over
+// the top: a different signing certificate, or a versionCode lower than the installed one.
 func (c *Client) Install(ctx context.Context, serial, apkPath string) (ok bool, output string) {
 	out, err := c.Run(ctx, "-s", serial, "install", "-r", apkPath)
 	return err == nil && strings.Contains(out, "Success"), out

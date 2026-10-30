@@ -7,3 +7,6 @@
 .env
 .DS_Store
 bootadb/out/
+
+# The boot helper signing key is a repository secret, never committed (see bootadb/build.sh)
+*.p12
