@@ -272,9 +272,10 @@ function deviceCard(dev) {
       } }), " " + st.name + " (" + (st.apps || []).length + ")")))) : null;
 
   const pairForm = openPair[dev.id] ? h("div", { class: "row", style: "margin-top:8px" },
-    h("span", { class: "sub" }, "On the TV choose “Pair device with pairing code”. The port is found on the network; type the code it shows:"),
-    h("input", { type: "number", id: "pp-" + dev.id, placeholder: "pairing port", min: 1024, max: 65535, style: "width:130px" }),
-    h("input", { type: "text", id: "pc-" + dev.id, placeholder: "6-digit code", maxlength: 6, inputmode: "numeric", style: "width:120px" }),
+    h("span", { class: "sub" }, "On the TV choose “Pair device with pairing code”. The port fills itself in when the TV is advertising it; otherwise type it from that screen, with the code:"),
+    h("input", { type: "text", id: "pp-" + dev.id, placeholder: "pairing port", inputmode: "numeric", style: "width:130px" }),
+    h("input", { type: "text", id: "pc-" + dev.id, placeholder: "6-digit code", inputmode: "numeric", style: "width:120px",
+      oninput: ev => { ev.target.value = ev.target.value.replace(/\D/g, "").slice(0, 6); } }),
     h("button", { disabled: busy.has("pair-" + dev.id), onclick: () => doPair(dev) }, busy.has("pair-" + dev.id) ? "Pairing…" : "Pair")) : null;
 
   const paired = dev.info && dev.info.paired_at;
@@ -410,9 +411,22 @@ function render() {
     ? "Checking which CPUs these apps have builds for: " + lr.pending.join(", ") + " (one APKMirror page at a time, so it takes a while)."
     : (lr.paused_until && !lr.paused_until.startsWith("0001") ? "APKMirror asked us to slow down; CPU checks resume at " + new Date(lr.paused_until).toLocaleTimeString() + "." : "");
   const box = document.getElementById("devices");
+  // The pair form lives inside a device card, and every card is rebuilt below, so a port and code
+  // typed into it would be thrown away by any poll that redraws (every 1.5s while a run or a CPU
+  // check is going). Carry the values, the focus and the caret across the rebuild. Only the pair
+  // form's own fields: the app checkboxes take their state from dirty/dirtySets, and restoring
+  // those from the DOM would bring back selections the render had just dropped.
+  const keepPair = [...box.querySelectorAll('input[id^="pp-"], input[id^="pc-"]')].map(e => [e.id, e.value]);
+  const focused = document.activeElement && /^p[pc]-/.test(document.activeElement.id || "")
+    ? [document.activeElement.id, document.activeElement.selectionStart] : null;
   box.replaceChildren(...((state.devices || []).length
     ? state.devices.map(deviceCard)
     : [h("div", { class: "card empty" }, "No devices yet. Add one below.")]));
+  for (const [id, v] of keepPair) { const e = document.getElementById(id); if (e) e.value = v; }
+  if (focused) {
+    const e = document.getElementById(focused[0]);
+    if (e) { e.focus(); try { e.setSelectionRange(focused[1], focused[1]); } catch (err) { /* number inputs refuse a caret */ } }
+  }
   // keep what is being typed in the add-repository form
   const keep = ["newrepo", "newpre", "newphone", "newtrust"].map(id => { const e = document.getElementById(id); return e ? [id, e.type === "checkbox" ? e.checked : e.value] : null; }).filter(Boolean);
   document.getElementById("sources").replaceChildren(...sourcesCard().filter(Boolean));
@@ -508,13 +522,35 @@ async function findPairPort(dev) {
   try {
     const r = await api("GET", "/api/devices/" + encodeURIComponent(dev.id) + "/pairport");
     const box = document.getElementById("pp-" + dev.id);
-    if (r.port > 0 && box && !box.value) { box.value = r.port; }
+    if (!box) return;
+    if (r.port > 0 && !box.value) {
+      box.value = r.port;
+      // Move on to the code, which is the only thing left to type — and a focused field is also
+      // what stops a poll redrawing the form out from under it.
+      const codeBox = document.getElementById("pc-" + dev.id);
+      if (codeBox) codeBox.focus();
+    } else if (!r.port && !box.value) {
+      notes[dev.id] = { ok: true, text: "Nothing is advertising a pairing port yet: open “Pair device with pairing code” on the TV, or type the port from that screen." };
+      render();
+    }
   } catch (e) { /* typing it in still works */ }
 }
 
 async function doPair(dev) {
-  const port = parseInt(document.getElementById("pp-" + dev.id).value, 10);
-  const code = document.getElementById("pc-" + dev.id).value.trim();
+  // Take what the TV screen shows, not only what a tidy person types: that screen gives the port
+  // as "10.0.0.7:37123", and some firmware spaces the code out as "123 456".
+  const raw = document.getElementById("pp-" + dev.id).value.trim();
+  const port = parseInt(raw.includes(":") ? raw.slice(raw.lastIndexOf(":") + 1) : raw, 10);
+  const code = document.getElementById("pc-" + dev.id).value.replace(/\D/g, "");
+  // Checked here so a blank field says so plainly instead of reaching the server as a zero.
+  if (!(port >= 1024 && port <= 65535)) {
+    notes[dev.id] = { ok: false, text: "Enter the pairing port from the TV's “Pair device with pairing code” screen (1024-65535)" + (raw ? ", not “" + raw + "”" : "") + "." };
+    render(); return;
+  }
+  if (code.length !== 6) {
+    notes[dev.id] = { ok: false, text: "Enter the six-digit code the TV is showing." };
+    render(); return;
+  }
   notes[dev.id] = { ok: true, text: "Pairing…" }; render();
   try {
     const r = await api("POST", "/api/devices/" + encodeURIComponent(dev.id) + "/pair", { pair_port: port, code });

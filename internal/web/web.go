@@ -645,8 +645,14 @@ func (s *Server) pair(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &in) {
 		return
 	}
-	if in.PairPort < 1024 || in.PairPort > 65535 || !codeRE.MatchString(in.Code) {
-		fail(w, http.StatusBadRequest, "pairing port must be 1024-65535 and the code six digits")
+	// Named separately: one message for both fields gave no way to tell that the port had never
+	// arrived at all, which is what a wiped form looks like from here.
+	if in.PairPort < 1024 || in.PairPort > 65535 {
+		fail(w, http.StatusBadRequest, fmt.Sprintf("the pairing port must be 1024-65535, not %d. It is the port on the TV's %q screen, which changes every time that screen is opened", in.PairPort, "Pair device with pairing code"))
+		return
+	}
+	if !codeRE.MatchString(in.Code) {
+		fail(w, http.StatusBadRequest, fmt.Sprintf("the pairing code must be the six digits shown on the TV, not %q", in.Code))
 		return
 	}
 	var dev store.Device

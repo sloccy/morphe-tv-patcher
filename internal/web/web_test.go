@@ -203,6 +203,7 @@ func TestInputValidation(t *testing.T) {
 		{"POST", "/api/devices/tv/pair", `{"pair_port":80,"code":"123456"}`},
 		{"POST", "/api/devices/tv/pair", `{"pair_port":40000,"code":"12345"}`},
 		{"POST", "/api/devices/tv/pair", `{"pair_port":40000,"code":"abcdef"}`},
+		{"POST", "/api/devices/tv/pair", `{"code":"123456"}`}, // no port at all: a wiped form
 		{"POST", "/api/run", `{"device":"nope"}`},
 	}
 	for _, c := range bad {
@@ -825,5 +826,29 @@ func TestTestButtonIsQuietAndFullTestConnects(t *testing.T) {
 	}
 	if code, _ := do(t, srv, "POST", "/api/devices/tv/test", "", map[string]string{"Origin": "https://evil.example"}); code != 403 {
 		t.Errorf("cross-site POST must be refused: %d", code)
+	}
+}
+
+// A pair request that fails validation must say which field was wrong. The old message named both
+// at once, so a form that had silently lost the port read as "you typed it wrong".
+func TestPairSaysWhichFieldWasWrong(t *testing.T) {
+	srv, s, fb := setup(t)
+	_, _ = s.Store.AddDevice("TV", "10.0.0.6")
+
+	// the shape the page sends when the port box has been emptied: JSON null -> 0
+	_, body := do(t, srv, "POST", "/api/devices/tv/pair", `{"pair_port":null,"code":"123456"}`, nil)
+	if !strings.Contains(body, "pairing port") || strings.Contains(body, "six digits") {
+		t.Errorf("a missing port must name the port and not blame the code: %s", body)
+	}
+	if !strings.Contains(body, "not 0") {
+		t.Errorf("say what arrived, so a wiped form is recognisable: %s", body)
+	}
+
+	_, body = do(t, srv, "POST", "/api/devices/tv/pair", `{"pair_port":38000,"code":"12345"}`, nil)
+	if !strings.Contains(body, "six digits") || strings.Contains(body, "pairing port must") {
+		t.Errorf("a short code must name the code: %s", body)
+	}
+	if len(fb.paired) != 0 {
+		t.Errorf("neither reaches adb: %v", fb.paired)
 	}
 }
