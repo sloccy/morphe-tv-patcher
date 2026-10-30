@@ -46,6 +46,8 @@ type fakeADB struct {
 	devicePort  int               // what the adb server says it is already talking to
 	pairingPort int               // what the TV advertises while its pairing dialog is open
 	tcpip       []string          // "serial port"
+	jobsDump    string            // what "dumpsys jobscheduler" says
+	helperLog   string            // what "logcat -s BootAdb" says
 }
 
 func (f *fakeADB) Playing(ctx context.Context, s string) (bool, error) {
@@ -164,6 +166,10 @@ func (f *fakeADB) Shell(ctx context.Context, serial, cmd string) (string, error)
 			f.settings[parts[0]] = parts[1]
 		}
 		return "", nil
+	case cmd == "dumpsys jobscheduler":
+		return f.jobsDump, nil
+	case strings.HasPrefix(cmd, "logcat "):
+		return f.helperLog, nil
 	case strings.HasPrefix(cmd, "getprop "):
 		return f.props[strings.TrimPrefix(cmd, "getprop ")] + "\n", nil
 	case strings.HasPrefix(cmd, "setprop "):

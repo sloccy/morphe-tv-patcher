@@ -194,9 +194,37 @@ func TestRunInstallsTheBootHelperOnceThenLeavesItAlone(t *testing.T) {
 	}
 	rg.adb.shells = nil
 	rg.adb.uninstalled = nil
+	rg.adb.installs = nil
 	res = rg.r.Run(context.Background(), Options{Force: true})
-	if len(helperLines(res)) != 0 || len(rg.adb.uninstalled) != 0 || strings.Contains(strings.Join(rg.adb.shells, "|"), "am start") {
-		t.Errorf("an up-to-date helper is left alone: %+v %v %v", helperLines(res), rg.adb.uninstalled, rg.adb.shells)
+	helperInstalls := 0
+	for _, i := range rg.adb.installs { // the app installs are not what this is about
+		if strings.HasSuffix(i, "bootadb.apk") {
+			helperInstalls++
+		}
+	}
+	if len(helperLines(res)) != 0 || len(rg.adb.uninstalled) != 0 || helperInstalls != 0 {
+		t.Errorf("an up-to-date helper is not reinstalled: %+v %v %v", helperLines(res), rg.adb.uninstalled, rg.adb.installs)
+	}
+	// Starting it, though, happens every time: that is what applies its settings, and leaving it
+	// to the helper's own jobs meant it never applied anything at all.
+	if !strings.Contains(strings.Join(rg.adb.shells, "|"), "am start -n com.sloccy.bootadb/.MainActivity") {
+		t.Errorf("the helper must still be started on a later run: %v", rg.adb.shells)
+	}
+}
+
+func TestAHelperThatIsInstalledButHasNeverRunIsStarted(t *testing.T) {
+	// The state a real TV was found in: the right helper installed, its jobs registered, and
+	// nothing in its log because nothing had ever called into it.
+	rg, _ := helperRig(t, 20261022)
+	const serial = "10.0.0.7:40000"
+	rg.adb.installed[serial+"/com.sloccy.bootadb"] = "20261022"
+	rg.adb.deviceAPK = rg.r.Cfg.BootHelperAPK // byte-identical, so no reinstall is due
+	rg.r.Run(context.Background(), Options{})
+	if len(rg.adb.uninstalled) != 0 {
+		t.Errorf("nothing to reinstall: %v", rg.adb.uninstalled)
+	}
+	if !strings.Contains(strings.Join(rg.adb.shells, "|"), "am start -n com.sloccy.bootadb/.MainActivity") {
+		t.Errorf("it must still be started, or it goes on doing nothing: %v", rg.adb.shells)
 	}
 }
 
@@ -612,5 +640,35 @@ func TestAReSignedHelperWithTheSameCodeIsLeftAlone(t *testing.T) {
 	}
 	if lines := helperLines(rg.r.Run(context.Background(), Options{Manual: true})); len(lines) != 0 {
 		t.Errorf("and nothing to report: %+v", lines)
+	}
+}
+
+// A full test must say whether the helper is actually working. Finding out that it had never run
+// once took reading logcat by hand, which the page should have been able to answer.
+func TestAFullTestReportsWhatTheHelperIsDoing(t *testing.T) {
+	rg, d := helperRig(t, 20261022)
+	rg.adb.jobsDump = "JOB #u0a99/1: com.sloccy.bootadb/.KeepOnJob\nJOB #u0a99/2: com.sloccy.bootadb/.WatchJob\n"
+	rg.adb.helperLog = "--------- beginning of main\n" +
+		"10-30 04:00:00.000  I BootAdb  : adb_allowed_connection_time: null -> 0\n" +
+		"10-30 04:00:00.001  I BootAdb  : checked 9 settings, changed 1\n"
+	chk, err := rg.r.TestDevice(context.Background(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chk.HelperJobs != 2 {
+		t.Errorf("both jobs are registered: %d", chk.HelperJobs)
+	}
+	if !strings.Contains(chk.HelperLog, "changed 1") {
+		t.Errorf("the last thing it said: %q", chk.HelperLog)
+	}
+
+	// A helper that has never run is the case that matters, and must not look the same.
+	rg.adb.jobsDump, rg.adb.helperLog = "", ""
+	chk, err = rg.r.TestDevice(context.Background(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chk.HelperJobs != 0 || chk.HelperLog != "" {
+		t.Errorf("silence must read as silence: %+v", chk)
 	}
 }

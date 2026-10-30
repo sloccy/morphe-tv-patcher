@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Keeps Wireless debugging switched on (and its pairing keys from expiring) and a few tracking
      settings off (Wi-Fi scanning, location, Play Protect uploads, crash reports, network
-     recommendations): applied at every boot, every 15 minutes, and within seconds of Android
-     switching Wireless debugging off, only when a value differs. No network access, no data. -->
+     recommendations): applied whenever tv-patcher starts the activity, at every boot, every 15
+     minutes, and within seconds of Android switching Wireless debugging off, only when a value
+     differs. No network access, no data. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.sloccy.bootadb">
 
@@ -18,16 +19,14 @@
         android:allowBackup="false"
         android:supportsRtl="false">
 
+        <!-- Not exported and not launchable: it applies the settings, which no app on the TV
+             should be able to trigger. tv-patcher starts it by name over ADB, which the shell may
+             do regardless (START_ANY_ACTIVITY), and that also clears the app's "stopped" state so
+             it can receive the boot broadcast. -->
         <activity
             android:name=".MainActivity"
-            android:exported="true"
-            android:theme="@android:style/Theme.NoDisplay">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
-            </intent-filter>
-        </activity>
+            android:exported="false"
+            android:theme="@android:style/Theme.NoDisplay" />
 
         <receiver
             android:name=".BootReceiver"

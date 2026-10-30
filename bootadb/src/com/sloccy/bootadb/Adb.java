@@ -56,6 +56,7 @@ final class Adb {
     /** Brings every wanted setting to its value. One rejected key does not stop the others. */
     static void ensureAll(Context context) {
         ContentResolver resolver = context.getContentResolver();
+        int changed = 0;
         for (Object[] w : WANTED) {
             boolean global = (Boolean) w[0];
             String key = (String) w[1];
@@ -74,6 +75,7 @@ final class Adb {
                     lastSwitchedOn = now;
                 }
                 boolean ok = global ? Settings.Global.putString(resolver, key, want) : Settings.Secure.putString(resolver, key, want);
+                changed++;
                 Log.i(TAG, key + ": " + have + " -> " + want + (ok ? "" : " (not accepted)"));
             } catch (SecurityException e) {
                 Log.w(TAG, key + ": WRITE_SECURE_SETTINGS is not granted");
@@ -81,12 +83,27 @@ final class Adb {
                 Log.w(TAG, key + ": " + e);
             }
         }
+        // Always say something: an empty log cannot be told apart from never having run, which is
+        // exactly the ambiguity that hid this app doing nothing at all for weeks.
+        Log.i(TAG, "checked " + WANTED.length + " settings, changed " + changed);
     }
 
-    /** Schedules both jobs. Called from everywhere that runs, because neither is guaranteed. */
+    /**
+     * Schedules both jobs. Called from everywhere that runs, because neither is guaranteed. Each
+     * one is on its own: a JobInfo the system will not accept must not stop the other, and must
+     * never stop the settings, which is why every caller applies those first.
+     */
     static void schedule(Context context) {
-        schedulePeriodic(context);
-        scheduleWatch(context);
+        try {
+            schedulePeriodic(context);
+        } catch (RuntimeException e) {
+            Log.w(TAG, "could not schedule the 15-minute check: " + e);
+        }
+        try {
+            scheduleWatch(context);
+        } catch (RuntimeException e) {
+            Log.w(TAG, "could not schedule the watch: " + e);
+        }
     }
 
     /** Makes sure the backstop job exists at the interval we want (it survives reboots). */

@@ -7,8 +7,8 @@ import android.app.job.JobService;
 public final class KeepOnJob extends JobService {
     @Override
     public boolean onStartJob(JobParameters params) {
-        Adb.schedule(this); // the watch job is not persisted, so keep it alive from here too
-        Adb.ensureAll(this);
+        Adb.ensureAll(this); // first: a scheduling failure must never cost the settings
+        Adb.schedule(this);  // the watch job is not persisted, so keep it alive from here too
         return false; // nothing left running
     }
 

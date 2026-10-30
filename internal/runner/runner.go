@@ -277,6 +277,10 @@ type DeviceCheck struct {
 	Tweaks string // what was done about the TV settings, if anything
 	// KeyExpiry is the TV's adb_allowed_connection_time; "0" means the pairing never expires.
 	KeyExpiry string
+	// HelperJobs and HelperLog say whether the boot helper is really working: how many of its two
+	// jobs Android has registered, and the last thing it logged.
+	HelperJobs int
+	HelperLog  string
 }
 
 // TestDevice connects to a device the way a run would (known port, mDNS, port scan) and reads
@@ -303,6 +307,8 @@ func (r *Runner) TestDevice(ctx context.Context, d store.Device) (DeviceCheck, e
 	default:
 		chk.Helper = "installed (version " + res.Version + ")"
 	}
+	st := r.helperState(ctx, &c)
+	chk.HelperJobs, chk.HelperLog = st.Jobs, st.Log
 	// Last, because pinning the port restarts adbd and drops this connection.
 	for _, l := range r.fixedPortStep(ctx, &c, true) {
 		chk.Tweaks = l.Message

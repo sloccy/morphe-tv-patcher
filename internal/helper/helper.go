@@ -21,6 +21,8 @@ const (
 	Activity = Package + "/.MainActivity"
 	// Permission is what the helper needs to change the setting; tv-patcher grants it over ADB.
 	Permission = "android.permission.WRITE_SECURE_SETTINGS"
+	// LogTag is what the helper logs under, so "adb logcat -s BootAdb" shows what it has done.
+	LogTag = "BootAdb"
 	// WatchJobID is the helper's watch job (JOB_ID_WATCH in Adb.java), which fires within
 	// seconds of the TV writing adb_wifi_enabled.
 	WatchJobID = "2"

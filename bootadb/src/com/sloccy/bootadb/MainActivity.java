@@ -4,15 +4,21 @@ import android.app.Activity;
 import android.os.Bundle;
 
 /**
- * No screen, no messages. Opening it once (tv-patcher does this) lets the app receive boot
- * broadcasts. The activity is exported, so any app on the TV can start it: it does nothing
- * privileged, only schedules the app's own jobs. The settings are applied by BootReceiver and
- * by those jobs; tv-patcher runs the backstop job once after installing the app.
+ * No screen, no messages. This is the one component tv-patcher can trigger on demand, so it is
+ * what applies the settings: starting it also takes the app out of Android's "stopped" state, so
+ * it can receive the boot broadcast afterwards.
+ *
+ * <p>It used to only schedule the jobs, because an exported, launchable activity that any app on
+ * the TV could start had no business doing privileged work. That left the settings to BootReceiver
+ * and to the two jobs, none of which had ever run on a TV that was not restarted — so the helper
+ * did nothing at all. The activity is no longer exported or launchable instead: the shell can still
+ * start it by name (tv-patcher does), and nothing on the TV can.
  */
 public final class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        Adb.ensureAll(this); // first: scheduling must never be what decides whether this happens
         Adb.schedule(this);
         finish();
     }

@@ -749,6 +749,12 @@ func (s *Server) testDevice(w http.ResponseWriter, r *http.Request) {
 	if c.Helper != "" {
 		msg += " · boot helper " + c.Helper
 	}
+	if c.HelperJobs > 0 || c.HelperLog != "" {
+		msg += fmt.Sprintf(" · helper jobs %d/2", c.HelperJobs)
+		if c.HelperLog != "" {
+			msg += ", last said: " + c.HelperLog
+		}
+	}
 	if c.KeyExpiry == "0" {
 		msg += " · the pairing never expires"
 	} else if c.KeyExpiry != "" {

@@ -67,10 +67,12 @@ func (r *Runner) ensureHelper(ctx context.Context, c *conn) (HelperResult, error
 	if out, err := r.ADB.Shell(ctx, c.serial, "pm grant "+helper.Package+" "+helper.Permission); err != nil || strings.Contains(out, "Exception") {
 		return res, fmt.Errorf("this TV would not let the boot helper change the Wireless debugging setting: %s", firstLine(out+fmt.Sprint(err)))
 	}
-	if res.Installed { // the first launch frees the app to receive boot broadcasts
-		if _, err := r.ADB.Shell(ctx, c.serial, "am start -n "+helper.Activity); err != nil {
-			return res, fmt.Errorf("could not open the boot helper once: %w", err)
-		}
+	// Starting the activity is what applies the helper's settings, and it is the only part of the
+	// helper tv-patcher can make happen on demand, so it runs on every connection and not only
+	// after an install: that is what repairs a TV whose helper is installed but has never run.
+	// It also takes the app out of Android's "stopped" state so it can receive the boot broadcast.
+	if _, err := r.ADB.Shell(ctx, c.serial, "am start -n "+helper.Activity); err != nil {
+		return res, fmt.Errorf("could not open the boot helper: %w", err)
 	}
 	// Nobody ever opens the helper, so Android files it under "rare" and may defer its jobs far
 	// past their 15 minutes. These two take it out of that bucket; both are best effort, because
@@ -83,10 +85,12 @@ func (r *Runner) ensureHelper(ctx context.Context, c *conn) (HelperResult, error
 			slog.Debug("the TV would not unthrottle the boot helper", "device", c.dev.Name, "cmd", cmd, "err", err)
 		}
 	}
-	// Opening the app only schedules the jobs (an exported activity must do nothing privileged),
-	// so run the backstop job, which applies the helper's privacy settings now rather than at its
-	// own pace. Nothing below depends on it having finished: it returns as soon as the job starts.
-	_, _ = r.ADB.Shell(ctx, c.serial, "cmd jobscheduler run -f "+helper.Package+" "+helper.JobID)
+	// A nudge for the helper's own backstop job, on top of the activity above. Nothing depends on
+	// it: "cmd jobscheduler run" only works on an already scheduled job and returns as soon as the
+	// job starts, which is why relying on it left the helper never applying anything at all.
+	if out, err := r.ADB.Shell(ctx, c.serial, "cmd jobscheduler run -f "+helper.Package+" "+helper.JobID); err != nil || !strings.Contains(out, "Running") {
+		slog.Debug("the boot helper's backstop job would not run", "device", c.dev.Name, "out", firstLine(out), "err", err)
+	}
 	// Read every setting before judging any of them, so the record (and the keepalive that uses
 	// it) is right even when another one is what went wrong.
 	reads := make([]string, len(helper.Wanted))
@@ -130,7 +134,7 @@ func (r *Runner) ensureHelper(ctx context.Context, c *conn) (HelperResult, error
 		}
 	}
 	if res.Installed {
-		slog.Info("boot helper installed", "device", c.dev.Name, "version", b.Version)
+		slog.Info("boot helper installed", "device", c.dev.Name, "version", res.Version)
 	}
 	return res, nil
 }
@@ -182,4 +186,35 @@ func firstLine(s string) string {
 		s = s[:i]
 	}
 	return s
+}
+
+// HelperState is what the helper is doing on a TV, for the page to show. Without it, telling
+// "the helper is fine" from "the helper has never once run" needed adb by hand.
+type HelperState struct {
+	Jobs int    // how many of its jobs Android has registered (2 when both are there)
+	Log  string // the last thing it logged, which says what it last applied and when
+}
+
+// helperState asks the TV what the helper has actually been doing. Best effort throughout: every
+// part of it is a diagnostic, so a TV that will not answer costs nothing.
+func (r *Runner) helperState(ctx context.Context, c *conn) HelperState {
+	var st HelperState
+	if out, err := r.ADB.Shell(ctx, c.serial, "dumpsys jobscheduler"); err == nil {
+		for _, job := range []string{"/.KeepOnJob", "/.WatchJob"} {
+			if strings.Contains(out, helper.Package+job) {
+				st.Jobs++
+			}
+		}
+	}
+	// -d exits instead of following; -t keeps it to the last few lines.
+	if out, err := r.ADB.Shell(ctx, c.serial, "logcat -d -t 40 -s "+helper.LogTag); err == nil {
+		var last string
+		for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
+			if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "---") {
+				last = line
+			}
+		}
+		st.Log = last
+	}
+	return st
 }

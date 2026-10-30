@@ -181,7 +181,9 @@ itself over ADB whenever it connects and believes only what reads back: the help
 not waited for, and a helper nobody ever opens can have its job deferred for hours by Android's
 standby bucket. It keeps these tracking settings off: `wifi_scan_always_enabled`, `network_recommendations_enabled`,
 `upload_apk_enable`, `package_verifier_user_consent` (-1), `send_action_app_error` and
-`location_mode`. It shows no messages; see `adb logcat -s BootAdb`. Whenever tv-patcher connects
+`location_mode`. It shows no messages; see `adb logcat -s BootAdb`, which it writes to on every
+check even when nothing needed changing, so an empty log means it has never run. **Full test** also
+reports how many of its two jobs Android has registered and the last line it logged. Whenever tv-patcher connects
 to a TV it installs the helper (and replaces it when the image carries a newer one, or when the app
 on the TV does not install what the one it ships installs — the permission is only ever granted to
 its own app. What is compared is every entry's checksum and size, not the file's bytes: the build
@@ -189,8 +191,11 @@ signs with a throw-away key it makes fresh each time, so comparing bytes would r
 on every TV every time a new image is published, and the weekly rebuild publishes one whether or
 not the helper changed. An app whose entries match ours is our app, whoever signed it),
 grants it the one permission it needs over ADB, and opens it once so Android lets it receive
-the boot broadcast. Opening it does nothing by itself: the activity is reachable by any app on the
-TV, so it only schedules the jobs, which tv-patcher then runs once. Because nothing on the TV ever
+the boot broadcast. Starting it is also what applies the settings, and it happens on every
+connection, not only after an install: the activity is no longer exported or in the launcher, so
+nothing on the TV can trigger it while tv-patcher still can by name. It used to only schedule the
+jobs, which left every setting to the jobs and to the boot receiver — and on a TV that was never
+restarted that meant the helper applied nothing at all. Because nothing on the TV ever
 opens the helper, Android would file it under "rare" and defer its jobs for hours, so tv-patcher also
 puts it on the Doze whitelist and in the active standby bucket whenever it connects. A card
 shows "boot helper ✓" and "pairing kept ✓". It is built in CI (`bootadb/build.sh`, Android SDK tools only), signed with a
