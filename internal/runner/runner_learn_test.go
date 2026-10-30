@@ -159,7 +159,7 @@ func helperRig(t *testing.T, version uint32) (*rig, store.Device) {
 	t.Helper()
 	rg := newRig(t)
 	p := filepath.Join(t.TempDir(), "bootadb.apk")
-	_ = os.WriteFile(p, apktest.Zip(map[string][]byte{"AndroidManifest.xml": apktest.Manifest(helper.Package, version, []string{helper.Permission, "android.permission.RECEIVE_BOOT_COMPLETED"}, []string{".MainActivity", ".BootReceiver", ".KeepOnJob"})}), 0o600)
+	_ = os.WriteFile(p, apktest.Zip(map[string][]byte{"AndroidManifest.xml": apktest.Manifest(helper.Package, version, []string{helper.Permission, "android.permission.RECEIVE_BOOT_COMPLETED"}, []string{".MainActivity", ".BootReceiver", ".KeepOnJob", ".WatchJob"})}), 0o600)
 	rg.r.Cfg.BootHelperAPK = p
 	rg.adb.helperVer = strconv.Itoa(int(version))
 	d := rg.device(t, "Bedroom", "10.0.0.7", prime)
@@ -336,54 +336,6 @@ func TestAnUnreachableTVIsReportedOncePerRunNotOncePerApp(t *testing.T) {
 	}
 }
 
-func TestBackgroundProcessLimitIsSetWhenConnectedAndOnlyWhenDifferent(t *testing.T) {
-	rg := newRig(t)
-	rg.r.Cfg.BackgroundProcessLimit = 4
-	rg.device(t, "Bedroom", "10.0.0.7", prime)
-	res := rg.r.Run(context.Background(), Options{})
-	var line *Result
-	for i := range res {
-		if res[i].Package == tweakPackage {
-			line = &res[i]
-		}
-	}
-	if line == nil || !line.OK || !strings.Contains(line.Message, "set to 4") || rg.adb.flags["activity_manager max_cached_processes"] != "4" {
-		t.Fatalf("%+v %v", line, rg.adb.flags)
-	}
-	for _, c := range rg.adb.shells {
-		if strings.Contains(c, "set_sync_disabled_for_tests") {
-			t.Error("Google's flag sync is only touched when asked")
-		}
-	}
-	rg.adb.shells = nil
-	for _, x := range rg.r.Run(context.Background(), Options{Manual: true}) {
-		if x.Package == tweakPackage {
-			t.Errorf("already 4: say nothing, %+v", x)
-		}
-	}
-	for _, c := range rg.adb.shells {
-		if strings.HasPrefix(c, "device_config put") {
-			t.Error("must not write when it already reads 4")
-		}
-	}
-	rg.r.Cfg.PersistTVFlags = true
-	rg.r.Run(context.Background(), Options{Manual: true})
-	if !strings.Contains(strings.Join(rg.adb.shells, "|"), "device_config set_sync_disabled_for_tests persistent") {
-		t.Error("opt-in persistence")
-	}
-}
-
-func TestNoProcessLimitConfiguredMeansNoSettingsTouched(t *testing.T) {
-	rg := newRig(t)
-	rg.device(t, "Bedroom", "10.0.0.7", prime)
-	rg.r.Run(context.Background(), Options{})
-	for _, c := range rg.adb.shells {
-		if strings.Contains(c, "device_config") {
-			t.Errorf("unexpected %s", c)
-		}
-	}
-}
-
 func TestQuietCheckNeverConnects(t *testing.T) {
 	rg := newRig(t)
 	d := rg.device(t, "Bedroom", "10.0.0.7", prime)
@@ -394,5 +346,157 @@ func TestQuietCheckNeverConnects(t *testing.T) {
 	rg.adb.down["10.0.0.7"] = true
 	if q := rg.r.CheckDevice(context.Background(), d); q.Reachable || rg.adb.connects != 0 {
 		t.Fatalf("%+v", q)
+	}
+}
+
+func TestAStalePortIsForgottenSoItIsNotDialledForever(t *testing.T) {
+	rg := newRig(t)
+	d := rg.device(t, "Bedroom", "10.0.0.7", prime)
+	rg.r.Run(context.Background(), Options{Manual: true})
+	if rg.st.Port(d.ID) != 40000 {
+		t.Fatalf("the working port is remembered: %d", rg.st.Port(d.ID))
+	}
+	// Wireless debugging goes off and on, so adbd picks a new port: the old one is now dead.
+	rg.adb.down["10.0.0.7"] = true
+	rg.r.Run(context.Background(), Options{Manual: true})
+	if rg.st.Port(d.ID) != 0 {
+		t.Errorf("a port nothing answers on must be forgotten, not dialled first forever: %d", rg.st.Port(d.ID))
+	}
+}
+
+func TestALapsedPairingKeepsThePortAndSaysToPairAgain(t *testing.T) {
+	rg := newRig(t)
+	d := rg.device(t, "Bedroom", "10.0.0.7", prime)
+	rg.r.Run(context.Background(), Options{Manual: true})
+	rg.adb.unpaired["10.0.0.7"] = true
+	res := rg.r.Run(context.Background(), Options{Manual: true})
+	var line *Result
+	for i := range res {
+		if strings.Contains(res[i].Message, "Pair") {
+			line = &res[i]
+		}
+	}
+	if line == nil || !line.Alert {
+		t.Fatalf("losing the pairing needs somebody at the TV, so it is said at once: %+v", res)
+	}
+	if rg.st.Port(d.ID) != 40000 {
+		t.Errorf("the TV answered, so its port is still good: %d", rg.st.Port(d.ID))
+	}
+}
+
+func TestPairingLearnsThePortTheAdbServerJustFound(t *testing.T) {
+	rg := newRig(t)
+	d := rg.device(t, "Bedroom", "10.0.0.7", prime)
+	_ = rg.st.SetPort(d.ID, 37000) // the port it was on before it was unpaired
+	rg.adb.devicePort = 45678
+	if _, err := rg.r.PairDevice(context.Background(), d, 42123, "123456"); err != nil {
+		t.Fatal(err)
+	}
+	if rg.st.Port(d.ID) != 45678 {
+		t.Errorf("pairing tells us the new port; without it the next run dials the old one: %d", rg.st.Port(d.ID))
+	}
+}
+
+func TestATVThatExpiresKeysIsReachedWellInsideTheWeek(t *testing.T) {
+	rg := newRig(t)
+	rg.r.Cfg.VerifyEvery = 168 * time.Hour
+	info := store.DeviceInfo{ABIs: []string{"armeabi-v7a"}, SDK: 31}
+	// Six days since the last connection, and Android is still counting down to dropping the key.
+	info.SeenAt = rg.now.Add(-6 * 24 * time.Hour).Format(time.RFC3339)
+	info.KeyExpiry = "604800000"
+	if !rg.r.verifyDue(info, true) {
+		t.Error("a TV that still expires keys must be connected to before the week is up")
+	}
+	info.KeyExpiry = "0" // the helper got its way, so VerifyEvery is free to be a week
+	if rg.r.verifyDue(info, true) {
+		t.Error("a TV whose pairing cannot expire is left alone until VerifyEvery")
+	}
+}
+
+func TestTheHelperIsUnthrottledAndItsKeyExpiryChecked(t *testing.T) {
+	rg, d := helperRig(t, 20261022)
+	rg.r.Run(context.Background(), Options{})
+	joined := strings.Join(rg.adb.shells, "|")
+	for _, want := range []string{
+		"dumpsys deviceidle whitelist +com.sloccy.bootadb",
+		"am set-standby-bucket com.sloccy.bootadb active",
+		"cmd jobscheduler run -f com.sloccy.bootadb 1",
+		"settings get global adb_allowed_connection_time",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing %q in %v", want, rg.adb.shells)
+		}
+	}
+	if info, _ := rg.st.DeviceInfo(d.ID); info.KeyExpiry != "0" {
+		t.Errorf("what the TV says about key expiry is remembered: %+v", info)
+	}
+}
+
+func TestATVThatWillNotStopExpiringKeysIsReported(t *testing.T) {
+	rg, d := helperRig(t, 20261022)
+	rg.adb.expiry = "604800000" // the firmware would not take 0
+	res := rg.r.Run(context.Background(), Options{})
+	lines := helperLines(res)
+	if len(lines) != 1 || lines[0].OK || !strings.Contains(lines[0].Message, "ADB key expiry") {
+		t.Fatalf("the silent failure that unpairs a TV must be said out loud: %+v", lines)
+	}
+	if info, _ := rg.st.DeviceInfo(d.ID); info.KeyExpiry != "604800000" {
+		t.Errorf("recorded even though it is wrong, because the keepalive reads it: %+v", info)
+	}
+	var apps int
+	for _, x := range res {
+		if x.Package == prime {
+			apps++
+		}
+	}
+	if apps == 0 {
+		t.Error("helper trouble never stops the app updates")
+	}
+}
+
+func TestTheFixedPortIsOnlySetWhenAskedFor(t *testing.T) {
+	rg, _ := helperRig(t, 20261022)
+	rg.r.Run(context.Background(), Options{})
+	if j := strings.Join(rg.adb.shells, "|"); strings.Contains(j, "persist.adb.tcp.port") {
+		t.Errorf("nothing is pinned unless TV_FIXED_ADB_PORT says so: %v", rg.adb.shells)
+	}
+
+	rg, d := helperRig(t, 20261022)
+	rg.r.Cfg.TVFixedADBPort = 5555
+	res := rg.r.Run(context.Background(), Options{})
+	var line *Result
+	for i := range res {
+		if res[i].Package == tweakPackage {
+			line = &res[i]
+		}
+	}
+	if line == nil || !line.OK || !strings.Contains(line.Message, "5555") {
+		t.Fatalf("%+v", line)
+	}
+	if j := strings.Join(rg.adb.shells, "|"); !strings.Contains(j, "setprop persist.adb.tcp.port 5555") ||
+		!strings.Contains(j, "settings put global adb_enabled 1") {
+		t.Errorf("%v", rg.adb.shells)
+	}
+	if len(rg.adb.tcpip) != 0 {
+		t.Error("a run must not restart adbd: that would drop the connection the installs need")
+	}
+	// Said once: the second run reads the property back and leaves it alone.
+	rg.adb.shells = nil
+	for _, x := range rg.r.Run(context.Background(), Options{Manual: true}) {
+		if x.Package == tweakPackage {
+			t.Errorf("already pinned: say nothing, %+v", x)
+		}
+	}
+	if j := strings.Join(rg.adb.shells, "|"); strings.Contains(j, "setprop") {
+		t.Errorf("must not write when it already reads 5555: %v", rg.adb.shells)
+	}
+
+	// The full test is the one place nothing follows, so it may restart adbd there and then.
+	rg.adb.props = nil
+	if _, err := rg.r.TestDevice(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	if len(rg.adb.tcpip) != 1 {
+		t.Errorf("a full test restarts adbd on the fixed port: %v", rg.adb.tcpip)
 	}
 }

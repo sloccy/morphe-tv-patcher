@@ -11,7 +11,7 @@ import (
 
 var (
 	perms = []string{Permission, "android.permission.RECEIVE_BOOT_COMPLETED"}
-	comps = []string{".MainActivity", ".BootReceiver", ".KeepOnJob"}
+	comps = []string{".MainActivity", ".BootReceiver", ".KeepOnJob", ".WatchJob"}
 )
 
 func TestLoadAcceptsTheHelperAndReadsItsVersion(t *testing.T) {
@@ -29,7 +29,8 @@ func TestCheckRejectsAnythingElse(t *testing.T) {
 		"no version":         {Package: Package, Permissions: perms, Components: comps},
 		"no secure settings": {Package: Package, VersionCode: 1, Permissions: perms[1:], Components: comps},
 		"no boot permission": {Package: Package, VersionCode: 1, Permissions: perms[:1], Components: comps},
-		"no receiver":        {Package: Package, VersionCode: 1, Permissions: perms, Components: []string{".MainActivity", ".KeepOnJob"}},
+		"no receiver":        {Package: Package, VersionCode: 1, Permissions: perms, Components: []string{".MainActivity", ".KeepOnJob", ".WatchJob"}},
+		"no watch job":       {Package: Package, VersionCode: 1, Permissions: perms, Components: comps[:3]},
 	}
 	for name, m := range cases {
 		if Check(m) == nil {
@@ -46,5 +47,19 @@ func TestTheBuiltAPKIsTheHelper(t *testing.T) {
 	}
 	if _, err := Load(path); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The helper only works if the host checks the settings the app is there to keep, so the two
+// tables must not drift apart silently.
+func TestWantedCoversTheKeyExpiry(t *testing.T) {
+	want := map[string]string{"adb_wifi_enabled": "1", "adb_allowed_connection_time": "0"}
+	if len(Wanted) != len(want) {
+		t.Fatalf("%+v", Wanted)
+	}
+	for _, w := range Wanted {
+		if want[w.Key] != w.Value || w.What == "" {
+			t.Errorf("%+v", w)
+		}
 	}
 }

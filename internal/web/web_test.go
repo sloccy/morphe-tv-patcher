@@ -21,27 +21,28 @@ import (
 const defSrc = "owner-default" // the repository seeded on the first run
 
 type fakeBackend struct {
-	lists     map[string]*patches.List
-	status    runner.Status
-	triggered []runner.Options
-	queueFull bool
-	pairErr   error
-	paired    []string
-	cpuKnown  bool
-	problems  []runner.Problem // what Compat reports as known mismatches
-	unchecked []string
-	compatSaw map[string][]string // device id -> the packages it would receive, per Compat call
-	checkErr  error
-	checked   []string
-	refreshed atomic.Int32 // written by the background refresh, read by the test
-	warnings  []runner.Problem
-	learning  runner.Learning
-	testErr   error
-	quiet     runner.QuietCheck // what the quiet check finds
-	quietN    atomic.Int32
-	fullN     atomic.Int32
-	hold      chan struct{} // when set, Compat blocks until it is closed
-	compatN   atomic.Int32
+	lists       map[string]*patches.List
+	status      runner.Status
+	triggered   []runner.Options
+	queueFull   bool
+	pairErr     error
+	paired      []string
+	cpuKnown    bool
+	problems    []runner.Problem // what Compat reports as known mismatches
+	unchecked   []string
+	compatSaw   map[string][]string // device id -> the packages it would receive, per Compat call
+	checkErr    error
+	checked     []string
+	refreshed   atomic.Int32 // written by the background refresh, read by the test
+	warnings    []runner.Problem
+	pairingPort int
+	learning    runner.Learning
+	testErr     error
+	quiet       runner.QuietCheck // what the quiet check finds
+	quietN      atomic.Int32
+	fullN       atomic.Int32
+	hold        chan struct{} // when set, Compat blocks until it is closed
+	compatN     atomic.Int32
 }
 
 func (f *fakeBackend) TestDevice(ctx context.Context, d store.Device) (runner.DeviceCheck, error) {
@@ -55,8 +56,9 @@ func (f *fakeBackend) CheckDevice(ctx context.Context, d store.Device) runner.Qu
 	f.quietN.Add(1)
 	return f.quiet
 }
-func (f *fakeBackend) Warnings() []runner.Problem { return f.warnings }
-func (f *fakeBackend) Learning() runner.Learning  { return f.learning }
+func (f *fakeBackend) PairingPort(ctx context.Context, d store.Device) int { return f.pairingPort }
+func (f *fakeBackend) Warnings() []runner.Problem                          { return f.warnings }
+func (f *fakeBackend) Learning() runner.Learning                           { return f.learning }
 
 func (f *fakeBackend) Status() runner.Status { return f.status }
 func (f *fakeBackend) Trigger(o runner.Options) bool {

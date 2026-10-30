@@ -185,6 +185,9 @@ type DeviceInfo struct {
 	SeenAt   string   `json:"seen_at"`
 	PairedAt string   `json:"paired_at,omitempty"` // set when pairing from the page succeeded
 	Helper   string   `json:"helper,omitempty"`    // version of the boot helper app on the device
+	// KeyExpiry is the device's adb_allowed_connection_time. "0" means Android never drops this
+	// server's pairing key; anything else is how long an unused key lives (7 days by default).
+	KeyExpiry string `json:"key_expiry,omitempty"`
 }
 
 type stateFile struct {
@@ -848,7 +851,9 @@ func (s *Store) DeviceInfo(dev string) (DeviceInfo, bool) {
 	if d == nil {
 		return DeviceInfo{}, false
 	}
-	return DeviceInfo{ABIs: append([]string{}, d.ABIs...), SDK: d.SDK, SeenAt: d.SeenAt, PairedAt: d.PairedAt, Helper: d.Helper}, true
+	out := *d // every field: a new one must reach the page and verifyDue without being listed here
+	out.ABIs = append([]string{}, d.ABIs...)
+	return out, true
 }
 
 // SetDeviceInfo records a device's CPU list and Android level (keeping when it was paired).

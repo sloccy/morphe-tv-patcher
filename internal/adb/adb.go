@@ -29,16 +29,31 @@ type Runner func(ctx context.Context, args ...string) (string, error)
 
 // Client wraps an adb binary.
 type Client struct {
-	Run    Runner
-	Dial   func(host string, port int) bool
+	Run  Runner
+	Dial func(host string, port int) bool
+	// MDNS asks the LAN which port a service is on. Ubuntu's android-tools-adb is built without
+	// a mDNS backend, so "adb mdns services" finds nothing there and the port would have to be
+	// scanned for; this asks for it directly. Nil means do not ask (the tests' default).
+	MDNS func(ctx context.Context, service string) (map[string]int, error)
+	// ScanLo, ScanHi bound the last-resort port scan. adbd takes its port from the kernel's
+	// ephemeral range, which on Linux is 32768-60999.
 	ScanLo int
 	ScanHi int
 }
 
 // New returns a Client using the adb on PATH.
 func New() *Client {
-	return &Client{Run: execRun, Dial: dial, ScanLo: 30000, ScanHi: 50000}
+	return &Client{
+		Run:  execRun,
+		Dial: dial,
+		MDNS: func(ctx context.Context, service string) (map[string]int, error) {
+			return Lookup(ctx, service, mdnsWait)
+		},
+		ScanLo: 30000, ScanHi: 61000,
+	}
 }
+
+const mdnsWait = 1500 * time.Millisecond
 
 func execRun(ctx context.Context, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "adb", args...) //nolint:gosec // fixed binary; arguments are built by us from validated host/port values
@@ -68,7 +83,73 @@ func (c *Client) Pair(ctx context.Context, host string, pairPort int, code strin
 	return nil
 }
 
-var mdnsLine = regexp.MustCompile(`_adb-tls-connect\S*\s+(\S+):(\d+)`)
+var mdnsLine = regexp.MustCompile(`(_adb-tls-\w+)\S*\s+(\S+):(\d+)`)
+
+// mdnsPort returns the port host advertises for a service, or 0. It asks the LAN itself and then
+// falls back to the adb server's own listing, which only works on an adb built with mDNS support.
+func (c *Client) mdnsPort(ctx context.Context, host, service string) int {
+	if c.MDNS != nil {
+		if found, err := c.MDNS(ctx, service); err == nil && found[host] > 0 {
+			return found[host]
+		}
+	}
+	out, err := c.Run(ctx, "mdns", "services")
+	if err != nil {
+		return 0
+	}
+	for _, m := range mdnsLine.FindAllStringSubmatch(out, -1) {
+		if m[1]+"._tcp.local" == service && m[2] == host {
+			p, _ := strconv.Atoi(m[3])
+			return p
+		}
+	}
+	return 0
+}
+
+// PairingPort asks the LAN which port the TV's "Pair device with pairing code" dialog is on.
+// The dialog shows it on screen, but it is a different random port every time it is opened.
+func (c *Client) PairingPort(ctx context.Context, host string) int {
+	return c.mdnsPort(ctx, host, ServicePairing)
+}
+
+// an "adb devices" line: an address and what the adb server makes of it
+var deviceLine = regexp.MustCompile(`(?m)^(\S+):(\d+)\s+(device|unauthorized|offline)\b`)
+
+// ConnectedPort asks the adb server which port it is already talking to host on. Pairing leaves
+// the server knowing the TV's current port, so this learns a changed port without any discovery.
+func (c *Client) ConnectedPort(ctx context.Context, host string) int {
+	out, err := c.Run(ctx, "devices")
+	if err != nil {
+		return 0
+	}
+	best := 0
+	for _, m := range deviceLine.FindAllStringSubmatch(out, -1) {
+		if m[1] != host || m[3] == "offline" {
+			continue
+		}
+		p, _ := strconv.Atoi(m[2])
+		if p > 0 && (best == 0 || m[3] == "device") {
+			best = p
+		}
+	}
+	return best
+}
+
+// Disconnect drops the adb server's entry for an address, so a port the TV has stopped using is
+// not kept around as an offline device that later "-s host:port" calls could pick up.
+func (c *Client) Disconnect(ctx context.Context, host string, port int) error {
+	_, err := c.Run(ctx, "disconnect", net.JoinHostPort(host, strconv.Itoa(port)))
+	return err
+}
+
+// TCPIP restarts adbd on a fixed TCP port. It drops the connection it is asked over.
+func (c *Client) TCPIP(ctx context.Context, serial string, port int) error {
+	out, err := c.Run(ctx, "-s", serial, "tcpip", strconv.Itoa(port))
+	if err != nil || !strings.Contains(out, "restarting in TCP mode") {
+		return fmt.Errorf("adb tcpip %d: %s", port, firstLine(out, err))
+	}
+	return nil
+}
 
 // Connect finds a working port for host: the ports given first (last good, configured),
 // then mDNS, then a scan of the usual wireless-debugging range. It returns the port.
@@ -92,19 +173,18 @@ func (c *Client) Connect(ctx context.Context, host string, known ...int) (int, e
 		if ok, err := attempt(p); ok || err != nil {
 			return p, err
 		}
+		// adb keeps an offline entry for an address it could not reach, and wireless debugging
+		// picks a new port every time Android switches it back on: drop the old one so "adb
+		// devices" stays truthful and nothing later talks to a serial that cannot work.
+		_ = c.Disconnect(ctx, host, p)
 	}
-	if out, err := c.Run(ctx, "mdns", "services"); err == nil {
-		for _, m := range mdnsLine.FindAllStringSubmatch(out, -1) {
-			if m[1] == host {
-				p, _ := strconv.Atoi(m[2])
-				if ok, err := attempt(p); ok || err != nil {
-					return p, err
-				}
-			}
+	if p := c.mdnsPort(ctx, host, ServiceConnect); p > 0 {
+		if ok, err := attempt(p); ok || err != nil {
+			return p, err
 		}
 	}
 	slog.Info("scanning for the wireless debugging port", "host", host)
-	for _, p := range c.scan(host) {
+	for _, p := range c.scan(ctx, host) {
 		if ok, err := attempt(p); ok || err != nil {
 			return p, err
 		}
@@ -125,17 +205,18 @@ func (c *Client) Reachable(ctx context.Context, host string, known ...int) (port
 			return p, true
 		}
 	}
-	if out, err := c.Run(ctx, "mdns", "services"); err == nil {
-		for _, m := range mdnsLine.FindAllStringSubmatch(out, -1) {
-			if p, _ := strconv.Atoi(m[2]); m[1] == host && dialFn(host, p) {
-				return p, true
-			}
-		}
+	if p := c.mdnsPort(ctx, host, ServiceConnect); p > 0 && dialFn(host, p) {
+		return p, true
+	}
+	// A scan is plain TCP, so it still opens no ADB session and the TV still shows no notice.
+	// It cannot tell adbd from any other open port, which is why it comes last.
+	for _, p := range c.scan(ctx, host) {
+		return p, true
 	}
 	return 0, false
 }
 
-func (c *Client) scan(host string) []int {
+func (c *Client) scan(ctx context.Context, host string) []int {
 	dialFn := c.Dial
 	if dialFn == nil {
 		dialFn = dial
@@ -146,7 +227,7 @@ func (c *Client) scan(host string) []int {
 		wg   sync.WaitGroup
 		jobs = make(chan int)
 	)
-	for range 400 {
+	for range scanWorkers {
 		wg.Go(func() {
 			for p := range jobs {
 				if dialFn(host, p) {
@@ -157,8 +238,13 @@ func (c *Client) scan(host string) []int {
 			}
 		})
 	}
+feed:
 	for p := c.ScanLo; p <= c.ScanHi; p++ {
-		jobs <- p
+		select {
+		case jobs <- p:
+		case <-ctx.Done():
+			break feed
+		}
 	}
 	close(jobs)
 	wg.Wait()
@@ -267,3 +353,7 @@ func firstLine(out string, err error) string {
 	}
 	return ""
 }
+
+// scanWorkers is how many ports the scan dials at once: the whole ephemeral range at a 400ms
+// dial timeout would take minutes one at a time.
+const scanWorkers = 800

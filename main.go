@@ -166,7 +166,9 @@ func setup() (*app, error) {
 		PackageOf: verify.PackageOf,
 	}
 	tg := &notify.Telegram{Token: cfg.TelegramToken, Chat: cfg.TelegramChat}
-	a.runner = runner.New(cfg, a.st, adb.New(), deps, tg.Send)
+	ac := adb.New()
+	ac.ScanLo, ac.ScanHi = cfg.ScanLo, cfg.ScanHi
+	a.runner = runner.New(cfg, a.st, ac, deps, tg.Send)
 	return a, nil
 }
 

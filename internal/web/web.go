@@ -43,6 +43,7 @@ type Backend interface {
 	RefreshLists(ctx context.Context)
 	TestDevice(ctx context.Context, d store.Device) (runner.DeviceCheck, error) // connects (full test)
 	CheckDevice(ctx context.Context, d store.Device) runner.QuietCheck          // no ADB session
+	PairingPort(ctx context.Context, d store.Device) int                        // from the TV's own mDNS advertisement
 	Warnings() []runner.Problem                                                 // apps saved devices are known not to be able to run (no network)
 	Learning() runner.Learning                                                  // CPU checks still running in the background
 }
@@ -80,6 +81,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/sources", s.addSource)
 	mux.HandleFunc("DELETE /api/sources/{id}", s.removeSource)
 	mux.HandleFunc("POST /api/devices/{id}/pair", s.pair)
+	mux.HandleFunc("GET /api/devices/{id}/pairport", s.pairPort)
 	mux.HandleFunc("POST /api/devices/{id}/test", s.testDevice)
 	mux.HandleFunc("POST /api/run", s.run)
 	return s.guard(mux)
@@ -675,6 +677,24 @@ func (s *Server) pair(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"message": msg})
 }
 
+// pairPort finds the port the TV's open pairing dialog is on, so it does not have to be typed
+// from the screen. 0 means nothing is advertising it (the dialog is probably not open).
+func (s *Server) pairPort(w http.ResponseWriter, r *http.Request) {
+	var dev store.Device
+	for _, d := range s.Store.Settings().Devices {
+		if d.ID == r.PathValue("id") {
+			dev = d
+		}
+	}
+	if dev.ID == "" {
+		fail(w, http.StatusNotFound, "no such device")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	writeJSON(w, http.StatusOK, map[string]int{"port": s.Backend.PairingPort(ctx, dev)})
+}
+
 // testDevice answers the Test button. By default it only looks at the network, so the TV shows
 // no "debugging connected" notice; ?full=1 really connects (and installs the boot helper).
 func (s *Server) testDevice(w http.ResponseWriter, r *http.Request) {
@@ -722,6 +742,11 @@ func (s *Server) testDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	if c.Helper != "" {
 		msg += " · boot helper " + c.Helper
+	}
+	if c.KeyExpiry == "0" {
+		msg += " · the pairing never expires"
+	} else if c.KeyExpiry != "" {
+		msg += " · this TV still expires ADB keys (adb_allowed_connection_time " + c.KeyExpiry + "), so it is connected to at least every 5 days"
 	}
 	if c.Tweaks != "" {
 		msg += " · " + c.Tweaks

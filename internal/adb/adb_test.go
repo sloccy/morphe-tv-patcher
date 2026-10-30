@@ -182,3 +182,139 @@ func TestPlayingFrom(t *testing.T) {
 		}
 	}
 }
+
+func TestConnectAsksTheLANWhenAdbHasNoMDNS(t *testing.T) {
+	// Ubuntu's android-tools-adb has no mDNS backend, which is the case that left the port
+	// scan as the only way to find a TV that had moved to a new port.
+	var log []string
+	c := &Client{
+		Run: func(ctx context.Context, args ...string) (string, error) {
+			log = append(log, strings.Join(args, " "))
+			if args[0] == "mdns" {
+				return "", errors.New("adb: unknown command")
+			}
+			if args[0] == "connect" && strings.HasSuffix(args[1], ":55001") {
+				return "connected to " + args[1], nil
+			}
+			return "failed to connect to " + strings.Join(args[1:], " "), nil
+		},
+		Dial: func(string, int) bool { return false },
+		MDNS: func(ctx context.Context, service string) (map[string]int, error) {
+			if service != ServiceConnect {
+				t.Errorf("asked for %q", service)
+			}
+			return map[string]int{"10.0.0.6": 55001, "10.0.0.9": 39999}, nil
+		},
+		ScanLo: 1, ScanHi: 5, // a scan here would find nothing, so the answer must come from mDNS
+	}
+	port, err := c.Connect(context.Background(), "10.0.0.6", 37000)
+	if err != nil || port != 55001 {
+		t.Fatalf("port %d err %v: %v", port, err, log)
+	}
+	if strings.Contains(strings.Join(log, "\n"), "10.0.0.9") {
+		t.Error("another device's answer must be ignored")
+	}
+}
+
+func TestConnectForgetsTheAdbEntryForAPortThatDidNotAnswer(t *testing.T) {
+	var log []string
+	c := &Client{Run: fake(41234, &log), Dial: func(string, int) bool { return false }}
+	if _, err := c.Connect(context.Background(), "10.0.0.6", 37000); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(log, "\n"), "disconnect 10.0.0.6:37000") {
+		t.Errorf("a dead entry should be dropped from the adb server: %v", log)
+	}
+}
+
+func TestConnectedPortReadsTheAdbServerList(t *testing.T) {
+	list := "List of devices attached\n" +
+		"10.0.0.9:41000\tdevice\n" + // another TV
+		"10.0.0.6:37000\toffline\n" + // the port it used to be on
+		"10.0.0.6:45678\tdevice\n"
+	c := &Client{Run: func(ctx context.Context, args ...string) (string, error) { return list, nil }}
+	if p := c.ConnectedPort(context.Background(), "10.0.0.6"); p != 45678 {
+		t.Errorf("port %d", p)
+	}
+	if p := c.ConnectedPort(context.Background(), "10.0.0.5"); p != 0 {
+		t.Errorf("an unknown host has no port: %d", p)
+	}
+	c = &Client{Run: func(ctx context.Context, args ...string) (string, error) {
+		return "List of devices attached\n10.0.0.6:45678\tunauthorized\n", nil
+	}}
+	if p := c.ConnectedPort(context.Background(), "10.0.0.6"); p != 45678 {
+		t.Errorf("an unauthorised device still says which port it is on: %d", p)
+	}
+}
+
+func TestPairingPortComesFromTheTVsAdvertisement(t *testing.T) {
+	c := &Client{
+		Run: func(ctx context.Context, args ...string) (string, error) { return "", errors.New("no mdns") },
+		MDNS: func(ctx context.Context, service string) (map[string]int, error) {
+			if service != ServicePairing {
+				t.Errorf("asked for %q", service)
+			}
+			return map[string]int{"10.0.0.6": 42123}, nil
+		},
+	}
+	if p := c.PairingPort(context.Background(), "10.0.0.6"); p != 42123 {
+		t.Errorf("port %d", p)
+	}
+}
+
+func TestReachableFindsAMovedPortWithoutAnADBSession(t *testing.T) {
+	var log []string
+	c := &Client{
+		Run: func(ctx context.Context, args ...string) (string, error) {
+			log = append(log, strings.Join(args, " "))
+			return "", errors.New("no mdns")
+		},
+		Dial: func(_ string, p int) bool { return p == 55001 },
+		MDNS: func(ctx context.Context, service string) (map[string]int, error) {
+			return map[string]int{"10.0.0.6": 55001}, nil
+		},
+		ScanLo: 1, ScanHi: 5,
+	}
+	port, ok := c.Reachable(context.Background(), "10.0.0.6", 37000)
+	if !ok || port != 55001 {
+		t.Fatalf("port %d ok %v", port, ok)
+	}
+	for _, l := range log {
+		if strings.HasPrefix(l, "connect") || strings.HasPrefix(l, "-s") {
+			t.Errorf("the quiet check must open no ADB session: %v", log)
+		}
+	}
+}
+
+func TestNewScansTheWholeEphemeralRange(t *testing.T) {
+	// adbd takes its port from the kernel's ephemeral range (32768-60999 on Linux), so a range
+	// stopping at 50000 cannot find roughly two ports in five.
+	c := New()
+	if c.ScanLo > 32768 || c.ScanHi < 60999 {
+		t.Errorf("%d-%d does not cover the ephemeral range", c.ScanLo, c.ScanHi)
+	}
+}
+
+func TestScanStopsWhenTheContextEnds(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c := &Client{ScanLo: 1, ScanHi: 65535, Dial: func(string, int) bool { return false }}
+	if open := c.scan(ctx, "10.0.0.6"); len(open) != 0 {
+		t.Errorf("%v", open)
+	}
+}
+
+func TestTCPIPNeedsAdbToSaySoWorked(t *testing.T) {
+	c := &Client{Run: func(ctx context.Context, args ...string) (string, error) {
+		return "restarting in TCP mode port: 5555", nil
+	}}
+	if err := c.TCPIP(context.Background(), "10.0.0.6:41234", 5555); err != nil {
+		t.Error(err)
+	}
+	c = &Client{Run: func(ctx context.Context, args ...string) (string, error) {
+		return "error: closed", errors.New("exit 1")
+	}}
+	if err := c.TCPIP(context.Background(), "10.0.0.6:41234", 5555); err == nil {
+		t.Error("a refused restart must be an error")
+	}
+}

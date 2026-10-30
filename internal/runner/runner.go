@@ -40,6 +40,9 @@ type ADB interface {
 	Playing(ctx context.Context, serial string) (bool, error)
 	Reachable(ctx context.Context, host string, known ...int) (int, bool)
 	Pair(ctx context.Context, host string, pairPort int, code string) error
+	PairingPort(ctx context.Context, host string) int
+	ConnectedPort(ctx context.Context, host string) int
+	TCPIP(ctx context.Context, serial string, port int) error
 }
 
 // Deps are the outside world; tests replace them. Patch sources are passed in so each
@@ -271,6 +274,8 @@ type DeviceCheck struct {
 	SDK    int
 	Helper string // "installed (version N)", "not part of this build", or why it failed
 	Tweaks string // what was done about the TV settings, if anything
+	// KeyExpiry is the TV's adb_allowed_connection_time; "0" means the pairing never expires.
+	KeyExpiry string
 }
 
 // TestDevice connects to a device the way a run would (known port, mDNS, port scan) and reads
@@ -285,7 +290,9 @@ func (r *Runner) TestDevice(ctx context.Context, d store.Device) (DeviceCheck, e
 	}
 	r.noteRecovered("device:" + d.ID)
 	chk := DeviceCheck{Port: r.Store.Port(d.ID), ABIs: c.abis, SDK: c.sdk}
-	switch res, err := r.ensureHelper(ctx, &c); {
+	res, err := r.ensureHelper(ctx, &c)
+	chk.KeyExpiry = res.KeyExpiry
+	switch {
 	case err != nil:
 		chk.Helper = "problem: " + err.Error()
 	case res.Skipped:
@@ -295,7 +302,8 @@ func (r *Runner) TestDevice(ctx context.Context, d store.Device) (DeviceCheck, e
 	default:
 		chk.Helper = "installed (version " + res.Version + ")"
 	}
-	for _, l := range r.tweaksStep(ctx, &c) {
+	// Last, because pinning the port restarts adbd and drops this connection.
+	for _, l := range r.fixedPortStep(ctx, &c, true) {
 		chk.Tweaks = l.Message
 	}
 	return chk, nil
@@ -309,6 +317,11 @@ func (r *Runner) PairDevice(ctx context.Context, d store.Device, pairPort int, c
 		return false, err
 	}
 	_ = r.Store.UpdateDeviceInfo(d.ID, func(i *store.DeviceInfo) { i.PairedAt = r.Now().Format(time.RFC3339) })
+	// Pairing leaves the adb server knowing the TV's current port, which is almost never the one
+	// on record: without this the next connection dials the old one and looks like a dead TV.
+	if p := r.ADB.ConnectedPort(ctx, d.Host); p > 0 {
+		_ = r.Store.SetPort(d.ID, p)
+	}
 	cctx, cancel := context.WithTimeout(ctx, 40*time.Second)
 	defer cancel()
 	if _, err := r.connect(cctx, d); err != nil {
@@ -392,14 +405,25 @@ type conn struct {
 	extra     []Result // lines from the connection-time steps (boot helper, TV settings)
 }
 
+// keyExpirySafety is how long tv-patcher lets a TV go untouched while Android is still counting
+// down to dropping this server's pairing key. Android deletes a key that has not connected for
+// adb_allowed_connection_time, 7 days by default, so a TV whose firmware would not take the
+// helper's "never expire" is connected to well inside that week rather than on its edge.
+const keyExpirySafety = 120 * time.Hour
+
 // verifyDue says whether a scheduled run should connect to this TV just to check what is
-// really installed: when it has not been reached for VerifyEvery, or never.
+// really installed: when it has not been reached for VerifyEvery, or never. A TV that has not
+// confirmed its pairing keys never expire is reached sooner, whatever VerifyEvery says.
 func (r *Runner) verifyDue(info store.DeviceInfo, known bool) bool {
 	if !known || len(info.ABIs) == 0 {
 		return true
 	}
+	every := r.Cfg.VerifyEvery
+	if info.KeyExpiry != "0" && every > keyExpirySafety {
+		every = keyExpirySafety
+	}
 	seen, err := time.Parse(time.RFC3339, info.SeenAt)
-	return err != nil || r.Now().Sub(seen) > r.Cfg.VerifyEvery
+	return err != nil || r.Now().Sub(seen) > every
 }
 
 // ensureConn connects to the TV once per run, and then runs the steps that belong to a
@@ -419,12 +443,18 @@ func (r *Runner) ensureConn(ctx context.Context, c *conn) error {
 	c.serial, c.abis, c.sdk, c.connected = got.serial, got.abis, got.sdk, true
 	r.noteRecovered("device:" + c.dev.ID)
 	c.extra = append(c.extra, r.helperStep(ctx, c)...)
-	c.extra = append(c.extra, r.tweaksStep(ctx, c)...)
+	c.extra = append(c.extra, r.fixedPortStep(ctx, c, false)...)
 	return nil
 }
 
 // unreachable is the result line for a TV that could not be connected to.
 func (r *Runner) unreachable(d store.Device, err error) Result {
+	// Losing the pairing needs somebody at the TV, so it is said at once and not dressed up as a
+	// TV that might just be asleep.
+	if errors.Is(err, adb.ErrNotPaired) {
+		return Result{Device: d.Name, Alert: r.noteFailureAfter("device:"+d.ID, err, false, 1),
+			Message: fmt.Sprintf("%s (%s) answers but no longer accepts this server: pair it again from the page (Pair…). Android drops a pairing key it has not seen for a week, which the boot helper switches off once it is installed.", d.Name, d.Host)}
+	}
 	// a TV that stays unreachable usually has Wireless debugging switched off (a reboot does that),
 	// so say so after two cycles in a row rather than waiting for the usual three
 	alert := r.noteFailureAfter("device:"+d.ID, err, false, min(2, r.Cfg.FailuresBeforeAlert))
@@ -561,8 +591,16 @@ func (r *Runner) connect(ctx context.Context, d store.Device) (conn, error) {
 	if p := r.Store.Port(d.ID); p > 0 {
 		known = append(known, p)
 	}
+	if p := r.Cfg.TVFixedADBPort; p > 0 && !slices.Contains(known, p) {
+		known = append(known, p)
+	}
 	port, err := r.ADB.Connect(ctx, d.Host, known...)
 	if err != nil {
+		// Wireless debugging picks a new port every time Android switches it back on, so a
+		// remembered one that has gone must be forgotten: kept, it is dialled first forever.
+		if errors.Is(err, adb.ErrUnreachable) {
+			_ = r.Store.SetPort(d.ID, 0)
+		}
 		return conn{}, err
 	}
 	_ = r.Store.SetPort(d.ID, port)

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sloccy/morphe-tv-patcher/internal/adb"
 	"github.com/sloccy/morphe-tv-patcher/internal/apk/apktest"
 	"github.com/sloccy/morphe-tv-patcher/internal/config"
 	"github.com/sloccy/morphe-tv-patcher/internal/morphe"
@@ -23,6 +24,7 @@ import (
 type fakeADB struct {
 	mu          sync.Mutex
 	down        map[string]bool     // host -> unreachable
+	unpaired    map[string]bool     // host -> answers, but no longer trusts this server
 	abis        map[string][]string // host -> abis
 	installed   map[string]string   // "serial/pkg" -> version
 	helperSHA   string              // sha256 of the helper APK the device holds
@@ -31,13 +33,18 @@ type fakeADB struct {
 	uninstalled []string
 	pairErr     error
 	paired      []string
-	shells      []string          // commands run through Shell
-	grantErr    string            // output of "pm grant" when it fails
-	helperVer   string            // version a successful helper install leaves on the device
-	connects    int               // adb connect calls (each one makes the real TV show a notice)
-	flags       map[string]string // device_config "namespace key" -> value
-	playing     map[string]bool   // host -> something is playing
+	shells      []string        // commands run through Shell
+	grantErr    string          // output of "pm grant" when it fails
+	helperVer   string          // version a successful helper install leaves on the device
+	connects    int             // adb connect calls (each one makes the real TV show a notice)
+	playing     map[string]bool // host -> something is playing
 	playingErr  error
+	props       map[string]string // getprop/setprop
+	expiry      string            // what adb_allowed_connection_time reads ("0" unless set)
+	disconnects []string          // "host:port" the adb server was told to forget
+	devicePort  int               // what the adb server says it is already talking to
+	pairingPort int               // what the TV advertises while its pairing dialog is open
+	tcpip       []string          // "serial port"
 }
 
 func (f *fakeADB) Playing(ctx context.Context, s string) (bool, error) {
@@ -46,7 +53,7 @@ func (f *fakeADB) Playing(ctx context.Context, s string) (bool, error) {
 }
 
 func newADB() *fakeADB {
-	return &fakeADB{playing: map[string]bool{}, down: map[string]bool{}, abis: map[string][]string{}, installed: map[string]string{}, installMsg: map[string]string{}}
+	return &fakeADB{playing: map[string]bool{}, down: map[string]bool{}, unpaired: map[string]bool{}, abis: map[string][]string{}, installed: map[string]string{}, installMsg: map[string]string{}}
 }
 
 func (f *fakeADB) Reachable(ctx context.Context, host string, known ...int) (int, bool) {
@@ -55,9 +62,27 @@ func (f *fakeADB) Reachable(ctx context.Context, host string, known ...int) (int
 func (f *fakeADB) Connect(ctx context.Context, host string, known ...int) (int, error) {
 	f.connects++
 	if f.down[host] {
-		return 0, errors.New("device unreachable")
+		return 0, adb.ErrUnreachable
+	}
+	if f.unpaired[host] {
+		return 0, adb.ErrNotPaired
+	}
+	for _, p := range known { // the real adb returns the port it actually reached
+		if p > 0 {
+			return p, nil
+		}
 	}
 	return 40000, nil
+}
+func (f *fakeADB) PairingPort(ctx context.Context, host string) int   { return f.pairingPort }
+func (f *fakeADB) ConnectedPort(ctx context.Context, host string) int { return f.devicePort }
+func (f *fakeADB) Disconnect(ctx context.Context, host string, port int) error {
+	f.disconnects = append(f.disconnects, fmt.Sprintf("%s:%d", host, port))
+	return nil
+}
+func (f *fakeADB) TCPIP(ctx context.Context, serial string, port int) error {
+	f.tcpip = append(f.tcpip, fmt.Sprintf("%s %d", serial, port))
+	return nil
 }
 func (f *fakeADB) ABIs(ctx context.Context, s string) ([]string, error) {
 	host, _, _ := strings.Cut(s, ":")
@@ -105,20 +130,22 @@ func (f *fakeADB) Shell(ctx context.Context, serial, cmd string) (string, error)
 			return f.grantErr, nil
 		}
 		return "", nil
-	case strings.HasPrefix(cmd, "device_config get "):
-		if v, ok := f.flags[strings.TrimPrefix(cmd, "device_config get ")]; ok {
-			return v + "\n", nil
-		}
-		return "null\n", nil
-	case strings.HasPrefix(cmd, "device_config put "):
-		parts := strings.Fields(strings.TrimPrefix(cmd, "device_config put "))
-		if f.flags == nil {
-			f.flags = map[string]string{}
-		}
-		f.flags[parts[0]+" "+parts[1]] = parts[2]
-		return "", nil
 	case strings.HasPrefix(cmd, "settings get global adb_wifi_enabled"):
 		return "1\n", nil
+	case strings.HasPrefix(cmd, "settings get global adb_allowed_connection_time"):
+		if f.expiry == "" {
+			return "0\n", nil
+		}
+		return f.expiry + "\n", nil
+	case strings.HasPrefix(cmd, "getprop "):
+		return f.props[strings.TrimPrefix(cmd, "getprop ")] + "\n", nil
+	case strings.HasPrefix(cmd, "setprop "):
+		parts := strings.Fields(strings.TrimPrefix(cmd, "setprop "))
+		if f.props == nil {
+			f.props = map[string]string{}
+		}
+		f.props[parts[0]] = parts[1]
+		return "", nil
 	case cmd == "pm path com.sloccy.bootadb":
 		if f.installed[serial+"/com.sloccy.bootadb"] == "" {
 			return "", nil

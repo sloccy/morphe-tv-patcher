@@ -2,6 +2,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,11 +35,13 @@ type Config struct {
 	// installed; in between it plans from its own records and connects when something needs
 	// installing. Run now and Force always connect.
 	VerifyEvery time.Duration
-	// BackgroundProcessLimit is the TV's "Background process limit" developer setting (0 = leave it
-	// alone). It is set over ADB whenever tv-patcher connects. PersistTVFlags also turns off
-	// Google's flag sync on the TV so the value survives a restart (off by default).
-	BackgroundProcessLimit int
-	PersistTVFlags         bool
+	// TVFixedADBPort pins ADB on the TV to a port that never changes (0 = leave it alone, which
+	// means the random wireless-debugging port is found each time). Legacy ADB over TCP is not
+	// encrypted and leaves a well-known port listening on the LAN, so this is opt-in.
+	TVFixedADBPort int
+	// ScanLo, ScanHi bound the port scan that looks for the wireless-debugging port when neither
+	// the remembered port nor mDNS found it. adbd picks it from the kernel's ephemeral range.
+	ScanLo, ScanHi int
 	// MirrorGap is the minimum time between APKMirror requests; MirrorCooldown is the first pause
 	// after it pushes back (doubling while it keeps doing so).
 	MirrorGap      time.Duration
@@ -120,10 +123,12 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	if c.VerifyEvery, err = time.ParseDuration(def("VERIFY_EVERY", "168h")); err != nil || c.VerifyEvery < time.Hour {
 		return c, fmt.Errorf("VERIFY_EVERY must be a duration of at least 1h (e.g. 168h): %q", getenv("VERIFY_EVERY"))
 	}
-	if c.BackgroundProcessLimit, err = strconv.Atoi(def("BACKGROUND_PROCESS_LIMIT", "0")); err != nil || c.BackgroundProcessLimit < 0 || c.BackgroundProcessLimit > 100 {
-		return c, fmt.Errorf("BACKGROUND_PROCESS_LIMIT must be 0 (off) to 100: %q", getenv("BACKGROUND_PROCESS_LIMIT"))
+	if c.TVFixedADBPort, err = strconv.Atoi(def("TV_FIXED_ADB_PORT", "0")); err != nil || c.TVFixedADBPort < 0 || c.TVFixedADBPort > 65535 || (c.TVFixedADBPort > 0 && c.TVFixedADBPort < 1024) {
+		return c, fmt.Errorf("TV_FIXED_ADB_PORT must be 0 (off) or a port from 1024 to 65535: %q", getenv("TV_FIXED_ADB_PORT"))
 	}
-	c.PersistTVFlags = flag("TV_PERSIST_FLAGS")
+	if c.ScanLo, c.ScanHi, err = ports(def("ADB_SCAN_RANGE", "30000-61000")); err != nil {
+		return c, fmt.Errorf("ADB_SCAN_RANGE must be two port numbers low-high (e.g. 30000-61000): %q", getenv("ADB_SCAN_RANGE"))
+	}
 	if c.WebPort, err = strconv.Atoi(def("WEB_PORT", "8093")); err != nil || c.WebPort < 1 || c.WebPort > 65535 {
 		return c, fmt.Errorf("WEB_PORT must be a port number: %q", getenv("WEB_PORT"))
 	}
@@ -152,4 +157,22 @@ func splitRepos(s string) []string {
 		}
 	}
 	return out
+}
+
+// ports reads a "low-high" port range.
+func ports(s string) (lo, hi int, err error) {
+	loStr, hiStr, ok := strings.Cut(s, "-")
+	if !ok {
+		return 0, 0, errors.New("not a range")
+	}
+	if lo, err = strconv.Atoi(strings.TrimSpace(loStr)); err != nil {
+		return 0, 0, err
+	}
+	if hi, err = strconv.Atoi(strings.TrimSpace(hiStr)); err != nil {
+		return 0, 0, err
+	}
+	if lo < 1 || hi > 65535 || lo > hi {
+		return 0, 0, errors.New("out of order or out of range")
+	}
+	return lo, hi, nil
 }

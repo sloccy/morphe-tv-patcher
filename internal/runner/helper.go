@@ -20,6 +20,10 @@ type HelperResult struct {
 	Skipped   bool   // no helper APK in this build, nothing to do
 	Version   string // version now on the device
 	Installed bool   // it was (re)installed this time
+	// KeyExpiry is what the TV's adb_allowed_connection_time reads. "0" means the pairing keys
+	// never expire, which is what the helper asks for; anything else is a countdown to being
+	// unpaired (7 days by default) and makes tv-patcher connect inside that window.
+	KeyExpiry string
 }
 
 // ensureHelper makes sure the boot helper is on the device, current, and allowed to change the
@@ -59,14 +63,43 @@ func (r *Runner) ensureHelper(ctx context.Context, c *conn) (HelperResult, error
 		if _, err := r.ADB.Shell(ctx, c.serial, "am start -n "+helper.Activity); err != nil {
 			return res, fmt.Errorf("could not open the boot helper once: %w", err)
 		}
-		// Opening it only schedules the job (an exported activity must do nothing privileged),
-		// so run that job now to apply the settings. Best effort: the read below is the real test.
-		_, _ = r.ADB.Shell(ctx, c.serial, "cmd jobscheduler run -f "+helper.Package+" "+helper.JobID)
 	}
-	if out, err := r.ADB.Shell(ctx, c.serial, "settings get global adb_wifi_enabled"); err != nil || strings.TrimSpace(out) != "1" {
-		return res, fmt.Errorf("the boot helper is installed but Wireless debugging reads %q", strings.TrimSpace(out))
+	// Nobody ever opens the helper, so Android files it under "rare" and may defer its jobs far
+	// past their 15 minutes. These two take it out of that bucket; both are best effort, because
+	// not every TV's shell has them, and the reads below are the real test.
+	for _, cmd := range []string{
+		"dumpsys deviceidle whitelist +" + helper.Package, // persists on the TV
+		"am set-standby-bucket " + helper.Package + " active",
+	} {
+		if _, err := r.ADB.Shell(ctx, c.serial, cmd); err != nil {
+			slog.Debug("the TV would not unthrottle the boot helper", "device", c.dev.Name, "cmd", cmd, "err", err)
+		}
 	}
-	_ = r.Store.UpdateDeviceInfo(c.dev.ID, func(d *store.DeviceInfo) { d.Helper = b.Version })
+	// Opening the app only schedules the jobs (an exported activity must do nothing privileged),
+	// so run the backstop job to apply the settings now rather than at its own pace.
+	_, _ = r.ADB.Shell(ctx, c.serial, "cmd jobscheduler run -f "+helper.Package+" "+helper.JobID)
+	// Read every setting before judging any of them, so the record (and the keepalive that uses
+	// it) is right even when another one is what went wrong.
+	reads := make([]string, len(helper.Wanted))
+	for i, w := range helper.Wanted {
+		out, err := r.ADB.Shell(ctx, c.serial, "settings get global "+w.Key)
+		if err == nil {
+			reads[i] = strings.TrimSpace(out)
+		}
+		if w.Key == "adb_allowed_connection_time" {
+			res.KeyExpiry = reads[i]
+		}
+	}
+	_ = r.Store.UpdateDeviceInfo(c.dev.ID, func(d *store.DeviceInfo) {
+		d.Helper, d.KeyExpiry = b.Version, res.KeyExpiry
+	})
+	for i, w := range helper.Wanted {
+		// "settings get" prints null for a key nobody ever wrote, so a TV still on Android's
+		// 7-day default fails here rather than looking fine until it unpairs itself.
+		if reads[i] != w.Value {
+			return res, fmt.Errorf("the boot helper is installed but %s reads %q, not %q", w.What, reads[i], w.Value)
+		}
+	}
 	if res.Installed {
 		slog.Info("boot helper installed", "device", c.dev.Name, "version", b.Version)
 	}

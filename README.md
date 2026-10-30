@@ -162,35 +162,72 @@ cryptographically and files are refused; `ALLOW_UNVERIFIED_SIGNATURES=true` acce
 out of a movie) for every ADB session, so tv-patcher connects as little as it can. A scheduled run
 plans from its own records and connects to a TV only when something has to be installed, when the TV
 has not been checked for `VERIFY_EVERY` (default 7 days, which also notices an app you removed by
-hand), or the first time. The "something is playing" check happens just before installing, not before
+hand, and is shortened to 5 days for a TV that still expires ADB keys), or the first time. The "something is playing" check happens just before installing, not before
 downloading, so a release that changes nothing for an app never reaches the TV at all. **Run now** always connects. Each TV card has two test buttons: **Test**
 only looks at the network (no ADB session, so no notice) and says whether Wireless debugging is
 answering; **Full test** really connects, checks the pairing, reads the CPU and updates the boot helper.
 The app list on each card can be collapsed (the line above it still says how many apps the TV gets).
 
-**Boot helper.** Android turns Wireless debugging off when a TV restarts. `bootadb/` is a tiny app
-(no libraries, no network access) that switches it back on at every boot and, if the TV turned it off
-again, once an hour (it only changes a setting when it finds it different). It also keeps these
-tracking settings off: `wifi_scan_always_enabled`, `network_recommendations_enabled`,
+**Boot helper.** Android turns Wireless debugging off when a TV restarts — and at other times of its
+own (see below). `bootadb/` is a tiny app (no libraries, no network access) that switches it back on
+at every boot, within seconds of Android switching it off, and every 15 minutes as a backstop (it
+only changes a setting when it finds it different). The fast path is a JobScheduler content trigger on
+the `adb_wifi_enabled` setting itself; the 15-minute job is the guaranteed one, because a content
+trigger on a system setting is not a documented contract. It also keeps
+`adb_allowed_connection_time` at `0`, which is what stops a TV unpairing itself, and
+`development_settings_enabled` at `1`, because turning Developer options off takes Wireless debugging
+with it. It keeps these tracking settings off: `wifi_scan_always_enabled`, `network_recommendations_enabled`,
 `upload_apk_enable`, `package_verifier_user_consent` (-1), `send_action_app_error` and
 `location_mode`. It shows no messages; see `adb logcat -s BootAdb`. Whenever tv-patcher connects
 to a TV it installs the helper (and replaces it when the image carries a newer one, or when the copy
 on the TV is not byte-for-byte the one it ships — the permission is only ever granted to its own
 APK), grants it the one permission it needs over ADB, and opens it once so Android lets it receive
 the boot broadcast. Opening it does nothing by itself: the activity is reachable by any app on the
-TV, so it only schedules the hourly job, which tv-patcher then runs once. A card
-shows "boot helper ✓". It is built in CI (`bootadb/build.sh`, Android SDK tools only), signed with a
+TV, so it only schedules the jobs, which tv-patcher then runs once. Because nothing on the TV ever
+opens the helper, Android would file it under "rare" and defer its jobs for hours, so tv-patcher also
+puts it on the Doze whitelist and in the active standby bucket whenever it connects. A card
+shows "boot helper ✓" and "pairing kept ✓". It is built in CI (`bootadb/build.sh`, Android SDK tools only), signed with a
 throw-away key, and shipped inside the image at `/opt/bootadb/bootadb.apk` (`BOOT_HELPER_APK`). If a
 TV refuses it you get a message on the card and, on the second run in a row, a Telegram alert; apps
 are updated regardless.
 
-**Background process limit.** `BACKGROUND_PROCESS_LIMIT=4` sets the TV's "Background process limit"
-developer setting whenever tv-patcher connects (an app cannot do this; only ADB can). Android resets
-it when the TV restarts, so after a restart it stays unset until the next connection. Setting
-`TV_PERSIST_FLAGS=true` also turns off Google's flag sync on the TV so the value survives restarts;
-that is off by default because it affects the whole TV. `0` (the default) leaves the setting alone.
+**Why a TV stops answering.** Three different things, with three different fixes, and all three are
+things Android does on purpose:
 
-A TV that cannot be reached for two runs in a row sends a Telegram message saying to turn Wireless debugging back on (a reboot switches it off; the pairing is kept).
+1. **It unpairs itself after a week.** Android deletes an ADB key that has not connected for
+   `adb_allowed_connection_time`, which defaults to 604800000 ms — 7 days. A TV that simply had no
+   app to update is never connected to, so the key quietly expires and the next run is refused. The
+   boot helper sets that setting to `0` (keys never expire). Until a TV confirms it reads `0`,
+   tv-patcher connects to it at least every 5 days whatever `VERIFY_EVERY` says, so the key is
+   refreshed inside the week; the card shows "expires pairings" for such a TV. If yours has already
+   unpaired, press **Pair…** once more — with the helper installed it will not happen again.
+2. **Android switches Wireless debugging off by itself.** Not only on a restart: it writes
+   `adb_wifi_enabled = 0` when Wi-Fi is turned off, when the network drops, and **when the access
+   point changes** ("Detected wifi network change"), so a TV roaming between mesh access points on
+   one SSID is enough to do it. The helper puts it straight back, now within seconds rather than
+   within the hour. Giving the TV one fixed access point (no band steering) avoids the churn.
+3. **The port changes every time.** adbd picks a new random port whenever Wireless debugging comes
+   back on, so the remembered one is dead. tv-patcher asks the TV's own mDNS advertisement for the
+   new port, which takes milliseconds; a port it could not reach is forgotten rather than dialled
+   first forever, and pairing takes the port straight from the adb server.
+
+A TV that cannot be reached for two runs in a row sends a Telegram message saying to turn Wireless debugging back on (a reboot switches it off; the pairing is kept). A TV that answers but no longer accepts this server says so at once instead, because that needs somebody at the TV.
+
+**Finding the port.** In order: the last port that worked, the TV's own mDNS advertisement
+(`_adb-tls-connect._tcp`, queried by tv-patcher itself — the `adb` in the image is built without mDNS
+support, so `adb mdns services` finds nothing there), and then a scan of `ADB_SCAN_RANGE`
+(`30000-61000`, which covers the whole range the kernel hands adbd). The **Pair…** form fills the
+pairing port in from the same source, so only the six-digit code has to be typed.
+
+**A port that never changes (opt-in).** `TV_FIXED_ADB_PORT=5555` moves the TV to legacy ADB over TCP
+on a fixed port (`persist.adb.tcp.port`, read by adbd at every boot), so no port ever has to be
+found. It is off by default and worth understanding before switching on: legacy ADB over TCP is
+**not encrypted**, where the wireless-debugging transport is, and it leaves a well-known port
+listening on your LAN — still key-authenticated, but 5555 is a standard thing to scan for. Whether
+the property survives a restart depends on the TV's firmware, so tv-patcher reads it back and says
+on the card what actually stuck; normal discovery stays in place either way. A run only sets the
+property (restarting adbd would drop the connection the installs need); **Full test** also restarts
+adbd so it takes effect at once.
 
 Temporary download failures alert on Telegram only after 3 cycles in a row (then at most daily); a
 wrong signature or a phone build alerts at once; a message follows when it recovers.
@@ -206,9 +243,9 @@ wrong signature or a phone build alerts at once; a message follows when it recov
 | `FLARESOLVERR_URL` | | e.g. `http://127.0.0.1:8191` |
 | `APKMIRROR_MIN_INTERVAL` | `4s` | minimum gap between APKMirror requests |
 | `APKMIRROR_COOLDOWN` | `5m` | first pause after APKMirror pushes back (doubles, up to 1h) |
-| `VERIFY_EVERY` | `168h` | how often a scheduled run connects to a TV only to check what is installed |
-| `BACKGROUND_PROCESS_LIMIT` | `0` | TV background process limit to keep (0 = leave alone) |
-| `TV_PERSIST_FLAGS` | `false` | with the limit: also stop Google's flag sync so it survives restarts |
+| `VERIFY_EVERY` | `168h` | how often a scheduled run connects to a TV only to check what is installed; capped at 120h for a TV that has not confirmed `adb_allowed_connection_time=0` |
+| `ADB_SCAN_RANGE` | `30000-61000` | ports the last-resort scan tries when mDNS is silent |
+| `TV_FIXED_ADB_PORT` | `0` | pin ADB to this port (0 = off); unencrypted and LAN-visible, read the section above |
 | `PATCHES_REPO` / `PATCHES_PRERELEASE` | `ajstrick81/morphe-androidtv-patches` / `false` | seeds the patch sources on the first run only |
 | `PATCH_SOURCES_ALLOWED_OWNERS` | | limit repositories added from the page to these GitHub owners |
 | `BYTECODE_MODE` | `STRIP_SAFE` | Morphe `--bytecode-mode` |

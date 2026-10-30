@@ -272,7 +272,7 @@ function deviceCard(dev) {
       } }), " " + st.name + " (" + (st.apps || []).length + ")")))) : null;
 
   const pairForm = openPair[dev.id] ? h("div", { class: "row", style: "margin-top:8px" },
-    h("span", { class: "sub" }, "On the TV choose “Pair device with pairing code”, then enter the port and code it shows:"),
+    h("span", { class: "sub" }, "On the TV choose “Pair device with pairing code”. The port is found on the network; type the code it shows:"),
     h("input", { type: "number", id: "pp-" + dev.id, placeholder: "pairing port", min: 1024, max: 65535, style: "width:130px" }),
     h("input", { type: "text", id: "pc-" + dev.id, placeholder: "6-digit code", maxlength: 6, inputmode: "numeric", style: "width:120px" }),
     h("button", { disabled: busy.has("pair-" + dev.id), onclick: () => doPair(dev) }, busy.has("pair-" + dev.id) ? "Pairing…" : "Pair")) : null;
@@ -282,7 +282,11 @@ function deviceCard(dev) {
     ? h("span", { class: "chip", title: "What the device reports; builds are chosen to match" },
         (dev.is64 ? "64-bit capable" : "32-bit") + " · " + dev.info.abis.join(", ") + " · Android API " + dev.info.sdk)
     : null;
-  const helperChip = dev.info && dev.info.helper ? h("span", { class: "chip", title: "A small app on the TV that switches Wireless debugging back on after a restart" }, "boot helper ✓") : null;
+  const helperChip = dev.info && dev.info.helper ? h("span", { class: "chip", title: "A small app on the TV that switches Wireless debugging back on after a restart, and stops the TV expiring this server's pairing" }, "boot helper ✓") : null;
+  const expiry = dev.info && dev.info.key_expiry;
+  const expiryChip = !expiry ? null : expiry === "0"
+    ? h("span", { class: "chip", title: "adb_allowed_connection_time is 0, so Android will not drop this server's pairing key" }, "pairing kept ✓")
+    : h("span", { class: "chip warn", title: "This TV would not take adb_allowed_connection_time=0, so Android drops an unused pairing key after adb_allowed_connection_time=" + expiry + "ms. tv-patcher connects at least every 5 days to stop that" }, "expires pairings");
   const pairChip = paired ? h("span", { class: "chip" }, "paired") : (cpu ? null : h("span", { class: "chip warn" }, "not paired yet"));
 
   return h("section", { class: "card" },
@@ -290,8 +294,8 @@ function deviceCard(dev) {
       h("span", { class: "grow" },
         h("strong", {}, h("span", { class: "dot " + (last.length ? (offline ? "bad" : "ok") : "") }), dev.name),
         h("span", { class: "sub" }, "  " + dev.host),
-        pairChip, cpu, helperChip),
-      h("button", { onclick: () => { openPair[dev.id] = !openPair[dev.id]; render(); } }, "Pair…"),
+        pairChip, cpu, helperChip, expiryChip),
+      h("button", { onclick: () => { openPair[dev.id] = !openPair[dev.id]; render(); if (openPair[dev.id]) findPairPort(dev); } }, "Pair…"),
       h("button", { disabled: busy.has("test-" + dev.id), title: "Looks at the network only: nothing connects to the TV, so it shows no notice", onclick: () => doTest(dev, false) }, busy.has("test-" + dev.id) ? "Testing…" : "Test"),
       h("button", { disabled: busy.has("test-" + dev.id), title: "Really connects: checks the pairing, reads the CPU and updates the boot helper. The TV shows its 'debugging connected' notice.", onclick: () => doTest(dev, true) }, "Full test"),
       h("button", { disabled: busy.has("run-" + dev.id), onclick: () => doRun(dev.id) }, "Run now"),
@@ -497,6 +501,15 @@ async function doTest(dev, full) {
     const r = await api("POST", "/api/devices/" + encodeURIComponent(dev.id) + "/test" + (full ? "?full=1" : ""));
     notes[dev.id] = { ok: true, text: r.message };
   } catch (e) { notes[dev.id] = noteFrom(e); }
+}
+
+// The TV advertises its pairing port while the dialog is open, so it does not have to be typed.
+async function findPairPort(dev) {
+  try {
+    const r = await api("GET", "/api/devices/" + encodeURIComponent(dev.id) + "/pairport");
+    const box = document.getElementById("pp-" + dev.id);
+    if (r.port > 0 && box && !box.value) { box.value = r.port; }
+  } catch (e) { /* typing it in still works */ }
 }
 
 async function doPair(dev) {

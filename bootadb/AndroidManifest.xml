@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Keeps Wireless debugging switched on and a few tracking settings off (Wi-Fi scanning, location,
-     Play Protect uploads, crash reports, network recommendations): applied at every boot and every
-     hour, only when a value differs. No network access, no data. -->
+<!-- Keeps Wireless debugging switched on (and its pairing keys from expiring) and a few tracking
+     settings off (Wi-Fi scanning, location, Play Protect uploads, crash reports, network
+     recommendations): applied at every boot, every 15 minutes, and within seconds of Android
+     switching Wireless debugging off, only when a value differs. No network access, no data. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.sloccy.bootadb">
 
@@ -41,6 +42,11 @@
 
         <service
             android:name=".KeepOnJob"
+            android:exported="true"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+
+        <service
+            android:name=".WatchJob"
             android:exported="true"
             android:permission="android.permission.BIND_JOB_SERVICE" />
     </application>
