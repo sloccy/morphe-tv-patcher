@@ -55,6 +55,15 @@ func (r *Runner) ensureHelper(ctx context.Context, c *conn) (HelperResult, error
 			return res, fmt.Errorf("installing the boot helper failed: %s", firstLine(out))
 		}
 		res.Installed = true
+		// Believe the TV, not the installer: an install that reports success and leaves the old
+		// app in place would otherwise look like a settings problem further down, and the page
+		// would show the version this build ships rather than the one actually running.
+		if now, err := r.ADB.InstalledVersion(ctx, c.serial, helper.Package); err == nil && now != "" {
+			res.Version = now
+		}
+		if res.Version != b.Version {
+			return res, fmt.Errorf("the boot helper still reads version %q after installing %q, so the install did not take", res.Version, b.Version)
+		}
 	}
 	if out, err := r.ADB.Shell(ctx, c.serial, "pm grant "+helper.Package+" "+helper.Permission); err != nil || strings.Contains(out, "Exception") {
 		return res, fmt.Errorf("this TV would not let the boot helper change the Wireless debugging setting: %s", firstLine(out+fmt.Sprint(err)))
@@ -76,7 +85,8 @@ func (r *Runner) ensureHelper(ctx context.Context, c *conn) (HelperResult, error
 		}
 	}
 	// Opening the app only schedules the jobs (an exported activity must do nothing privileged),
-	// so run the backstop job to apply the settings now rather than at its own pace.
+	// so run the backstop job, which applies the helper's privacy settings now rather than at its
+	// own pace. Nothing below depends on it having finished: it returns as soon as the job starts.
 	_, _ = r.ADB.Shell(ctx, c.serial, "cmd jobscheduler run -f "+helper.Package+" "+helper.JobID)
 	// Read every setting before judging any of them, so the record (and the keepalive that uses
 	// it) is right even when another one is what went wrong.
@@ -86,12 +96,32 @@ func (r *Runner) ensureHelper(ctx context.Context, c *conn) (HelperResult, error
 		if err == nil {
 			reads[i] = strings.TrimSpace(out)
 		}
+	}
+	// Then set what is wrong here and now, rather than leaving these two to the helper. The job
+	// above is asynchronous, so reading straight after it raced the write and found the key expiry
+	// still unset; and a helper that nobody ever opens can sit in Android's rare or restricted
+	// standby bucket with its 15-minute job deferred for hours, all of which the TV spends counting
+	// down to dropping this server's pairing. The shell holds WRITE_SECURE_SETTINGS as well, so
+	// this is the same write the helper would have made. The helper still matters for every moment
+	// tv-patcher is not connected: a restart, a Wi-Fi drop, a move to another access point.
+	for i, w := range helper.Wanted {
+		if reads[i] == w.Value {
+			continue
+		}
+		if out, err := r.ADB.Shell(ctx, c.serial, "settings put global "+w.Key+" "+w.Value); err != nil {
+			slog.Warn("could not set a TV setting", "device", c.dev.Name, "key", w.Key, "err", firstLine(out+err.Error()))
+		}
+		if out, err := r.ADB.Shell(ctx, c.serial, "settings get global "+w.Key); err == nil {
+			reads[i] = strings.TrimSpace(out) // only the read-back counts
+		}
+	}
+	for i, w := range helper.Wanted {
 		if w.Key == "adb_allowed_connection_time" {
 			res.KeyExpiry = reads[i]
 		}
 	}
 	_ = r.Store.UpdateDeviceInfo(c.dev.ID, func(d *store.DeviceInfo) {
-		d.Helper, d.KeyExpiry = b.Version, res.KeyExpiry
+		d.Helper, d.KeyExpiry = res.Version, res.KeyExpiry
 	})
 	for i, w := range helper.Wanted {
 		// "settings get" prints null for a key nobody ever wrote, so a TV still on Android's

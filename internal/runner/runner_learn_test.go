@@ -432,9 +432,47 @@ func TestTheHelperIsUnthrottledAndItsKeyExpiryChecked(t *testing.T) {
 	}
 }
 
+// The helper's job is started, not waited for, so a TV whose key expiry is still Android's unset
+// default must be fixed by tv-patcher itself rather than read back a moment later and reported.
+func TestTheKeyExpiryIsSetOverADBNotLeftToTheHelpersJob(t *testing.T) {
+	rg, d := helperRig(t, 20261022)
+	if rg.adb.settings["adb_allowed_connection_time"] != "" {
+		t.Fatal("the TV must start with no key expiry, as a real one does")
+	}
+	lines := helperLines(rg.r.Run(context.Background(), Options{}))
+	if !strings.Contains(strings.Join(rg.adb.shells, "|"), "settings put global adb_allowed_connection_time 0") {
+		t.Errorf("it must be written, not waited for: %v", rg.adb.shells)
+	}
+	if rg.adb.settings["adb_allowed_connection_time"] != "0" {
+		t.Errorf("the TV should now never expire this server's key: %q", rg.adb.settings["adb_allowed_connection_time"])
+	}
+	for _, l := range lines {
+		if !l.OK {
+			t.Errorf("setting it is not a problem to report: %+v", l)
+		}
+	}
+	if info, _ := rg.st.DeviceInfo(d.ID); info.KeyExpiry != "0" {
+		t.Errorf("and the record follows the write, so the keepalive stands down: %+v", info)
+	}
+}
+
+func TestASecondRunWritesNothingWhenTheSettingsAlreadyHold(t *testing.T) {
+	rg, _ := helperRig(t, 20261022)
+	rg.r.Run(context.Background(), Options{})
+	rg.adb.shells = nil
+	for _, x := range helperLines(rg.r.Run(context.Background(), Options{Manual: true})) {
+		t.Errorf("nothing changed, so say nothing: %+v", x)
+	}
+	if j := strings.Join(rg.adb.shells, "|"); strings.Contains(j, "settings put global") {
+		t.Errorf("a TV that already holds the values is not written to: %v", rg.adb.shells)
+	}
+}
+
 func TestATVThatWillNotStopExpiringKeysIsReported(t *testing.T) {
 	rg, d := helperRig(t, 20261022)
-	rg.adb.expiry = "604800000" // the firmware would not take 0
+	// This firmware takes the write and keeps its own value anyway.
+	rg.adb.settings["adb_allowed_connection_time"] = "604800000"
+	rg.adb.refuses["adb_allowed_connection_time"] = true
 	res := rg.r.Run(context.Background(), Options{})
 	lines := helperLines(res)
 	if len(lines) != 1 || lines[0].OK || !strings.Contains(lines[0].Message, "ADB key expiry") {
@@ -498,5 +536,22 @@ func TestTheFixedPortIsOnlySetWhenAskedFor(t *testing.T) {
 	}
 	if len(rg.adb.tcpip) != 1 {
 		t.Errorf("a full test restarts adbd on the fixed port: %v", rg.adb.tcpip)
+	}
+}
+
+// An install that reports success but leaves the old app in place used to be silent, and then
+// looked like a settings problem further down while the page showed the version we shipped.
+func TestAnInstallThatDidNotTakeIsReported(t *testing.T) {
+	rg, d := helperRig(t, 20261022)
+	rg.adb.helperVer = "20260101" // the TV keeps an older helper whatever the installer says
+	lines := helperLines(rg.r.Run(context.Background(), Options{}))
+	if len(lines) != 1 || lines[0].OK || !strings.Contains(lines[0].Message, "did not take") {
+		t.Fatalf("%+v", lines)
+	}
+	if !strings.Contains(lines[0].Message, "20260101") || !strings.Contains(lines[0].Message, "20261022") {
+		t.Errorf("name both versions, so it is obvious which is which: %q", lines[0].Message)
+	}
+	if info, _ := rg.st.DeviceInfo(d.ID); info.Helper == "20261022" {
+		t.Errorf("the page must not claim the version we shipped: %+v", info)
 	}
 }

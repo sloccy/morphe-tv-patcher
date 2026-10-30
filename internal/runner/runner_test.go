@@ -40,7 +40,8 @@ type fakeADB struct {
 	playing     map[string]bool // host -> something is playing
 	playingErr  error
 	props       map[string]string // getprop/setprop
-	expiry      string            // what adb_allowed_connection_time reads ("0" unless set)
+	settings    map[string]string // "settings get/put global"; a real TV starts with no key expiry
+	refuses     map[string]bool   // global settings this TV will not keep
 	disconnects []string          // "host:port" the adb server was told to forget
 	devicePort  int               // what the adb server says it is already talking to
 	pairingPort int               // what the TV advertises while its pairing dialog is open
@@ -53,7 +54,11 @@ func (f *fakeADB) Playing(ctx context.Context, s string) (bool, error) {
 }
 
 func newADB() *fakeADB {
-	return &fakeADB{playing: map[string]bool{}, down: map[string]bool{}, unpaired: map[string]bool{}, abis: map[string][]string{}, installed: map[string]string{}, installMsg: map[string]string{}}
+	return &fakeADB{playing: map[string]bool{}, down: map[string]bool{}, unpaired: map[string]bool{}, abis: map[string][]string{},
+		installed: map[string]string{}, installMsg: map[string]string{}, refuses: map[string]bool{},
+		// Wireless debugging is on (we reached the TV), but the key expiry is Android's unset
+		// default, which is exactly the state that unpaired a real TV.
+		settings: map[string]string{"adb_wifi_enabled": "1"}}
 }
 
 func (f *fakeADB) Reachable(ctx context.Context, host string, known ...int) (int, bool) {
@@ -130,13 +135,18 @@ func (f *fakeADB) Shell(ctx context.Context, serial, cmd string) (string, error)
 			return f.grantErr, nil
 		}
 		return "", nil
-	case strings.HasPrefix(cmd, "settings get global adb_wifi_enabled"):
-		return "1\n", nil
-	case strings.HasPrefix(cmd, "settings get global adb_allowed_connection_time"):
-		if f.expiry == "" {
-			return "0\n", nil
+	case strings.HasPrefix(cmd, "settings get global "):
+		key := strings.TrimPrefix(cmd, "settings get global ")
+		if v, ok := f.settings[key]; ok {
+			return v + "\n", nil
 		}
-		return f.expiry + "\n", nil
+		return "null\n", nil // what a TV prints for a setting nobody ever wrote
+	case strings.HasPrefix(cmd, "settings put global "):
+		parts := strings.Fields(strings.TrimPrefix(cmd, "settings put global "))
+		if len(parts) == 2 && !f.refuses[parts[0]] {
+			f.settings[parts[0]] = parts[1]
+		}
+		return "", nil
 	case strings.HasPrefix(cmd, "getprop "):
 		return f.props[strings.TrimPrefix(cmd, "getprop ")] + "\n", nil
 	case strings.HasPrefix(cmd, "setprop "):

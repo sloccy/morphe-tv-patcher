@@ -176,7 +176,10 @@ the `adb_wifi_enabled` setting itself; the 15-minute job is the guaranteed one, 
 trigger on a system setting is not a documented contract. It also keeps
 `adb_allowed_connection_time` at `0`, which is what stops a TV unpairing itself, and
 `development_settings_enabled` at `1`, because turning Developer options off takes Wireless debugging
-with it. It keeps these tracking settings off: `wifi_scan_always_enabled`, `network_recommendations_enabled`,
+with it. Those first two matter too much to leave to a background job, so tv-patcher also writes them
+itself over ADB whenever it connects and believes only what reads back: the helper's job is started,
+not waited for, and a helper nobody ever opens can have its job deferred for hours by Android's
+standby bucket. It keeps these tracking settings off: `wifi_scan_always_enabled`, `network_recommendations_enabled`,
 `upload_apk_enable`, `package_verifier_user_consent` (-1), `send_action_app_error` and
 `location_mode`. It shows no messages; see `adb logcat -s BootAdb`. Whenever tv-patcher connects
 to a TV it installs the helper (and replaces it when the image carries a newer one, or when the copy
@@ -196,11 +199,12 @@ things Android does on purpose:
 
 1. **It unpairs itself after a week.** Android deletes an ADB key that has not connected for
    `adb_allowed_connection_time`, which defaults to 604800000 ms — 7 days. A TV that simply had no
-   app to update is never connected to, so the key quietly expires and the next run is refused. The
-   boot helper sets that setting to `0` (keys never expire). Until a TV confirms it reads `0`,
-   tv-patcher connects to it at least every 5 days whatever `VERIFY_EVERY` says, so the key is
-   refreshed inside the week; the card shows "expires pairings" for such a TV. If yours has already
-   unpaired, press **Pair…** once more — with the helper installed it will not happen again.
+   app to update is never connected to, so the key quietly expires and the next run is refused.
+   tv-patcher sets that setting to `0` (keys never expire) over ADB every time it connects, and the
+   boot helper keeps it there for the times tv-patcher is not connected. Until a TV confirms it
+   reads `0`, tv-patcher connects to it at least every 5 days whatever `VERIFY_EVERY` says, so the
+   key is refreshed inside the week; the card shows "expires pairings" for such a TV. If yours has
+   already unpaired, press **Pair…** once more — it will not happen again.
 2. **Android switches Wireless debugging off by itself.** Not only on a restart: it writes
    `adb_wifi_enabled = 0` when Wi-Fi is turned off, when the network drops, and **when the access
    point changes** ("Detected wifi network change"), so a TV roaming between mesh access points on
