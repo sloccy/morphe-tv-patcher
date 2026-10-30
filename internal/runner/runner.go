@@ -35,6 +35,7 @@ type ADB interface {
 	SDK(ctx context.Context, serial string) (int, error)
 	InstalledVersion(ctx context.Context, serial, pkg string) (string, error)
 	Install(ctx context.Context, serial, apk string) (bool, string)
+	Pull(ctx context.Context, serial, devicePath, localPath string) error
 	Uninstall(ctx context.Context, serial, pkg string) error
 	Shell(ctx context.Context, serial, cmd string) (string, error)
 	Playing(ctx context.Context, serial string) (bool, error)

@@ -2,15 +2,14 @@ package runner
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
+	"github.com/sloccy/morphe-tv-patcher/internal/apk"
 	"github.com/sloccy/morphe-tv-patcher/internal/helper"
 	"github.com/sloccy/morphe-tv-patcher/internal/store"
 )
@@ -139,10 +138,17 @@ func (r *Runner) ensureHelper(ctx context.Context, c *conn) (HelperResult, error
 // A path as "pm path" prints it, and nothing a shell would act on (no space, quote, $ or ;).
 var helperAPKPath = regexp.MustCompile(`^package:(/[A-Za-z0-9._+=~/-]+\.apk)$`)
 
-// helperIsOurs says whether the APK installed under the helper's package name is byte-for-byte the
-// one this build ships. The version alone proves nothing: bootadb/build.sh derives it from a hash of
-// the public sources, so an app squatting the package name can report a matching version and would
+// helperIsOurs says whether the app installed under the helper's package name is the one this
+// build ships. The version alone proves nothing: bootadb/build.sh derives it from a hash of the
+// public sources, so an app squatting the package name can report a matching version and would
 // then be handed WRITE_SECURE_SETTINGS, which apps cannot get any other way.
+//
+// What is compared is what the APK installs (apk.InstallsID: every entry with its CRC and size),
+// not the file's bytes. bootadb/build.sh signs with a throw-away key it generates per build, so
+// the bytes differ on every build even when nothing about the app changed — and comparing them
+// meant reinstalling the helper on every TV every time a new image was published, which the
+// weekly rebuild guarantees. An app whose entries match ours to the CRC is our app whoever signed
+// it, so this is no weaker: a forgery would have to carry our code to pass.
 func (r *Runner) helperIsOurs(ctx context.Context, c *conn, b *helper.Bundle) bool {
 	out, err := r.ADB.Shell(ctx, c.serial, "pm path "+helper.Package)
 	if err != nil {
@@ -152,28 +158,22 @@ func (r *Runner) helperIsOurs(ctx context.Context, c *conn, b *helper.Bundle) bo
 	if m == nil {
 		return false
 	}
-	out, err = r.ADB.Shell(ctx, c.serial, "sha256sum "+m[1])
+	want, err := apk.InstallsID(b.Path)
 	if err != nil {
 		return false
 	}
-	want, err := fileSHA256(b.Path)
+	dir, err := os.MkdirTemp("", "bootadb")
 	if err != nil {
 		return false
 	}
-	return want != "" && strings.HasPrefix(strings.TrimSpace(out), want)
-}
-
-func fileSHA256(path string) (string, error) {
-	fh, err := os.Open(path) //nolint:gosec // the helper APK inside the image
-	if err != nil {
-		return "", err
+	defer func() { _ = os.RemoveAll(dir) }()
+	local := filepath.Join(dir, "ondevice.apk")
+	if err := r.ADB.Pull(ctx, c.serial, m[1], local); err != nil {
+		slog.Debug("could not read the boot helper off the TV", "device", c.dev.Name, "err", err)
+		return false
 	}
-	defer func() { _ = fh.Close() }()
-	h := sha256.New()
-	if _, err := io.Copy(h, fh); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	got, err := apk.InstallsID(local)
+	return err == nil && got == want
 }
 
 func firstLine(s string) string {

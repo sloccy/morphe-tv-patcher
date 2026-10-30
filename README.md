@@ -182,9 +182,13 @@ not waited for, and a helper nobody ever opens can have its job deferred for hou
 standby bucket. It keeps these tracking settings off: `wifi_scan_always_enabled`, `network_recommendations_enabled`,
 `upload_apk_enable`, `package_verifier_user_consent` (-1), `send_action_app_error` and
 `location_mode`. It shows no messages; see `adb logcat -s BootAdb`. Whenever tv-patcher connects
-to a TV it installs the helper (and replaces it when the image carries a newer one, or when the copy
-on the TV is not byte-for-byte the one it ships — the permission is only ever granted to its own
-APK), grants it the one permission it needs over ADB, and opens it once so Android lets it receive
+to a TV it installs the helper (and replaces it when the image carries a newer one, or when the app
+on the TV does not install what the one it ships installs — the permission is only ever granted to
+its own app. What is compared is every entry's checksum and size, not the file's bytes: the build
+signs with a throw-away key it makes fresh each time, so comparing bytes would reinstall the helper
+on every TV every time a new image is published, and the weekly rebuild publishes one whether or
+not the helper changed. An app whose entries match ours is our app, whoever signed it),
+grants it the one permission it needs over ADB, and opens it once so Android lets it receive
 the boot broadcast. Opening it does nothing by itself: the activity is reachable by any app on the
 TV, so it only schedules the jobs, which tv-patcher then runs once. Because nothing on the TV ever
 opens the helper, Android would file it under "rare" and defer its jobs for hours, so tv-patcher also

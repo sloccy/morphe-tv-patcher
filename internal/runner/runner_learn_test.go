@@ -1,7 +1,9 @@
 package runner
 
 import (
+	"archive/zip"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -217,7 +219,16 @@ func TestAnotherAppUnderTheHelpersNameIsReplacedBeforeTheGrant(t *testing.T) {
 	// An app squatting the package name can report a matching version (build.sh derives it from
 	// the public sources), but it is not the APK we ship, so it must never keep the permission.
 	rg.adb.installed[serial+"/com.sloccy.bootadb"] = "20261022"
-	rg.adb.helperSHA = strings.Repeat("ab", 32)
+	impostor := filepath.Join(t.TempDir(), "impostor.apk")
+	if err := os.WriteFile(impostor, apktest.Zip(map[string][]byte{
+		"AndroidManifest.xml": apktest.Manifest(helper.Package, 20261022,
+			[]string{helper.Permission, "android.permission.RECEIVE_BOOT_COMPLETED"},
+			[]string{".MainActivity", ".BootReceiver", ".KeepOnJob", ".WatchJob"}),
+		"classes.dex": []byte("not our code at all"),
+	}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rg.adb.deviceAPK = impostor
 	rg.r.Run(context.Background(), Options{})
 
 	found := false
@@ -234,7 +245,7 @@ func TestAnotherAppUnderTheHelpersNameIsReplacedBeforeTheGrant(t *testing.T) {
 		t.Errorf("the impostor must be removed and ours installed before the grant: %v %v %v",
 			rg.adb.uninstalled, rg.adb.installs, rg.adb.shells)
 	}
-	if rg.adb.helperSHA == strings.Repeat("ab", 32) {
+	if rg.adb.deviceAPK == impostor {
 		t.Error("the device should be holding our APK now")
 	}
 }
@@ -553,5 +564,53 @@ func TestAnInstallThatDidNotTakeIsReported(t *testing.T) {
 	}
 	if info, _ := rg.st.DeviceInfo(d.ID); info.Helper == "20261022" {
 		t.Errorf("the page must not claim the version we shipped: %+v", info)
+	}
+}
+
+// bootadb/build.sh signs with a throw-away key it generates per build, so a rebuild of unchanged
+// sources differs byte for byte. Comparing bytes meant the helper was uninstalled and reinstalled
+// on every TV every time a new image was published, which the weekly rebuild guarantees.
+func TestAReSignedHelperWithTheSameCodeIsLeftAlone(t *testing.T) {
+	rg, _ := helperRig(t, 20261022)
+	const serial = "10.0.0.7:40000"
+	rg.adb.installed[serial+"/com.sloccy.bootadb"] = "20261022"
+
+	// the same app, signed again: every entry identical, only the signature differs
+	zr, err := zip.OpenReader(rg.r.Cfg.BootHelperAPK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := map[string][]byte{"META-INF/CERT.RSA": []byte("a different throw-away key")}
+	for _, f := range zr.File {
+		rc, err := f.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := io.ReadAll(rc)
+		_ = rc.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries[f.Name] = b
+	}
+	_ = zr.Close()
+	resigned := filepath.Join(t.TempDir(), "resigned.apk")
+	if err := os.WriteFile(resigned, apktest.Zip(entries), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rg.adb.deviceAPK = resigned
+
+	rg.r.Run(context.Background(), Options{})
+	helperInstalls := 0
+	for _, i := range rg.adb.installs { // the app installs are not what this is about
+		if strings.HasSuffix(i, "bootadb.apk") {
+			helperInstalls++
+		}
+	}
+	if len(rg.adb.uninstalled) != 0 || helperInstalls != 0 {
+		t.Errorf("the same app signed again must not be reinstalled: %v %v", rg.adb.uninstalled, rg.adb.installs)
+	}
+	if lines := helperLines(rg.r.Run(context.Background(), Options{Manual: true})); len(lines) != 0 {
+		t.Errorf("and nothing to report: %+v", lines)
 	}
 }

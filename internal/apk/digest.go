@@ -21,6 +21,18 @@ const contentIDScheme = "1"
 // because the patcher rebuilds the archive (entry order, compression, timestamps) and signs it
 // again every time, which a hash of the whole file would report as a change.
 func ContentID(path string) (string, error) {
+	return contentID(path, true)
+}
+
+// InstallsID is ContentID without the signing certificate: the same answer for an app rebuilt and
+// signed with a different key. Only for an APK whose key is deliberately throw-away and new on
+// every build, where the question is "is this the same app" and not "can this replace what is
+// installed" — the boot helper. Everything else wants ContentID.
+func InstallsID(path string) (string, error) {
+	return contentID(path, false)
+}
+
+func contentID(path string, withSigner bool) (string, error) {
 	fh, err := os.Open(path) //nolint:gosec // an APK path from our own output or cache directory
 	if err != nil {
 		return "", err
@@ -48,6 +60,9 @@ func ContentID(path string) (string, error) {
 	for _, l := range lines {
 		_, _ = h.Write([]byte(l))
 		_, _ = h.Write([]byte{'\n'})
+	}
+	if !withSigner {
+		return contentIDScheme + ":installs:" + hex.EncodeToString(h.Sum(nil)), nil
 	}
 	// The entries say nothing about the signing key, and an APK signed with another key cannot
 	// replace the installed one, so a new keystore has to count as a different build. An APK whose

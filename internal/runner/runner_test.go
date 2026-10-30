@@ -27,7 +27,7 @@ type fakeADB struct {
 	unpaired    map[string]bool     // host -> answers, but no longer trusts this server
 	abis        map[string][]string // host -> abis
 	installed   map[string]string   // "serial/pkg" -> version
-	helperSHA   string              // sha256 of the helper APK the device holds
+	deviceAPK   string              // path to a copy of the helper APK the device holds
 	installMsg  map[string]string   // pkg -> failure output (first attempt)
 	installs    []string            // "serial pkg"
 	uninstalled []string
@@ -115,13 +115,30 @@ func (f *fakeADB) Install(ctx context.Context, s, apk string) (ok bool, output s
 	f.installs = append(f.installs, s+" "+base)
 	if base == "bootadb.apk" {
 		f.installed[s+"/com.sloccy.bootadb"] = f.helperVer
-		f.helperSHA, _ = fileSHA256(apk) // what sha256sum on the device would print afterwards
+		f.deviceAPK = apk // the TV now holds this very file
 	}
 	for pkg := range f.installMsg {
 		_ = pkg
 	}
 	return true, "Success"
 }
+
+// Pull hands back a copy of whatever APK the fake says is installed at that path, so the content
+// comparison in helperIsOurs has something real to read.
+func (f *fakeADB) Pull(ctx context.Context, serial, devicePath, localPath string) error {
+	f.mu.Lock()
+	src := f.deviceAPK
+	f.mu.Unlock()
+	if src == "" {
+		return errors.New("no such file")
+	}
+	b, err := os.ReadFile(src) //nolint:gosec,G703 // a path this test set itself
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(localPath, b, 0o600) //nolint:gosec,G703 // a temp path the runner made
+}
+
 func (f *fakeADB) Uninstall(ctx context.Context, s, pkg string) error {
 	f.uninstalled = append(f.uninstalled, s+" "+pkg)
 	delete(f.installed, s+"/"+pkg)
@@ -161,11 +178,6 @@ func (f *fakeADB) Shell(ctx context.Context, serial, cmd string) (string, error)
 			return "", nil
 		}
 		return "package:" + helperDevicePath + "\n", nil
-	case strings.HasPrefix(cmd, "sha256sum "):
-		if strings.TrimPrefix(cmd, "sha256sum ") != helperDevicePath {
-			return "", errors.New("no such file")
-		}
-		return f.helperSHA + "  " + helperDevicePath + "\n", nil
 	}
 	return "", nil
 }

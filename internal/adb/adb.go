@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"os/exec"
 	"regexp"
 	"slices"
@@ -324,6 +325,19 @@ func (c *Client) Playing(ctx context.Context, serial string) (bool, error) {
 
 func playingFrom(mediaSession, audio string) bool {
 	return playingSession.MatchString(mediaSession) || startedPlayer.MatchString(audio)
+}
+
+// Pull copies a file off the device. The boot helper APK is around 12 KB, which is the only
+// thing this is used for.
+func (c *Client) Pull(ctx context.Context, serial, devicePath, localPath string) error {
+	out, err := c.Run(ctx, "-s", serial, "pull", devicePath, localPath)
+	if err != nil {
+		return fmt.Errorf("adb pull %s: %s", devicePath, firstLine(out, err))
+	}
+	if _, err := os.Stat(localPath); err != nil {
+		return fmt.Errorf("adb pull %s: %s", devicePath, firstLine(out, err))
+	}
+	return nil
 }
 
 // Install runs `adb install -r`. ok is false with the adb output on failure.
