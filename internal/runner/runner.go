@@ -398,6 +398,15 @@ func (r *Runner) Run(ctx context.Context, o Options) []Result {
 		if failed {
 			title = "PROBLEMS"
 		}
+		if failed {
+			// A failure still under its alert threshold sets the title but is not an alert on its
+			// own; without its line the message says PROBLEMS and lists only successes.
+			for _, x := range results {
+				if !x.OK && !x.Alert && x.Message != "" && !slices.Contains(alerts, x.Message) {
+					alerts = append(alerts, x.Message)
+				}
+			}
+		}
 		r.Notify(ctx, title, strings.Join(alerts, "\n"))
 	}
 	return results
