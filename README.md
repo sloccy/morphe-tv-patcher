@@ -195,7 +195,7 @@ it costs the helper its permission grant, its Doze exemption and both its jobs, 
 grants it the one permission it needs over ADB, and opens it once so Android lets it receive
 the boot broadcast. Starting it is also what applies the settings, and it happens on every
 connection, not only after an install: the activity is not in the launcher and is exported only
-to a caller holding WRITE_SECURE_SETTINGS (the adb shell has it, no app can), so nothing on the
+to a caller holding WRITE_SECURE_SETTINGS (the adb shell has it, no app gets it without an adb grant), so nothing on the
 TV can trigger it while tv-patcher still can by name. It used to only schedule the
 jobs, which left every setting to the jobs and to the boot receiver — and on a TV that was never
 restarted that meant the helper applied nothing at all. Because nothing on the TV ever

@@ -8,11 +8,10 @@ import android.os.Bundle;
  * what applies the settings: starting it also takes the app out of Android's "stopped" state, so
  * it can receive the boot broadcast afterwards.
  *
- * <p>It used to only schedule the jobs, because an exported, launchable activity that any app on
- * the TV could start had no business doing privileged work. That left the settings to BootReceiver
- * and to the two jobs, none of which had ever run on a TV that was not restarted — so the helper
- * did nothing at all. The activity is no longer exported or launchable instead: the shell can still
- * start it by name (tv-patcher does), and nothing on the TV can.
+ * <p>It is exported, but only to a caller holding WRITE_SECURE_SETTINGS (see the manifest): the adb
+ * shell has it and no app gets it without an adb grant. It cannot simply be left not exported,
+ * because some TVs refuse the shell's {@code am start} of a non-exported activity ("not exported
+ * from uid"), and then the helper never runs at all.
  */
 public final class MainActivity extends Activity {
     @Override
