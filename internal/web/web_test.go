@@ -273,7 +273,8 @@ func TestSecurityHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.Header.Get("X-Content-Type-Options") != "nosniff" || !strings.Contains(resp.Header.Get("Content-Security-Policy"), "default-src 'none'") {
+	if resp.Header.Get("X-Content-Type-Options") != "nosniff" || !strings.Contains(resp.Header.Get("Content-Security-Policy"), "default-src 'none'") ||
+		!strings.Contains(resp.Header.Get("Content-Security-Policy"), "img-src data:") { // the page's favicon is a data: URI
 		t.Errorf("headers %v", resp.Header)
 	}
 }
