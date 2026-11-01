@@ -19,13 +19,15 @@
         android:allowBackup="false"
         android:supportsRtl="false">
 
-        <!-- Not exported and not launchable: it applies the settings, which no app on the TV
-             should be able to trigger. tv-patcher starts it by name over ADB, which the shell may
-             do regardless (START_ANY_ACTIVITY), and that also clears the app's "stopped" state so
-             it can receive the boot broadcast. -->
+        <!-- Exported, but only to a caller holding WRITE_SECURE_SETTINGS: the adb shell has it and
+             no app on the TV can get it, so only tv-patcher can trigger the settings. Plain
+             exported="false" does not work: some TVs refuse the shell's `am start` of a
+             non-exported activity ("not exported from uid"), even with START_ANY_ACTIVITY. Starting
+             it also clears the app's "stopped" state so it can receive the boot broadcast. -->
         <activity
             android:name=".MainActivity"
-            android:exported="false"
+            android:exported="true"
+            android:permission="android.permission.WRITE_SECURE_SETTINGS"
             android:theme="@android:style/Theme.NoDisplay" />
 
         <receiver
