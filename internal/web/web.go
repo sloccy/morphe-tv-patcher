@@ -48,11 +48,18 @@ type Backend interface {
 	Learning() runner.Learning                                                  // CPU checks still running in the background
 }
 
+// Notifier is the message channel the page can test.
+type Notifier interface {
+	Configured() bool
+	Test(ctx context.Context) error
+}
+
 // Server serves the API and the page.
 type Server struct {
 	Store               *store.Store
 	Backend             Backend
 	Log                 interface{ Lines() []string }
+	Notifier            Notifier // nil when messages are not set up
 	Version             string
 	AllowedHostSuffixes []string
 	// AllowedOwners restricts patch sources added from the page to these GitHub owners
@@ -84,6 +91,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/devices/{id}/pairport", s.pairPort)
 	mux.HandleFunc("POST /api/devices/{id}/test", s.testDevice)
 	mux.HandleFunc("POST /api/run", s.run)
+	mux.HandleFunc("POST /api/notify/test", s.notifyTest)
 	return s.guard(mux)
 }
 
@@ -244,6 +252,52 @@ type deviceRow struct {
 	Last      []runner.Result          `json:"last"`
 	Info      *store.DeviceInfo        `json:"info,omitempty"` // CPU list and Android level, once reached
 	Is64      bool                     `json:"is64"`
+	Plan      map[string]appPlan       `json:"plan"` // what the next run does for each app
+}
+
+// appPlan says what the next run does for one app on one device.
+type appPlan struct {
+	Kind   string `json:"kind"`   // new | current | update | patches | rollback | blocked
+	Target string `json:"target"` // the version the run aims for
+	From   string `json:"from,omitempty"`
+}
+
+// planFor works out, from what is on record, what a run will do for one app.
+func planFor(settings store.Settings, lists map[string]*patches.List, tags map[string]string, e store.EffectiveApp, in store.Install, installed bool) (appPlan, bool) {
+	l := lists[e.Source]
+	if l == nil {
+		return appPlan{}, false
+	}
+	target := ""
+	for _, a := range l.Apps {
+		if a.Package == e.Package {
+			target = a.Target
+		}
+	}
+	if target == "" {
+		return appPlan{}, false
+	}
+	p := appPlan{Target: target, From: in.APKVersion}
+	switch {
+	case !installed:
+		p.Kind = "new"
+	case patches.VersionLess(in.APKVersion, target):
+		p.Kind = "update"
+	case patches.VersionLess(target, in.APKVersion):
+		p.Kind = "blocked"
+		pkg := in.InstalledPackage
+		if pkg == "" {
+			pkg = e.Package
+		}
+		if runner.CanRollback(pkg, settings.Overrides[e.Package]) {
+			p.Kind = "rollback"
+		}
+	case in.PatchesVersion != tags[e.Source] || (in.PatchSource != "" && in.PatchSource != e.Source):
+		p.Kind = "patches"
+	default:
+		p.Kind = "current"
+	}
+	return p, true
 }
 
 type setRow struct {
@@ -257,6 +311,10 @@ func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 	lists := s.Backend.Lists()
 	out := map[string]any{"version": s.Version, "status": st, "apps": mergedApps(settings.Sources, lists),
 		"allowed_owners": s.AllowedOwners}
+	tags := map[string]string{}
+	for _, ss := range st.Sources {
+		tags[ss.ID] = ss.Tag
+	}
 	srcRows := make([]sourceRow, 0, len(settings.Sources))
 	for _, src := range settings.Sources {
 		row := sourceRow{Source: src}
@@ -273,13 +331,17 @@ func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 	out["sources"] = srcRows
 	devs := make([]deviceRow, 0, len(settings.Devices))
 	for _, d := range settings.Devices {
-		row := deviceRow{Device: d, Installs: map[string]store.Install{}, Effective: store.Effective(settings, d.ID)}
+		row := deviceRow{Device: d, Installs: map[string]store.Install{}, Plan: map[string]appPlan{}, Effective: store.Effective(settings, d.ID)}
 		if info, ok := s.Store.DeviceInfo(d.ID); ok {
 			row.Info, row.Is64 = &info, abi.Is64(info.ABIs)
 		}
 		for _, e := range row.Effective {
-			if in, ok := s.Store.Install(d.ID, e.Package); ok {
+			in, ok := s.Store.Install(d.ID, e.Package)
+			if ok {
 				row.Installs[e.Package] = in
+			}
+			if p, known := planFor(settings, lists, tags, e, in, ok); known {
+				row.Plan[e.Package] = p
 			}
 		}
 		for _, res := range st.Results {
@@ -302,6 +364,7 @@ func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 	}
 	out["sets"] = setRows
 	out["learning"] = s.Backend.Learning()
+	out["notify"] = map[string]bool{"configured": s.Notifier != nil && s.Notifier.Configured()}
 	warnings := s.Backend.Warnings()
 	if warnings == nil {
 		warnings = []runner.Problem{}
@@ -789,4 +852,18 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]bool{"queued": true})
+}
+
+func (s *Server) notifyTest(w http.ResponseWriter, r *http.Request) {
+	if s.Notifier == nil || !s.Notifier.Configured() {
+		fail(w, http.StatusConflict, "Telegram is not set up: set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID and restart")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if err := s.Notifier.Test(ctx); err != nil {
+		fail(w, http.StatusBadGateway, "Telegram refused the message: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "Test message sent. Check Telegram."})
 }

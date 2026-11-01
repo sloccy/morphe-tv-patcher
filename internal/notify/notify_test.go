@@ -36,3 +36,27 @@ func TestUnconfiguredOnlyLogsAndErrorsNeverLeakTheToken(t *testing.T) {
 		t.Errorf("token leaked into logs: %s", logs.String())
 	}
 }
+
+func TestTestReportsSuccessAndRefusalWithoutTheToken(t *testing.T) {
+	status := http.StatusOK
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) }))
+	defer srv.Close()
+	tg := &Telegram{Token: "SECRETTOKEN", Chat: "42", API: srv.URL}
+	if !tg.Configured() {
+		t.Error("should be configured")
+	}
+	if err := tg.Test(context.Background()); err != nil {
+		t.Errorf("test message: %v", err)
+	}
+	status = http.StatusUnauthorized
+	err := tg.Test(context.Background())
+	if err == nil || strings.Contains(err.Error(), "SECRETTOKEN") || !strings.Contains(err.Error(), "401") {
+		t.Errorf("refusal error: %v", err)
+	}
+	if (&Telegram{}).Configured() || (*Telegram)(nil).Configured() {
+		t.Error("an empty bot is not configured")
+	}
+	if err := (&Telegram{}).Test(context.Background()); err == nil {
+		t.Error("an unconfigured test should fail")
+	}
+}

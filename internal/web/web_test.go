@@ -852,3 +852,70 @@ func TestPairSaysWhichFieldWasWrong(t *testing.T) {
 		t.Errorf("neither reaches adb: %v", fb.paired)
 	}
 }
+
+type fakeNotifier struct {
+	on  bool
+	err error
+}
+
+func (f fakeNotifier) Configured() bool             { return f.on }
+func (f fakeNotifier) Test(_ context.Context) error { return f.err }
+
+func TestNotifyTestRoute(t *testing.T) {
+	srv, s, _ := setup(t)
+	if code, _ := do(t, srv, "POST", "/api/notify/test", "", nil); code != http.StatusConflict {
+		t.Errorf("unconfigured: %d", code)
+	}
+	s.Notifier = fakeNotifier{on: true}
+	if code, body := do(t, srv, "POST", "/api/notify/test", "", nil); code != http.StatusOK || !strings.Contains(body, "Test message sent") {
+		t.Errorf("sent: %d %s", code, body)
+	}
+	_, state := do(t, srv, "GET", "/api/state", "", nil)
+	if !strings.Contains(state, `"notify":{"configured":true}`) {
+		t.Errorf("state: %s", state)
+	}
+	s.Notifier = fakeNotifier{on: true, err: errors.New("Telegram answered HTTP 401")}
+	if code, body := do(t, srv, "POST", "/api/notify/test", "", nil); code != http.StatusBadGateway || !strings.Contains(body, "refused") {
+		t.Errorf("refused: %d %s", code, body)
+	}
+}
+
+func TestPlanForCoversEachKind(t *testing.T) {
+	data, _ := os.ReadFile("../patches/testdata/patches-list.json")
+	list, _ := patches.ParseList(data)
+	lists := map[string]*patches.List{"s": list}
+	var pkg, target string
+	for _, a := range list.Apps {
+		if a.Target != "" {
+			pkg, target = a.Package, a.Target
+			break
+		}
+	}
+	tags := map[string]string{"s": "v2"}
+	e := store.EffectiveApp{AppChoice: store.AppChoice{Package: pkg, Source: "s"}}
+	no := false
+	cases := []struct {
+		name string
+		in   store.Install
+		have bool
+		ov   store.Override
+		want string
+	}{
+		{"new", store.Install{}, false, store.Override{}, "new"},
+		{"update", store.Install{APKVersion: "0.0.1", PatchesVersion: "v2"}, true, store.Override{}, "update"},
+		{"rollback", store.Install{APKVersion: "9999.0.0", PatchesVersion: "v2"}, true, store.Override{}, "rollback"},
+		{"blocked", store.Install{APKVersion: "9999.0.0", PatchesVersion: "v2"}, true, store.Override{AllowUninstall: &no}, "blocked"},
+		{"patches", store.Install{APKVersion: target, PatchesVersion: "v1"}, true, store.Override{}, "patches"},
+		{"current", store.Install{APKVersion: target, PatchesVersion: "v2"}, true, store.Override{}, "current"},
+	}
+	for _, c := range cases {
+		st := store.Settings{Overrides: map[string]store.Override{pkg: c.ov}}
+		p, ok := planFor(st, lists, tags, e, c.in, c.have)
+		if !ok || p.Kind != c.want || p.Target != target {
+			t.Errorf("%s: got %+v ok=%v", c.name, p, ok)
+		}
+	}
+	if _, ok := planFor(store.Settings{}, lists, tags, store.EffectiveApp{AppChoice: store.AppChoice{Package: pkg, Source: "gone"}}, store.Install{}, false); ok {
+		t.Error("a missing source should give no plan")
+	}
+}

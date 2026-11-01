@@ -85,6 +85,7 @@ type app struct {
 	runner *runner.Runner
 	ring   *runner.Ring
 	hc     *http.Client
+	tg     *notify.Telegram
 }
 
 func setup() (*app, error) {
@@ -168,6 +169,7 @@ func setup() (*app, error) {
 	tg := &notify.Telegram{Token: cfg.TelegramToken, Chat: cfg.TelegramChat}
 	ac := adb.New()
 	ac.ScanLo, ac.ScanHi = cfg.ScanLo, cfg.ScanHi
+	a.tg = tg
 	a.runner = runner.New(cfg, a.st, ac, deps, tg.Send)
 	return a, nil
 }
@@ -182,7 +184,7 @@ func cmdRun() error {
 
 	srv := &http.Server{
 		Addr: fmt.Sprintf("%s:%d", a.cfg.WebBind, a.cfg.WebPort),
-		Handler: (&web.Server{Store: a.st, Backend: a.runner, Log: a.ring, Version: version,
+		Handler: (&web.Server{Store: a.st, Backend: a.runner, Notifier: a.tg, Log: a.ring, Version: version,
 			AllowedHostSuffixes: a.cfg.AllowedHostSuffixes, AllowedOwners: a.cfg.PatchSourcesAllowedOwners}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       2 * time.Minute,

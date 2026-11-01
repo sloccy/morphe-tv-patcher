@@ -105,6 +105,8 @@ type Status struct {
 	FinishedAt time.Time      `json:"finished_at"`
 	Sources    []SourceStatus `json:"sources"`
 	Results    []Result       `json:"results"`
+	// Steps says what the run is doing for each device id right now, while it runs.
+	Steps map[string]string `json:"steps,omitempty"`
 }
 
 // Runner holds the long-lived pieces.
@@ -137,6 +139,9 @@ func (r *Runner) Status() Status {
 	s := r.status
 	s.Results = append([]Result{}, s.Results...)
 	s.Sources = append([]SourceStatus{}, s.Sources...)
+	if s.Steps != nil {
+		s.Steps = maps.Clone(s.Steps)
+	}
 	return s
 }
 
@@ -373,10 +378,29 @@ func (r *Runner) Loop(ctx context.Context) {
 	}
 }
 
+// step records what the run is doing for these devices, for the page's progress line.
+func (r *Runner) step(devs []*conn, text string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.status.Steps == nil {
+		r.status.Steps = map[string]string{}
+	}
+	for _, c := range devs {
+		if c.dev.ID != "" {
+			r.status.Steps[c.dev.ID] = text
+		}
+	}
+}
+
+// CanRollback says whether an install may go back to an older version by uninstalling first.
+func CanRollback(installedPkg string, ov store.Override) bool {
+	return ov.CanUninstall() && installedPkg != "com.netflix.ninja"
+}
+
 // Run does one pass and sends any alerts.
 func (r *Runner) Run(ctx context.Context, o Options) []Result {
 	r.mu.Lock()
-	r.status.Running, r.status.StartedAt = true, r.Now()
+	r.status.Running, r.status.StartedAt, r.status.Steps = true, r.Now(), nil
 	r.mu.Unlock()
 
 	results := r.pass(ctx, o)
@@ -391,7 +415,7 @@ func (r *Runner) Run(ctx context.Context, o Options) []Result {
 		}
 	}
 	r.mu.Lock()
-	r.status.Running, r.status.FinishedAt, r.status.Results = false, r.Now(), results
+	r.status.Running, r.status.FinishedAt, r.status.Results, r.status.Steps = false, r.Now(), results, nil
 	r.mu.Unlock()
 	if len(alerts) > 0 && r.Notify != nil {
 		title := "updated"
@@ -528,6 +552,7 @@ func (r *Runner) pass(ctx context.Context, o Options) []Result {
 			// Plan from what is on record. Connect now only for a manual run, a forced one, a TV
 			// not yet seen for VerifyEvery (or never); otherwise only when an install needs it.
 			if o.Manual || o.Force || r.verifyDue(info, known) {
+				r.step([]*conn{&c}, "Connecting")
 				if err := r.ensureConn(ctx, &c); err != nil {
 					out = append(out, r.unreachable(d, err))
 					continue
@@ -721,6 +746,7 @@ func (r *Runner) appGroup(ctx context.Context, o Options, ld *loaded, pkg, name,
 			sdk = c.sdk
 		}
 	}
+	r.step(gc, "Downloading "+name)
 	fetched, err := r.Deps.Fetch(ctx, sources.App{Package: pkg, Name: name, Version: newest, Sources: ov.Sources,
 		SignerPin: strings.ToLower(ov.SignerSHA256), SlugOverride: ov.APKMirror, ABIs: abis, AllowPhone: src.AllowPhone}, sdk)
 	if err != nil {
@@ -778,6 +804,7 @@ func (r *Runner) appGroup(ctx context.Context, o Options, ld *loaded, pkg, name,
 		slog.Info("reusing the patched apk already built from these inputs", "package", pkg,
 			"version", newest, "file", filepath.Base(out2))
 	} else {
+		r.step(gc, "Patching "+name)
 		patchErr = r.Deps.Patch(ctx, morphe.Options{Jar: r.Cfg.MorpheJar, MPP: mpp, Input: fetched.Path, Out: out2,
 			Keystore: r.Cfg.Keystore(), BytecodeMode: r.Cfg.BytecodeMode,
 			OptionsFile: ov.OptionsFile, Enable: ov.Enable, Disable: ov.Disable})
@@ -842,9 +869,11 @@ func (r *Runner) appGroup(ctx context.Context, o Options, ld *loaded, pkg, name,
 		// clear the device really needs the new build, so a release that changes nothing for an app
 		// never reaches the TV at all.
 		if !o.Manual && !o.Force && r.playing(ctx, c) {
+			r.step([]*conn{c}, "Waiting: something is playing")
 			out = append(out, res(c, true, fmt.Sprintf("%s on %s: update to %s is waiting, something is playing; the next scheduled run will try again", name, c.dev.Name, newest)))
 			continue
 		}
+		r.step([]*conn{c}, "Installing "+name)
 		if err := r.ensureConn(ctx, c); err != nil {
 			x := Result{Device: c.dev.Name, Message: fmt.Sprintf("%s on %s: not installed, the TV is not reachable", name, c.dev.Name)}
 			if !c.reported { // the explanation and the alert once per TV, not once per app
@@ -921,7 +950,7 @@ func (r *Runner) install(ctx context.Context, c *conn, pkg string, p *patched, o
 		why = "the installed app is newer than this build, and Android can only go back by uninstalling it"
 	}
 	if why != "" {
-		if ov.CanUninstall() && p.installedPkg != "com.netflix.ninja" {
+		if CanRollback(p.installedPkg, ov) {
 			if err := r.ADB.Uninstall(ctx, c.serial, p.installedPkg); err != nil {
 				return err
 			}

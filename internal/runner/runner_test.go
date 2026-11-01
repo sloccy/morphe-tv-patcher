@@ -1580,3 +1580,28 @@ func TestRolledBackTargetDowngradesByUninstalling(t *testing.T) {
 		t.Errorf("a rollback must uninstall and install the older build: %+v uninstalled %v", res, rg.adb.uninstalled)
 	}
 }
+
+func TestRunReportsWhatItIsDoingPerDevice(t *testing.T) {
+	rg := newRig(t)
+	rg.device(t, "Living room", "10.0.0.6", prime)
+	var during string
+	inner := rg.r.Deps.Patch
+	rg.r.Deps.Patch = func(ctx context.Context, o morphe.Options) error {
+		during = rg.r.Status().Steps["living-room"]
+		return inner(ctx, o)
+	}
+	rg.r.Run(context.Background(), Options{})
+	if !strings.HasPrefix(during, "Patching ") {
+		t.Errorf("step while patching = %q", during)
+	}
+	if s := rg.r.Status(); s.Steps != nil {
+		t.Errorf("steps should clear when the run ends: %v", s.Steps)
+	}
+}
+
+func TestCanRollbackFollowsTheOptOutAndNetflix(t *testing.T) {
+	no := false
+	if !CanRollback(prime, store.Override{}) || CanRollback(prime, store.Override{AllowUninstall: &no}) || CanRollback(netflix, store.Override{}) {
+		t.Error("rollback rule is wrong")
+	}
+}

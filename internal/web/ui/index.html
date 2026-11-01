@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TV Patcher</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='5' width='26' height='17' rx='3' fill='none' stroke='%232f6fed' stroke-width='3'/%3E%3Cpath d='M10 28h12M16 22v6' stroke='%232f6fed' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
   :root {
     --bg: #f6f7f9; --card: #ffffff; --text: #1b1f24; --muted: #5d6671; --line: #dfe3e8;
@@ -74,6 +75,7 @@
   pre { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px; overflow: auto; max-height: 320px; font-size: 12px; }
   .empty { color: var(--muted); text-align: center; padding: 24px 8px; }
   .gap-top { margin-top: 8px; }
+  .stepline { margin-top: 8px; font-size: 13px; color: var(--accent); }
 </style>
 </head>
 <body>
@@ -96,7 +98,7 @@ const drafts = { dev: {}, set: {} };   // dev[id] = {apps?: Map, sets?: Set}; se
 const fields = {};                     // input id -> string | boolean
 const messages = {};                   // scope -> {kind: progress|ok|error|info, text, problems, unchecked, at}
 const busy = new Set();                // keys of actions still running
-const ui = { open: loadOpen(), pair: {}, creatingSet: false };
+const ui = { open: loadOpen(), pair: {}, mkset: {}, creatingSet: false };
 let focusId = null;                    // element to focus after the next draw
 let stamp = 0, lastText = "", seq = 0, applied = 0, fails = 0, pageBroken = false, pollTimer = null;
 
@@ -151,7 +153,7 @@ const deviceById = id => (server.devices || []).find(x => x.id === id);
 function say(scope, kind, text, extra) {
   const m = { kind, text, problems: (extra && extra.problems) || [], unchecked: (extra && extra.unchecked) || [], at: ++stamp };
   messages[scope] = m;
-  if (kind === "ok" && !m.problems.length && !m.unchecked.length) {
+  if (kind === "ok" && !m.problems.length && !m.unchecked.length && !(extra && extra.sticky)) {
     setTimeout(() => { if (messages[scope] && messages[scope].at === m.at) { delete messages[scope]; safeRender(); } }, 6000);
   }
 }
@@ -167,7 +169,7 @@ function msgLine(scope) {
 }
 
 // Run one action at a time per key. It reports into one scope, and the page is reloaded once at the end.
-async function act({ key, scope, progress, run, ok }) {
+async function act({ key, scope, progress, run, ok, sticky }) {
   if (busy.has(key)) return;
   busy.add(key);
   if (progress) say(scope, "progress", progress); else delete messages[scope];
@@ -175,7 +177,7 @@ async function act({ key, scope, progress, run, ok }) {
   try {
     const r = await run();
     const text = typeof ok === "function" ? ok(r) : ok;
-    if (text) say(scope, "ok", text, { unchecked: r && r.unchecked }); else delete messages[scope];
+    if (text) say(scope, "ok", text, { unchecked: r && r.unchecked, sticky }); else delete messages[scope];
   } catch (e) {
     say(scope, "error", e.message, e.data);
   } finally {
@@ -291,8 +293,17 @@ function pickSource(app, wanted) {
   if (def && app.sources.some(s => s.id === def.id)) return def.id;
   return app.sources[0].id;
 }
+function planChip(p) {
+  const text = { current: "up to date", update: "update to " + p.target, new: "new install", patches: "new patches",
+    rollback: "goes back to " + p.target, blocked: "blocked" }[p.kind];
+  const title = { current: "Nothing to do on the next run", update: "The next run installs this version", new: "The next run installs it",
+    patches: "Newer patches exist. The next run rebuilds it and installs only if the app changes",
+    rollback: "The installed app is newer, so the next run uninstalls it first (you log in again)",
+    blocked: "The installed app is newer and uninstalling is turned off for it" }[p.kind];
+  return text ? h("span", { class: "chip" + (p.kind === "rollback" || p.kind === "blocked" ? " warn" : ""), title }, text) : null;
+}
 // sel: Map(package -> source id). locked: Map(package -> set name) for apps a TV gets from a set.
-function appGrid(prefix, sel, installs, locked, onChange) {
+function appGrid(prefix, sel, installs, locked, onChange, plan) {
   const apps = server.apps || [];
   if (!apps.length) return h("div", { class: "sub gap-top" }, "No apps yet. Add a patch repository under Patch sources.");
   return h("div", { class: "apps" }, apps.map(a => {
@@ -301,6 +312,7 @@ function appGrid(prefix, sel, installs, locked, onChange) {
     const srcInfo = sourceById(src.id) || {};
     const inst = (installs || {})[a.package];
     const lock = locked && locked.get(a.package);
+    const pl = plan && plan[a.package];
     const id = prefix + "-" + a.package;
     return h("div", { class: "app" + (lock ? " locked" : "") },
       h("input", { type: "checkbox", id, checked: sel.has(a.package) || !!lock, disabled: !!lock, onchange: ev => {
@@ -311,6 +323,7 @@ function appGrid(prefix, sel, installs, locked, onChange) {
       h("span", { class: "grow" },
         h("label", { for: id }, a.name, " ",
           lock ? h("span", { class: "chip" }, "from " + lock) : null, " ",
+          pl ? planChip(pl) : null, " ",
           src.experimental ? h("span", { class: "chip warn" }, "experimental") : null, " ",
           srcInfo.allow_phone ? h("span", { class: "chip warn", title: "A phone app: it may install but not show in the TV launcher" }, "phone app") : null),
         h("span", { class: "meta" }, "target " + src.target + (inst ? " · installed " + inst.apk_version + " (" + when(inst.installed_at) + ")" : "")),
@@ -352,7 +365,13 @@ function deviceCard(dev) {
   const locked = new Map();
   for (const sid of sets) { const st = setById(sid); if (st) for (const c of st.apps || []) if (!sel.has(c.package) && !locked.has(c.package)) locked.set(c.package, st.name); }
 
-  const grid = appGrid("c-" + dev.id, sel, dev.installs, locked, m => editDevice(dev, "apps", m));
+  const grid = appGrid("c-" + dev.id, sel, dev.installs, locked, m => editDevice(dev, "apps", m), dev.plan);
+  const nameOf = pkg => ((server.apps || []).find(a => a.package === pkg) || {}).name || pkg;
+  const planNotes = Object.entries(dev.plan || {}).filter(([, p]) => p.kind === "rollback" || p.kind === "blocked").map(([pkg, p]) => h("li", { class: p.kind === "rollback" ? "warn" : "bad" },
+    p.kind === "rollback"
+      ? nameOf(pkg) + ": Run now uninstalls it first to go back to " + p.target + " (you will have to log in again)."
+      : nameOf(pkg) + ": the TV has " + p.from + ", newer than " + p.target + ". Uninstalling is turned off for this app: uninstall it on the TV or remove allow_uninstall=false in settings.json."));
+  const step = server.status && server.status.running && server.status.steps && server.status.steps[dev.id];
   const setChecks = (server.sets || []).length ? h("div", {},
     h("div", { class: "sub" }, "App sets for this TV"),
     h("div", { class: "checks" }, server.sets.map(st => h("label", {},
@@ -371,6 +390,8 @@ function deviceCard(dev) {
   const expiryChip = !expiry ? null : expiry === "0"
     ? h("span", { class: "chip", title: "adb_allowed_connection_time is 0, so Android will not drop this server's pairing key" }, "pairing kept ✓")
     : h("span", { class: "chip warn", title: "This TV would not take adb_allowed_connection_time=0, so Android drops an unused pairing key after " + expiry + "ms. tv-patcher connects at least every 5 days to stop that" }, "expires pairings");
+  const details = cpu || helper || expiryChip ? det("info:" + dev.id, false, false, { class: "sub-details" }, "Details",
+    h("div", { class: "row tight gap-top" }, cpu, helper, expiryChip)) : null;
   const pairChip = paired ? h("span", { class: "chip" }, "paired") : (cpu ? null : h("span", { class: "chip warn" }, "not paired yet"));
 
   const pairBusy = busy.has("pair-" + dev.id);
@@ -386,7 +407,8 @@ function deviceCard(dev) {
   return h("section", { class: "card", id: "dev-" + dev.id },
     h("div", { class: "row tight" },
       h("strong", {}, h("span", { class: "dot " + (last.length ? (offline ? "bad" : "ok") : "") }), dev.name),
-      h("span", { class: "sub" }, dev.host), pairChip, cpu, helper, expiryChip),
+      h("span", { class: "sub" }, dev.host), pairChip),
+    step ? h("div", { class: "stepline", role: "status" }, step + "…") : null,
     h("div", { class: "row gap-top" },
       h("button", { id: "run-" + dev.id, disabled: busy.has("run-" + dev.id), onclick: () => doRun(dev.id, dev.name) }, "Run now"),
       h("button", { id: "test-" + dev.id, disabled: testing, title: "Looks at the network only: nothing connects to the TV, so it shows no notice", onclick: () => doTest(dev, false) }, "Test"),
@@ -396,18 +418,24 @@ function deviceCard(dev) {
       h("button", { class: "danger", id: "rm-" + dev.id, disabled: busy.has("rm-" + dev.id), onclick: () => doRemove(dev) }, "Remove")),
     pairForm,
     msgLine(scope),
+    details,
     det("apps:" + dev.id, true, dirty || saving, { class: "sub-details" }, appsSummary(dev),
       setChecks,
       h("div", { class: "sub gap-top" }, (server.sets || []).length ? "Extra apps for this TV only" : "Apps for this TV (create an app set to give the same apps to several TVs)"),
       grid,
       h("div", { class: "row" },
         h("button", { class: "primary", id: "save-" + dev.id, disabled: !dirty || saving, onclick: () => doSave(dev) }, saving ? "Saving… (checking CPUs)" : "Save"),
-        h("button", { id: "mkset-" + dev.id, disabled: serverApps(dev).size === 0 || dirty || busy.has("mk-" + dev.id), title: "Move this TV's own apps into a new set that this TV uses", onclick: () => doMakeSet(dev) }, "Make a set from these apps"),
-        h("span", { class: "sub" }, dirty ? "Unsaved changes. Saving never installs anything." : "Saved. Installs happen on the next run."))),
+        h("button", { id: "mkset-" + dev.id, disabled: serverApps(dev).size === 0 || dirty || busy.has("mk-" + dev.id), title: "Move this TV's own apps into a new set that this TV uses", onclick: () => { ui.mkset[dev.id] = true; focusId = "mkname-" + dev.id; render(); } }, "Make a set from these apps"),
+        h("span", { class: "sub" }, dirty ? "Unsaved changes. Saving never installs anything." : "Saved. Installs happen on the next run.")),
+      ui.mkset[dev.id] ? h("div", { class: "row gap-top" },
+        textField("mkname-" + dev.id, "Set name", "Set name (Streaming)", { maxlength: 60 }),
+        h("button", { class: "primary", id: "mkgo-" + dev.id, disabled: busy.has("mk-" + dev.id), onclick: () => doMakeSet(dev) }, "Create set"),
+        h("button", { id: "mkcancel-" + dev.id, onclick: () => { ui.mkset[dev.id] = false; render(); } }, "Cancel"),
+        h("span", { class: "sub" }, "The apps ticked for this TV move into the new set.")) : null),
     last.length ? det("last:" + dev.id, failed > 0, false, { class: "sub-details" },
       h("span", {}, h("strong", {}, "Last run: "), failed ? plural(last.length - failed, "ok", "ok") + ", " + failed + " failed" : plural(last.length, "result", "results") + ", all ok"),
       h("ul", { class: "list" }, last.map(r => h("li", { class: r.ok ? "ok" : "bad" }, r.message)))) : null,
-    warnings.length ? h("ul", { class: "list" }, warnings.map(w => h("li", { class: "warn" }, "Won't be installed: " + w.reason))) : null);
+    warnings.length || planNotes.length ? h("ul", { class: "list" }, planNotes, warnings.map(w => h("li", { class: "warn" }, "Won't be installed: " + w.reason))) : null);
 }
 
 async function doSave(dev) {
@@ -430,11 +458,13 @@ async function doSave(dev) {
 }
 
 async function doMakeSet(dev) {
-  const name = prompt("Name for the new set (the apps ticked for " + dev.name + " move into it):");
-  if (!name) return;
-  await act({ key: "mk-" + dev.id, scope: "device:" + dev.id, progress: "Creating the set…", run: async () => {
+  const scope = "device:" + dev.id;
+  const name = (fields["mkname-" + dev.id] || "").trim();
+  if (!name) { say(scope, "error", "Enter a name for the new set."); focusId = "mkname-" + dev.id; render(); return; }
+  await act({ key: "mk-" + dev.id, scope, progress: "Creating the set…", run: async () => {
     await api("POST", "/api/sets", { name, apps: toChoices(serverApps(dev)), devices: [dev.id] });
     await api("PUT", "/api/devices/" + encodeURIComponent(dev.id) + "/apps", { apps: [] });
+    ui.mkset[dev.id] = false; delete fields["mkname-" + dev.id];
   }, ok: "Created the set “" + name + "”. This TV uses it now; give it to other TVs under App sets." });
 }
 
@@ -448,7 +478,7 @@ async function doTest(dev, full) {
   await act({ key: "test-" + dev.id, scope: "device:" + dev.id,
     progress: full ? "Connecting… (up to a minute if the TV is off)" : "Looking for the TV… (up to a minute if it is off)",
     run: () => api("POST", "/api/devices/" + encodeURIComponent(dev.id) + "/test" + (full ? "?full=1" : "")),
-    ok: r => r.message });
+    ok: r => r.message, sticky: true });
 }
 
 // The TV advertises its pairing port while the dialog is open, so it does not have to be typed.
@@ -479,7 +509,7 @@ async function doPair(dev) {
     const r = await api("POST", "/api/devices/" + encodeURIComponent(dev.id) + "/pair", { pair_port: port, code });
     ui.pair[dev.id] = false; delete fields["pp-" + dev.id]; delete fields["pc-" + dev.id];
     return r;
-  }, ok: r => r.message });
+  }, ok: r => r.message, sticky: true });
 }
 
 async function doRemove(dev) {
@@ -635,10 +665,17 @@ function gettingStarted() {
     h("div", { class: "sub gap-top" }, "Then press Run now. Saving never installs anything; installs happen on a run."));
 }
 
+async function doSaveAll() {
+  for (const dev of (server.devices || []).filter(isDirty)) await doSave(dev);
+}
+
 function devicesSection() {
   const devs = server.devices || [];
+  const dirtyCount = devs.filter(isDirty).length;
   return h("section", { class: "sec" },
-    h("h2", { class: "sec-head" }, "Devices"),
+    h("div", { class: "row sec-head" },
+      h("h2", { class: "grow" }, "Devices"),
+      dirtyCount > 1 ? h("button", { class: "primary", id: "saveall", disabled: devs.some(d => busy.has("save-" + d.id)), onclick: doSaveAll }, "Save all (" + dirtyCount + ")") : null),
     devs.length ? devs.map(deviceCard) : h("div", { class: "card empty" }, "No devices yet. Add one below."),
     h("div", { class: "card" },
       h("strong", {}, "Add a device"),
@@ -650,6 +687,22 @@ function devicesSection() {
       msgLine("add-device")));
 }
 
+async function doNotifyTest() {
+  await act({ key: "notify", scope: "notify", progress: "Sending…", run: () => api("POST", "/api/notify/test"), ok: r => r.message, sticky: true });
+}
+
+function notifySection() {
+  const on = !!(server.notify && server.notify.configured);
+  return h("section", { class: "card sec" },
+    h("div", { class: "row" },
+      h("div", { class: "grow" },
+        h("strong", {}, "Notifications"),
+        h("div", { class: "sub" }, on ? "Telegram is on. You get a message after runs that update an app or hit a problem."
+          : "Telegram is off. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID and restart to get messages after runs.")),
+      on ? h("button", { id: "notifytest", disabled: busy.has("notify"), onclick: doNotifyTest }, busy.has("notify") ? "Sending…" : "Send test message") : null),
+    msgLine("notify"));
+}
+
 function build() {
   return [
     headerBlock(),
@@ -659,6 +712,7 @@ function build() {
     devicesSection(),
     setsSection(),
     sourcesSection(),
+    notifySection(),
   ];
 }
 
@@ -684,6 +738,11 @@ function render() {
 }
 function safeRender() { try { render(); } catch (e) { pageBroken = true; console.error(e); } }
 
+window.addEventListener("beforeunload", ev => {
+  const n = drafts.set.__new;
+  const unsaved = Object.keys(drafts.dev).length || Object.keys(drafts.set).some(k => k !== "__new") || (n && (n.name || n.apps.size));
+  if (unsaved) { ev.preventDefault(); ev.returnValue = ""; }
+});
 document.getElementById("logbox").addEventListener("toggle", ev => { if (ev.target.open) loadLog(); });
 load(true);
 </script>
