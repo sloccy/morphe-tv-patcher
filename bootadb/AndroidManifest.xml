@@ -11,6 +11,9 @@
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
 
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- the watch job waits for a network, and Android refuses a job with that constraint without
+         this; it is a normal permission, granted at install -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- granted over ADB by tv-patcher (pm grant); apps cannot get it any other way -->
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
 
