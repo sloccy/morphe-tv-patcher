@@ -256,7 +256,7 @@ feed:
 func (c *Client) shell(ctx context.Context, serial, cmd string) (string, error) {
 	out, err := c.Run(ctx, "-s", serial, "shell", cmd)
 	if err != nil {
-		return "", fmt.Errorf("adb shell %q: %s", cmd, firstLine(out, err))
+		return "", fmt.Errorf("adb shell %q: %s", cmd, allLines(out, err))
 	}
 	return out, nil
 }
@@ -355,6 +355,21 @@ func (c *Client) Uninstall(ctx context.Context, serial, pkg string) error {
 		return fmt.Errorf("uninstall %s: %s", pkg, firstLine(out, err))
 	}
 	return nil
+}
+
+// allLines is firstLine for a failed shell command, keeping every line: `am start` opens with
+// "Starting: Intent ..." and says what went wrong only on the lines after it.
+func allLines(out string, err error) string {
+	if out == "" {
+		return firstLine(out, err)
+	}
+	var keep []string
+	for l := range strings.SplitSeq(out, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			keep = append(keep, l)
+		}
+	}
+	return strings.Join(keep, " | ")
 }
 
 func firstLine(out string, err error) string {
