@@ -1277,12 +1277,16 @@ func TestAReleaseThatReallyChangesTheAppIsInstalled(t *testing.T) {
 	if len(rg.adb.installs) != 1 {
 		t.Errorf("a real change has to be installed: %v", rg.adb.installs)
 	}
-	changed := false
+	changed, explained := false, false
 	for _, x := range res {
 		changed = changed || (x.Package == prime && x.OK && x.Changed && x.Alert)
+		explained = explained || strings.Contains(x.Message, "same app version")
 	}
 	if !changed || len(rg.notes) != 1 {
 		t.Errorf("and reported: %+v %v", res, rg.notes)
+	}
+	if !explained {
+		t.Errorf("a reinstall of the same version should say why: %+v", res)
 	}
 }
 

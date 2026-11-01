@@ -85,6 +85,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/sets", s.exclusive(s.addSet))
 	mux.HandleFunc("PUT /api/sets/{id}", s.exclusive(s.updateSet))
 	mux.HandleFunc("DELETE /api/sets/{id}", s.removeSet)
+	mux.HandleFunc("PUT /api/apps/{pkg}/patches", s.exclusive(s.setPatches))
 	mux.HandleFunc("POST /api/sources", s.addSource)
 	mux.HandleFunc("DELETE /api/sources/{id}", s.removeSource)
 	mux.HandleFunc("POST /api/devices/{id}/pair", s.pair)
@@ -193,9 +194,10 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 }
 
 type appSource struct {
-	ID           string `json:"id"`
-	Target       string `json:"target"`
-	Experimental bool   `json:"experimental"`
+	ID           string          `json:"id"`
+	Target       string          `json:"target"`
+	Experimental bool            `json:"experimental"`
+	Patches      []patches.Patch `json:"patches"`
 }
 
 type appRow struct {
@@ -229,7 +231,7 @@ func mergedApps(sources []store.Source, lists map[string]*patches.List) []appRow
 				row = &appRow{Package: a.Package, Name: a.Name}
 				byPkg[a.Package] = row
 			}
-			row.Sources = append(row.Sources, appSource{ID: src.ID, Target: a.Target, Experimental: a.Experimental})
+			row.Sources = append(row.Sources, appSource{ID: src.ID, Target: a.Target, Experimental: a.Experimental, Patches: a.Patches})
 		}
 	}
 	rows := make([]appRow, 0, len(byPkg))
@@ -329,6 +331,20 @@ func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 		srcRows = append(srcRows, row)
 	}
 	out["sources"] = srcRows
+	universal := map[string][]patches.Patch{}
+	for id, l := range lists {
+		if l != nil && len(l.Universal) > 0 {
+			universal[id] = l.Universal
+		}
+	}
+	out["universal"] = universal
+	choice := map[string]patchChoice{}
+	for pkg, ov := range settings.Overrides {
+		if len(ov.Enable) > 0 || len(ov.Disable) > 0 {
+			choice[pkg] = patchChoice{Enable: nonNil(ov.Enable), Disable: nonNil(ov.Disable)}
+		}
+	}
+	out["patch_choice"] = choice
 	devs := make([]deviceRow, 0, len(settings.Devices))
 	for _, d := range settings.Devices {
 		row := deviceRow{Device: d, Installs: map[string]store.Install{}, Plan: map[string]appPlan{}, Effective: store.Effective(settings, d.ID)}
@@ -866,4 +882,72 @@ func (s *Server) notifyTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "Test message sent. Check Telegram."})
+}
+
+// patchChoice is which optional patches are on and which default ones are off for an app.
+type patchChoice struct {
+	Enable  []string `json:"enable"`
+	Disable []string `json:"disable"`
+}
+
+func nonNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
+}
+
+// setPatches saves the patch choice for one app. Every name must be a patch the app's loaded
+// sources offer (its own, or one that fits any app), so a typo or a stale page is refused.
+func (s *Server) setPatches(w http.ResponseWriter, r *http.Request) {
+	pkg := r.PathValue("pkg")
+	var in patchChoice
+	if !decode(w, r, &in) {
+		return
+	}
+	known := map[string]bool{}
+	found := false
+	for _, l := range s.Backend.Lists() {
+		if l == nil {
+			continue
+		}
+		for _, p := range l.Universal {
+			known[p.Name] = true
+		}
+		if a, ok := l.App(pkg); ok {
+			found = true
+			for _, p := range a.Patches {
+				known[p.Name] = true
+			}
+		}
+	}
+	if !found {
+		fail(w, http.StatusNotFound, "no patch source supports that app")
+		return
+	}
+	in.Enable, in.Disable = slices.Compact(sortedCopy(in.Enable)), slices.Compact(sortedCopy(in.Disable))
+	for _, n := range append(slices.Clone(in.Enable), in.Disable...) {
+		if !known[n] {
+			fail(w, http.StatusBadRequest, "unknown patch: "+n+" (reload the page; the patches may have changed)")
+			return
+		}
+	}
+	for _, n := range in.Enable {
+		if slices.Contains(in.Disable, n) {
+			fail(w, http.StatusBadRequest, "patch is both on and off: "+n)
+			return
+		}
+	}
+	if err := s.Store.SetPatchChoice(pkg, in.Enable, in.Disable); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	slog.Info("patch choice saved", "package", pkg, "enable", in.Enable, "disable", in.Disable)
+	writeJSON(w, http.StatusOK, map[string]int{"on": len(in.Enable), "off": len(in.Disable)})
+}
+
+func sortedCopy(s []string) []string {
+	c := slices.Clone(s)
+	slices.Sort(c)
+	return c
 }

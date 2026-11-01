@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -116,7 +117,8 @@ func Effective(st Settings, deviceID string) []EffectiveApp {
 	return out
 }
 
-// Override is a per-app tweak edited by hand in settings.json (the UI never touches it).
+// Override is a per-app tweak edited by hand in settings.json. The page only changes Enable and
+// Disable (the patch choice); everything else is left as written.
 type Override struct {
 	APKMirror      string   `json:"apkmirror,omitempty"` // publisher/app path, if detection picks wrongly
 	Sources        []string `json:"sources,omitempty"`   // "apkmirror" (the only network source)
@@ -288,6 +290,34 @@ func (s *Store) Settings() Settings {
 	}
 	maps.Copy(out.Overrides, s.settings.Overrides)
 	return out
+}
+
+// SetPatchChoice sets which optional patches are switched on (enable) and which default ones are
+// switched off (disable) for an app on every device. Other override fields are kept; an override
+// left with nothing in it is removed.
+func (s *Store) SetPatchChoice(pkg string, enable, disable []string) error {
+	if !ValidPackage(pkg) {
+		return fmt.Errorf("%q is not a valid package name", pkg)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.settings.Overrides == nil {
+		s.settings.Overrides = map[string]Override{}
+	}
+	ov := s.settings.Overrides[pkg]
+	ov.Enable, ov.Disable = slices.Clone(enable), slices.Clone(disable)
+	if len(ov.Enable) == 0 {
+		ov.Enable = nil
+	}
+	if len(ov.Disable) == 0 {
+		ov.Disable = nil
+	}
+	if reflect.DeepEqual(ov, Override{}) {
+		delete(s.settings.Overrides, pkg)
+	} else {
+		s.settings.Overrides[pkg] = ov
+	}
+	return s.write("settings.json", s.settings)
 }
 
 // Override returns the hand-edited tweaks for a package.

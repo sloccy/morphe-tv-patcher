@@ -919,3 +919,71 @@ func TestPlanForCoversEachKind(t *testing.T) {
 		t.Error("a missing source should give no plan")
 	}
 }
+
+func TestPatchChoiceIsSavedShownAndValidated(t *testing.T) {
+	srv, s, _ := setup(t)
+	const pkg = "com.disney.disneyplus"
+	_, body := do(t, srv, "GET", "/api/state", "", nil)
+	var st struct {
+		Apps []struct {
+			Package string `json:"package"`
+			Sources []struct {
+				Patches []struct {
+					Name    string `json:"name"`
+					Default bool   `json:"default"`
+				} `json:"patches"`
+			} `json:"sources"`
+		} `json:"apps"`
+		Choice map[string]struct {
+			Enable  []string `json:"enable"`
+			Disable []string `json:"disable"`
+		} `json:"patch_choice"`
+	}
+	if err := json.Unmarshal([]byte(body), &st); err != nil {
+		t.Fatal(err)
+	}
+	offered := map[string]bool{}
+	for _, a := range st.Apps {
+		if a.Package == pkg {
+			for _, p := range a.Sources[0].Patches {
+				offered[p.Name] = p.Default
+			}
+		}
+	}
+	if def, ok := offered["Suppress Household Prompt"]; !ok || def {
+		t.Fatalf("state should offer the opt-in patch: %v", offered)
+	}
+	if len(st.Choice) != 0 {
+		t.Errorf("no choice yet: %v", st.Choice)
+	}
+
+	code, resp := do(t, srv, "PUT", "/api/apps/"+pkg+"/patches", `{"enable":["Suppress Household Prompt"],"disable":[]}`, nil)
+	if code != http.StatusOK {
+		t.Fatalf("save: %d %s", code, resp)
+	}
+	if ov := s.Store.Override(pkg); len(ov.Enable) != 1 || ov.Enable[0] != "Suppress Household Prompt" {
+		t.Errorf("override %+v", ov)
+	}
+	_, body = do(t, srv, "GET", "/api/state", "", nil)
+	if !strings.Contains(body, `"patch_choice":{"`+pkg+`":{"enable":["Suppress Household Prompt"],"disable":[]}}`) {
+		t.Errorf("state: %s", body)
+	}
+
+	if code, resp = do(t, srv, "PUT", "/api/apps/"+pkg+"/patches", `{"enable":["Nope"],"disable":[]}`, nil); code != http.StatusBadRequest || !strings.Contains(resp, "Nope") {
+		t.Errorf("unknown patch: %d %s", code, resp)
+	}
+	if code, _ = do(t, srv, "PUT", "/api/apps/not.an.app/patches", `{"enable":[],"disable":[]}`, nil); code != http.StatusNotFound {
+		t.Errorf("unknown app: %d", code)
+	}
+	if code, _ = do(t, srv, "PUT", "/api/apps/"+pkg+"/patches", `{"enable":["Suppress Household Prompt"],"disable":["Suppress Household Prompt"]}`, nil); code != http.StatusBadRequest {
+		t.Errorf("on and off at once: %d", code)
+	}
+
+	// back to the defaults removes the override altogether
+	if code, _ = do(t, srv, "PUT", "/api/apps/"+pkg+"/patches", `{"enable":[],"disable":[]}`, nil); code != http.StatusOK {
+		t.Fatal("reset")
+	}
+	if ov := s.Store.Override(pkg); len(ov.Enable)+len(ov.Disable) != 0 {
+		t.Errorf("reset left %+v", ov)
+	}
+}

@@ -520,3 +520,33 @@ func TestInstallRemembersWhatIsOnTheDevice(t *testing.T) {
 		t.Errorf("%+v %v", got, ok)
 	}
 }
+
+func TestSetPatchChoiceKeepsOtherOverrideFieldsAndDropsEmptyOnes(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	no := false
+	st.mu.Lock()
+	st.settings.Overrides = map[string]Override{"a.b": {APKMirror: "pub/app", AllowUninstall: &no}}
+	st.mu.Unlock()
+	if err := st.SetPatchChoice("a.b", []string{"X"}, []string{"Y"}); err != nil {
+		t.Fatal(err)
+	}
+	ov := st.Override("a.b")
+	if ov.APKMirror != "pub/app" || ov.CanUninstall() || len(ov.Enable) != 1 || len(ov.Disable) != 1 {
+		t.Errorf("override %+v", ov)
+	}
+	_ = st.SetPatchChoice("a.b", nil, nil)
+	if ov = st.Override("a.b"); ov.APKMirror != "pub/app" || len(ov.Enable) != 0 {
+		t.Errorf("hand-written fields must survive a reset: %+v", ov)
+	}
+	_ = st.SetPatchChoice("c.d", []string{"X"}, nil)
+	_ = st.SetPatchChoice("c.d", nil, nil)
+	if _, there := st.Settings().Overrides["c.d"]; there {
+		t.Error("an override with nothing in it should be removed")
+	}
+	if st.SetPatchChoice("../x", nil, nil) == nil {
+		t.Error("an invalid package name must be refused")
+	}
+}

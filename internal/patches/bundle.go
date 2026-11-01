@@ -37,6 +37,42 @@ func ParseListPatches(out []byte) map[string][]string {
 	return res
 }
 
+// ParsePatchInfo reads the same `list-patches -p -v` output for the patches themselves: the
+// patches written for each package, and the ones that name no package (any app can use them).
+func ParsePatchInfo(out []byte) (perPkg map[string][]Patch, universal []Patch) {
+	perPkg = map[string][]Patch{}
+	var cur *Patch
+	var pkgs []string
+	flush := func() {
+		if cur == nil || cur.Name == "" {
+			return
+		}
+		if len(pkgs) == 0 {
+			universal = appendPatch(universal, *cur)
+		}
+		for _, pkg := range pkgs {
+			perPkg[pkg] = appendPatch(perPkg[pkg], *cur)
+		}
+	}
+	for line := range strings.SplitSeq(string(out), "\n") {
+		line = strings.TrimRight(line, "\r")
+		switch {
+		case strings.HasPrefix(line, "Name: "):
+			flush()
+			cur, pkgs = &Patch{Name: strings.TrimSpace(strings.TrimPrefix(line, "Name: "))}, make([]string, 0, 1)
+		case cur == nil:
+		case strings.HasPrefix(line, "Description: "):
+			cur.Description = strings.TrimSpace(strings.TrimPrefix(line, "Description: "))
+		case strings.HasPrefix(line, "Enabled: "):
+			cur.Default = strings.TrimSpace(strings.TrimPrefix(line, "Enabled: ")) == "true"
+		case strings.HasPrefix(line, "\tPackage name: "):
+			pkgs = append(pkgs, strings.TrimSpace(strings.TrimPrefix(line, "\tPackage name: ")))
+		}
+	}
+	flush()
+	return perPkg, universal
+}
+
 // FromCLI builds the app list of one release from the CLI's views of its bundle: stable holds
 // the versions without -x, all the versions with -x (stable plus experimental). names comes from
 // the repository's patches-list.json when it has one. The target is the newest stable version (App.Pick); only when a

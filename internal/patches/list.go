@@ -9,6 +9,13 @@ import (
 	"strings"
 )
 
+// Patch is one patch in a bundle: what it does and whether it is applied unless asked otherwise.
+type Patch struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Default     bool   `json:"default"` // applied when the app's patch choice is left alone
+}
+
 // App is one app the patch bundle supports.
 type App struct {
 	Package      string   `json:"package"`
@@ -16,6 +23,7 @@ type App struct {
 	Versions     []string `json:"versions"`     // oldest first
 	Target       string   `json:"target"`       // the version to build by default (see Pick)
 	Experimental bool     `json:"experimental"` // the target version is marked experimental
+	Patches      []Patch  `json:"patches"`      // the patches written for this app
 	stable       map[string]bool
 }
 
@@ -35,15 +43,27 @@ func (a App) Pick() (version string, experimental bool) {
 
 // List is the parsed patches-list.json.
 type List struct {
-	Version string
-	Apps    []App
-	byPkg   map[string]*App
+	Version   string
+	Apps      []App
+	Universal []Patch // patches that name no app and can go on any of them
+	byPkg     map[string]*App
+}
+
+// SetPatches attaches what each app's patches are, and the patches that fit any app.
+func (l *List) SetPatches(perPkg map[string][]Patch, universal []Patch) {
+	l.Universal = universal
+	for i := range l.Apps {
+		l.Apps[i].Patches = perPkg[l.Apps[i].Package]
+	}
 }
 
 type listFile struct {
 	Version  string            `json:"version"`
 	AppNames map[string]string `json:"appNames"`
 	Patches  []struct {
+		Name               string              `json:"name"`
+		Description        string              `json:"description"`
+		Use                *bool               `json:"use"`
 		CompatiblePackages map[string][]string `json:"compatiblePackages"`
 		Compatibility      []struct {
 			PackageName string `json:"packageName"`
@@ -70,6 +90,8 @@ func ParseList(data []byte) (*List, error) {
 		}
 		stableMark[pkg][v] = true
 	}
+	perPkgPatches := map[string][]Patch{}
+	var universal []Patch
 	for _, p := range f.Patches {
 		perPkg := map[string][]string{}
 		inCompat := map[string]bool{}
@@ -94,10 +116,20 @@ func ParseList(data []byte) (*List, error) {
 		for pkg, vs := range perPkg {
 			versions[pkg] = append(versions[pkg], vs...)
 		}
+		if p.Name != "" {
+			info := Patch{Name: p.Name, Description: p.Description, Default: p.Use == nil || *p.Use}
+			if len(perPkg) == 0 {
+				universal = appendPatch(universal, info)
+			}
+			for pkg := range perPkg {
+				perPkgPatches[pkg] = appendPatch(perPkgPatches[pkg], info)
+			}
+		}
 	}
-	l := &List{Version: f.Version, byPkg: map[string]*App{}}
+	l := &List{Version: f.Version, Universal: universal, byPkg: map[string]*App{}}
 	for pkg, vs := range versions {
 		a := buildApp(pkg, f.AppNames[pkg], vs, stableMark[pkg])
+		a.Patches = perPkgPatches[pkg]
 		if f.AppNames[pkg] == "" {
 			a.Name = pkg
 		}
@@ -130,4 +162,14 @@ func FetchList(ctx context.Context, hc *http.Client, repo, tag, token string) (*
 		return nil, err
 	}
 	return ParseList(body)
+}
+
+// appendPatch adds a patch unless one with that name is already listed.
+func appendPatch(list []Patch, p Patch) []Patch {
+	for _, x := range list {
+		if x.Name == p.Name {
+			return list
+		}
+	}
+	return append(list, p)
 }

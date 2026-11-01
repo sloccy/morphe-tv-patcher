@@ -138,6 +138,9 @@ signing key (a regenerated keystore) counts as a different build and is installe
 goes by the record, an app taken off a TV by hand is noticed on the next **Run now** or within
 `VERIFY_EVERY`, not immediately. `tv-patcher digest FILE [FILE...]` prints that identity for any APK, which
 is how you can check for yourself that patching the same input twice really does produce the same app.
+Some bundles keep every app's extra code in one shared extension, so a change made for one app changes the
+build of every app that uses that extension. Those apps are reinstalled at the same version, and the run's
+message says so.
 
 **The same inputs are not patched twice.** What a build depends on — the app file, the patch bundle, the
 CPU list, `BYTECODE_MODE`, the keystore and the per-app `enable`/`disable`/`options_file` — is remembered
@@ -280,7 +283,9 @@ wrong signature or a phone build alerts at once; a message follows when it recov
 
 `/data/state/settings.json` holds your patch sources, devices and apps (edited by the page) plus optional per-app
 `overrides`: `apkmirror` (publisher/app path), `sources`, `signer_sha256`, `enable`/`disable` (Morphe
-patch names), `options_file`, `allow_uninstall`.
+patch names), `options_file`, `allow_uninstall`. `enable`/`disable` are set from the **App patches** section of
+the page, which lists every patch an app has and which are on by default (a patch that is off by default, such as
+Disney+'s *Suppress Household Prompt*, only goes into the app once you turn it on there). The rest is edited by hand.
 
 **Back up the signing keystore** (`/data/keystore/morphe.keystore`, in the data volume). Lose it and
 every app has to be uninstalled before it can update.

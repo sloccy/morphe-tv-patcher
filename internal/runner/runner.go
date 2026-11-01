@@ -897,6 +897,10 @@ func (r *Runner) appGroup(ctx context.Context, o Options, ld *loaded, pkg, name,
 			prev = "none"
 		}
 		msg := fmt.Sprintf("%s on %s: %s -> %s (patches %s) %s", name, c.dev.Name, prev, newest, rel.Tag, via)
+		if prev == newest {
+			msg = fmt.Sprintf("%s on %s: reinstalled %s: same app version, but patches %s changed the patched app (code the patches share between apps counts) %s",
+				name, c.dev.Name, newest, rel.Tag, via)
+		}
 		if *recovered {
 			msg = "recovered, " + msg
 			*recovered = false

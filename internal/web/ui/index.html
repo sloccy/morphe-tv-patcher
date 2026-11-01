@@ -94,7 +94,7 @@
 // server: the last /api/state. drafts: edits not saved yet, kept only while they differ from the
 // server. fields: every typed value, so a redraw never loses it. messages: one line per scope.
 let server = null;
-const drafts = { dev: {}, set: {} };   // dev[id] = {apps?: Map, sets?: Set}; set[id|"__new"] = {name, apps: Map, devices: Set}
+const drafts = { dev: {}, set: {}, patches: {} };   // dev[id] = {apps?: Map, sets?: Set}; set[id|"__new"] = {name, apps: Map, devices: Set}
 const fields = {};                     // input id -> string | boolean
 const messages = {};                   // scope -> {kind: progress|ok|error|info, text, problems, unchecked, at}
 const busy = new Set();                // keys of actions still running
@@ -227,6 +227,10 @@ function prune() {
     const d = drafts.set[id];
     if (d.name === st.name && mapEq(d.apps, choiceMap(st.apps)) && setEq(d.devices, new Set(st.devices || []))) delete drafts.set[id];
   }
+  for (const pkg of Object.keys(drafts.patches)) {
+    const app = (server.apps || []).find(a => a.package === pkg);
+    if (!app || setEq(drafts.patches[pkg], patchesChecked(pkg, allPatchesFor(app)))) delete drafts.patches[pkg];
+  }
   for (const scope of Object.keys(messages)) {
     const [kind, id] = scope.split(":");
     if ((kind === "device" && !deviceById(id)) || (kind === "set" && id !== "__new" && !setById(id))) delete messages[scope];
@@ -297,7 +301,7 @@ function planChip(p) {
   const text = { current: "up to date", update: "update to " + p.target, new: "new install", patches: "new patches",
     rollback: "goes back to " + p.target, blocked: "blocked" }[p.kind];
   const title = { current: "Nothing to do on the next run", update: "The next run installs this version", new: "The next run installs it",
-    patches: "Newer patches exist. The next run rebuilds it and installs only if the app changes",
+    patches: "Newer patches exist. The next run rebuilds it and reinstalls it only if the patched app changed. Code the patches share between apps counts, even when the change was meant for another app",
     rollback: "The installed app is newer, so the next run uninstalls it first (you log in again)",
     blocked: "The installed app is newer and uninstalling is turned off for it" }[p.kind];
   return text ? h("span", { class: "chip" + (p.kind === "rollback" || p.kind === "blocked" ? " warn" : ""), title }, text) : null;
@@ -587,6 +591,94 @@ async function doRemoveSet(st) {
   await act({ key: "rmset-" + st.id, scope: "set:" + st.id, run: () => api("DELETE", "/api/sets/" + encodeURIComponent(st.id)) });
 }
 
+// ---- app patches ----
+// The patches an app has: its own (merged by name across the sources it is in), then the ones that fit any app.
+function ownPatches(app) {
+  const m = new Map();
+  for (const src of app.sources) for (const p of src.patches || []) if (!m.has(p.name)) m.set(p.name, p);
+  return [...m.values()];
+}
+function universalPatches() {
+  const m = new Map();
+  for (const list of Object.values(server.universal || {})) for (const p of list) if (!m.has(p.name)) m.set(p.name, p);
+  return [...m.values()];
+}
+function allPatchesFor(app) {
+  const own = ownPatches(app), names = new Set(own.map(p => p.name));
+  return own.concat(universalPatches().filter(p => !names.has(p.name)));
+}
+// the names that are on right now according to the server: defaults, minus the switched off, plus the switched on
+function patchesChecked(pkg, all) {
+  const c = (server.patch_choice || {})[pkg] || { enable: [], disable: [] };
+  const on = new Set();
+  for (const p of all) if ((p.default && !c.disable.includes(p.name)) || c.enable.includes(p.name)) on.add(p.name);
+  return on;
+}
+function patchApp(app) {
+  const pkg = app.package, scope = "patches:" + pkg;
+  const own = ownPatches(app), all = allPatchesFor(app), ownNames = new Set(own.map(p => p.name));
+  const draft = drafts.patches[pkg];
+  const checked = draft || patchesChecked(pkg, all);
+  const hasChoice = !!(server.patch_choice || {})[pkg];
+  const saving = busy.has("patches-" + pkg);
+  const toggle = (p, on) => {
+    const next = new Set(checked);
+    on ? next.add(p.name) : next.delete(p.name);
+    if (setEq(next, patchesChecked(pkg, all))) delete drafts.patches[pkg]; else drafts.patches[pkg] = next;
+    render();
+  };
+  const row = p => {
+    const id = "pt-" + pkg + "-" + all.indexOf(p);
+    return h("div", { class: "app" },
+      h("input", { type: "checkbox", id, checked: checked.has(p.name), onchange: ev => toggle(p, ev.target.checked) }),
+      h("span", { class: "grow" },
+        h("label", { for: id }, p.name, " ", p.default ? null : h("span", { class: "chip warn" }, "optional")),
+        p.description ? h("span", { class: "meta" }, p.description) : null));
+  };
+  const universal = all.filter(p => !ownNames.has(p.name));
+  const onCount = own.filter(p => checked.has(p.name)).length;
+  return det("patches:" + pkg, false, !!draft || saving || (messages[scope] && messages[scope].kind === "error"), { class: "set" },
+    h("span", {}, h("strong", {}, app.name), " · " + onCount + " of " + own.length + " patches on" + (hasChoice || draft ? " (changed from the defaults)" : "")),
+    h("div", { class: "sub gap-top" }, "Applies to " + app.name + " on every TV that gets it."),
+    h("div", { class: "apps" }, own.map(row)),
+    universal.length ? det("univ:" + pkg, false, universal.some(p => checked.has(p.name)) && !!draft, { class: "sub-details" },
+      "Patches for any app (" + universal.length + ")", h("div", { class: "apps" }, universal.map(row))) : null,
+    h("div", { class: "row" },
+      h("button", { class: "primary", id: "savepatches-" + pkg, disabled: !draft || saving, onclick: () => doSavePatches(app, all) }, saving ? "Saving…" : "Save patches"),
+      h("button", { id: "resetpatches-" + pkg, disabled: (!hasChoice && !draft) || saving, onclick: () => doResetPatches(app) }, "Reset to defaults"),
+      h("span", { class: "sub" }, "The next run rebuilds " + app.name + " and reinstalls it only if the result changed.")),
+    msgLine(scope));
+}
+
+function patchesSection() {
+  const used = new Set();
+  for (const dev of server.devices || []) for (const e of dev.effective || []) used.add(e.package);
+  const apps = (server.apps || []).filter(a => used.has(a.package) && ownPatches(a).length);
+  return h("section", { class: "sec" },
+    h("h2", { class: "sec-head" }, "App patches"),
+    h("div", { class: "sub" }, "Choose which patches go into each app, for every TV that gets it. Optional patches stay off until you turn them on."),
+    h("div", { class: "card gap-top" },
+      apps.length ? apps.map(patchApp) : h("div", { class: "sub" }, "Choose apps for a TV first. Their patches show up here.")));
+}
+
+async function savePatchChoice(app, enable, disable) {
+  await act({ key: "patches-" + app.package, scope: "patches:" + app.package, progress: "Saving…", run: async () => {
+    await api("PUT", "/api/apps/" + encodeURIComponent(app.package) + "/patches", { enable, disable });
+    delete drafts.patches[app.package];
+  }, ok: "Saved. The next run rebuilds " + app.name + " and reinstalls it if the result changed." });
+}
+async function doSavePatches(app, all) {
+  const checked = drafts.patches[app.package];
+  if (!checked) return;
+  await savePatchChoice(app,
+    all.filter(p => !p.default && checked.has(p.name)).map(p => p.name),
+    all.filter(p => p.default && !checked.has(p.name)).map(p => p.name));
+}
+async function doResetPatches(app) {
+  if (!(server.patch_choice || {})[app.package]) { delete drafts.patches[app.package]; render(); return; }
+  await savePatchChoice(app, [], []);
+}
+
 // ---- patch sources ----
 function sourcesSection() {
   const rows = (server.sources || []).map(src => h("div", { class: "src" },
@@ -711,6 +803,7 @@ function build() {
     gettingStarted(),
     devicesSection(),
     setsSection(),
+    patchesSection(),
     sourcesSection(),
     notifySection(),
   ];
@@ -740,7 +833,7 @@ function safeRender() { try { render(); } catch (e) { pageBroken = true; console
 
 window.addEventListener("beforeunload", ev => {
   const n = drafts.set.__new;
-  const unsaved = Object.keys(drafts.dev).length || Object.keys(drafts.set).some(k => k !== "__new") || (n && (n.name || n.apps.size));
+  const unsaved = Object.keys(drafts.dev).length || Object.keys(drafts.patches).length || Object.keys(drafts.set).some(k => k !== "__new") || (n && (n.name || n.apps.size));
   if (unsaved) { ev.preventDefault(); ev.returnValue = ""; }
 });
 document.getElementById("logbox").addEventListener("toggle", ev => { if (ev.target.open) loadLog(); });

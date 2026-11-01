@@ -178,3 +178,56 @@ func TestLiveListPicksMatchPreviousTargets(t *testing.T) {
 		}
 	}
 }
+
+// The patch choices the page offers must come out the same from patches-list.json and from the CLI.
+func TestPatchInfoFromJSONAndCLIAgree(t *testing.T) {
+	fromJSON, err := ParseList(readFile(t, "patches-list.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	disney, ok := fromJSON.App("com.disney.disneyplus")
+	if !ok || len(disney.Patches) < 2 {
+		t.Fatalf("disney patches: %+v", disney.Patches)
+	}
+	byName := map[string]Patch{}
+	for _, p := range disney.Patches {
+		byName[p.Name] = p
+	}
+	if hh := byName["Suppress Household Prompt"]; hh.Default || hh.Description == "" {
+		t.Errorf("household prompt should be opt-in and described: %+v", hh)
+	}
+	if !byName["Disney+ Android TV"].Default {
+		t.Errorf("the main Disney patch is on by default: %+v", byName)
+	}
+
+	perPkg, universal := ParsePatchInfo(readFile(t, "list-patches-ajstrick81.txt"))
+	cli := perPkg["com.disney.disneyplus"]
+	if len(cli) != len(disney.Patches) {
+		t.Fatalf("CLI %d patches, json %d", len(cli), len(disney.Patches))
+	}
+	for _, p := range cli {
+		if want := byName[p.Name]; want.Default != p.Default || want.Description != p.Description {
+			t.Errorf("%s: CLI %+v, json %+v", p.Name, p, want)
+		}
+	}
+	_ = universal
+}
+
+func TestPatchInfoKeepsUniversalPatchesApart(t *testing.T) {
+	perPkg, universal := ParsePatchInfo(readFile(t, "list-patches-morphe.txt"))
+	names := map[string]bool{}
+	for _, p := range universal {
+		names[p.Name] = true
+	}
+	if !names["Clone app"] || len(universal) == 0 {
+		t.Errorf("universal patches: %v", names)
+	}
+	if len(perPkg["com.google.android.apps.youtube.music"]) == 0 {
+		t.Error("a patch that names a package belongs to it")
+	}
+	l := &List{Apps: []App{{Package: "x.y"}}}
+	l.SetPatches(map[string][]Patch{"x.y": {{Name: "A"}}}, universal)
+	if len(l.Apps[0].Patches) != 1 || len(l.Universal) != len(universal) {
+		t.Errorf("SetPatches: %+v", l)
+	}
+}
