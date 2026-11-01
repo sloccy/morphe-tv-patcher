@@ -8,92 +8,78 @@
   :root {
     --bg: #f6f7f9; --card: #ffffff; --text: #1b1f24; --muted: #5d6671; --line: #dfe3e8;
     --accent: #2f6fed; --accent-text: #ffffff; --ok: #1a7f4b; --bad: #b3261e; --warn: #9a6700; --chip: #eef1f5;
+    --bad-bg: #fdecea; --ok-bg: #e8f5ee; --info-bg: #eef1f5;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       --bg: #14171b; --card: #1d2228; --text: #e8ebef; --muted: #98a2ae; --line: #313840;
       --accent: #6b97ff; --accent-text: #0d1117; --ok: #4cc38a; --bad: #ff8a80; --warn: #e3b341; --chip: #272d34;
+      --bad-bg: #3a2220; --ok-bg: #1d3328; --info-bg: #272d34;
     }
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
   main { max-width: 860px; margin: 0 auto; padding: 16px; }
-  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 16px; }
   h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 16px; margin: 0; }
   .sub { color: var(--muted); font-size: 13px; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 14px; }
+  .sec { margin-top: 24px; }
+  .sec > .sec-head { margin-bottom: 8px; }
+  .sec > .sub { margin: 0 0 8px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; margin-bottom: 12px; }
   .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .row.tight { gap: 4px 8px; }
   .grow { flex: 1 1 auto; min-width: 0; }
+  .stack > * + * { margin-top: 8px; }
   button { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--text); border-radius: 7px; padding: 6px 12px; cursor: pointer; }
   button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
   button.danger { color: var(--bad); }
+  button.x { border: 0; background: none; padding: 0 6px; font-size: 18px; line-height: 1; color: inherit; }
   button:disabled { opacity: .5; cursor: default; }
-  input[type=text], input[type=number], select { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--text); min-width: 0; }
+  input[type=text], select { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--text); min-width: 0; }
   select { padding: 3px 6px; font-size: 13px; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: var(--muted); margin-right: 6px; }
   .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
-  .apps { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 6px 14px; margin: 12px 0; }
-  .app { display: flex; gap: 8px; align-items: flex-start; padding: 6px 8px; border-radius: 7px; }
-  .app:hover { background: var(--chip); }
-  .app input { margin-top: 3px; }
-  .app label { cursor: pointer; display: block; }
-  .meta { color: var(--muted); font-size: 12.5px; display: block; }
-  .chip { background: var(--chip); border-radius: 999px; padding: 1px 8px; font-size: 12px; color: var(--muted); margin-left: 6px; white-space: nowrap; }
+  .chip { background: var(--chip); border-radius: 999px; padding: 1px 8px; font-size: 12px; color: var(--muted); white-space: nowrap; }
   .chip.warn { color: var(--warn); }
-  .msg { font-size: 13px; margin: 6px 0 0; }
-  .msg.ok { color: var(--ok); } .msg.bad { color: var(--bad); }
-  .results { font-size: 13px; color: var(--muted); margin: 4px 0 0; padding-left: 18px; }
-  .results .bad { color: var(--bad); } .results .ok { color: var(--ok); }
-  .src { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 6px 0; border-top: 1px solid var(--line); }
-  .src:first-of-type { border-top: 0; }
-  .warnbox { border: 1px solid var(--warn); border-radius: 8px; padding: 8px 10px; margin-top: 10px; font-size: 13px; }
-  pre { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; overflow: auto; max-height: 320px; font-size: 12px; }
-  details summary { cursor: pointer; color: var(--muted); }
-  .empty { color: var(--muted); text-align: center; padding: 24px 8px; }
-  .setbox { border-top: 1px solid var(--line); padding: 12px 0; }
-  .setbox:first-of-type { border-top: 0; }
-  .problems { margin: 6px 0 0; padding-left: 18px; font-size: 13px; color: var(--bad); }
-  .note { font-size: 12.5px; color: var(--muted); margin-top: 4px; }
-  .checks { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 6px 0; }
-  .checks label { cursor: pointer; font-size: 14px; }
+  .banner { border-radius: 8px; padding: 8px 12px; margin-top: 16px; font-size: 14px; background: var(--bad-bg); color: var(--bad); }
+  .note-block { border-radius: 8px; padding: 6px 10px; margin-top: 8px; font-size: 13px; }
+  .note-block.error { background: var(--bad-bg); color: var(--bad); }
+  .note-block.ok { background: var(--ok-bg); color: var(--ok); }
+  .note-block.progress, .note-block.info { background: var(--info-bg); color: var(--muted); }
+  .note-block ul { margin: 4px 0 0; padding-left: 18px; }
+  .note-block .unchecked { margin-top: 4px; color: var(--muted); }
+  .steps { margin: 0; padding-left: 20px; }
+  .steps li { padding: 2px 0; }
+  .steps li.done { color: var(--muted); text-decoration: line-through; }
+  .apps { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 4px 16px; margin: 8px 0; }
+  .app { display: flex; gap: 8px; align-items: flex-start; padding: 4px 8px; border-radius: 7px; }
+  .app:hover { background: var(--chip); }
+  .app input { margin-top: 4px; }
+  .app label { cursor: pointer; display: block; }
   .app.locked { opacity: .75; }
-  details.setbox summary { padding: 2px 0; }
-  .seted { padding-top: 8px; }
+  .meta { color: var(--muted); font-size: 12.5px; display: block; }
+  .checks { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 4px 0; }
+  .checks label { cursor: pointer; font-size: 14px; }
+  .list { margin: 8px 0 0; padding-left: 18px; font-size: 13px; }
+  .list .bad { color: var(--bad); } .list .ok { color: var(--ok); } .list .warn { color: var(--warn); }
+  .src { padding: 8px 0; border-top: 1px solid var(--line); }
+  .src:first-child { border-top: 0; padding-top: 0; }
+  .warnbox { border: 1px solid var(--warn); border-radius: 8px; padding: 8px 12px; margin-top: 12px; font-size: 13px; }
+  details > summary { cursor: pointer; padding: 4px 0; }
+  details.sub-details { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 4px; }
+  details.set { border-top: 1px solid var(--line); padding: 4px 0; }
+  details.set:first-of-type { border-top: 0; }
+  pre { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px; overflow: auto; max-height: 320px; font-size: 12px; }
+  .empty { color: var(--muted); text-align: center; padding: 24px 8px; }
+  .gap-top { margin-top: 8px; }
 </style>
 </head>
 <body>
-<div id="errbar" class="msg bad" role="alert" style="display:none;margin:0;border-radius:0;position:sticky;top:0;z-index:10"></div>
 <main>
-  <header>
-    <div>
-      <h1>TV Patcher</h1>
-      <div class="sub" id="sub">loading…</div>
-    </div>
-    <div class="row">
-      <label class="sub"><input type="checkbox" id="force"> reinstall everything</label>
-      <button class="primary" id="runall">Run now</button>
-    </div>
-  </header>
-
-  <div id="learning" class="sub" style="margin:0 0 8px"></div>
-  <div id="devices"></div>
-
-  <section class="card" id="sets"></section>
-
-  <section class="card" id="sources"></section>
-
-  <section class="card">
-    <strong>Add a device</strong>
-    <div class="sub">Turn on Developer options → Wireless debugging on the TV, then enter its IP address. Give the TV a fixed IP in your router.</div>
-    <div class="row" style="margin-top:8px">
-      <input type="text" id="newname" placeholder="Name (Living room)" maxlength="60">
-      <input type="text" id="newhost" placeholder="IP address (10.0.0.6)" maxlength="253">
-      <button id="adddev">Add</button>
-    </div>
-    <div class="msg" id="addmsg"></div>
-  </section>
-
-  <details class="card" id="logbox">
+  <div id="app"></div>
+  <details class="card sec" id="logbox">
     <summary>Log</summary>
     <pre id="log">(open to load)</pre>
   </details>
@@ -101,47 +87,31 @@
 
 <script>
 "use strict";
-let state = null;
-const dirty = {};      // device id -> Map(package -> patch source id), unsaved changes
-const openPair = {};   // device id -> true while the pairing form is open
-const notes = {};      // device id -> {text, ok, problems, unchecked}
-const dirtySets = {};  // device id -> Set of app-set ids not yet saved
-const setDraft = {};   // set id (or "__new") -> {name, apps: Map, devices: Set}
-const setNotes = {};   // set id -> {text, ok, problems, unchecked}
-const setOpen = {};    // set id -> true while its editor is expanded
-const appsOpen = (() => { try { return JSON.parse(localStorage.getItem("appsOpen") || "{}"); } catch (e) { return {}; } })(); // device id -> false when its app list is collapsed
-function saveAppsOpen() { try { localStorage.setItem("appsOpen", JSON.stringify(appsOpen)); } catch (e) { /* private mode: fine */ } }
-let sourceNote = null; // {text, ok}
-const busy = new Set(); // keys of actions whose request is still running (their buttons are disabled)
-let lastText = "";      // last /api/state body, so an unchanged poll does not redraw (and wipe typing)
-let pollTimer = null;
 
-function showError(msg) {
-  const bar = document.getElementById("errbar");
-  bar.textContent = msg ? msg : "";
-  bar.style.display = msg ? "" : "none";
-}
-window.addEventListener("error", ev => showError("Page error: " + ev.message + " (reload the page if this keeps happening)"));
-window.addEventListener("unhandledrejection", ev => showError("Page error: " + ((ev.reason && ev.reason.message) || ev.reason)));
+// ---- state ----
+// server: the last /api/state. drafts: edits not saved yet, kept only while they differ from the
+// server. fields: every typed value, so a redraw never loses it. messages: one line per scope.
+let server = null;
+const drafts = { dev: {}, set: {} };   // dev[id] = {apps?: Map, sets?: Set}; set[id|"__new"] = {name, apps: Map, devices: Set}
+const fields = {};                     // input id -> string | boolean
+const messages = {};                   // scope -> {kind: progress|ok|error|info, text, problems, unchecked, at}
+const busy = new Set();                // keys of actions still running
+const ui = { open: loadOpen(), pair: {}, creatingSet: false };
+let focusId = null;                    // element to focus after the next draw
+let stamp = 0, lastText = "", seq = 0, applied = 0, fails = 0, pageBroken = false, pollTimer = null;
 
-// run an action once at a time per key: its buttons show "…" and ignore clicks until it ends,
-// then the page is reloaded from the server whatever happened
-function once(keyOf, fn) {
-  return async (...args) => {
-    const key = keyOf(...args);
-    if (busy.has(key)) return;
-    busy.add(key);
-    safeRender();
-    try { await fn(...args); } catch (e) { showError("Action failed: " + e.message); }
-    finally { busy.delete(key); await reload(true); }
-  };
-}
-function safeRender() { try { render(); } catch (e) { showError("Page error while drawing: " + e.message); } }
+function loadOpen() { try { return JSON.parse(localStorage.getItem("ui-open") || "{}"); } catch (e) { return {}; } }
+function saveOpen() { try { localStorage.setItem("ui-open", JSON.stringify(ui.open)); } catch (e) { /* private mode: fine */ } }
 
+window.addEventListener("error", () => { pageBroken = true; safeRender(); });
+window.addEventListener("unhandledrejection", () => { pageBroken = true; safeRender(); });
+
+// ---- helpers ----
 function h(tag, attrs, ...kids) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {
     if (k === "class") el.className = v;
+    else if (k === "value") el.value = v;
     else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
     else if (v === true) el.setAttribute(k, "");
     else if (v !== false && v != null) el.setAttribute(k, v);
@@ -159,60 +129,179 @@ async function api(method, path, body) {
   const r = await fetch(path, opt);
   let data = {};
   try { data = await r.json(); } catch (e) { /* empty body */ }
-  if (!r.ok) { const e = new Error(data.error || ("HTTP " + r.status)); e.data = data; e.status = r.status; throw e; }
+  if (!r.ok) { const e = new Error(data.error || ("The server answered HTTP " + r.status)); e.data = data; throw e; }
   return data;
-}
-
-// a note for the card/set that was just saved or refused: the message, the apps a device cannot run, and what could not be checked
-function noteFrom(err, okText) {
-  if (err) return { ok: false, text: err.message, problems: (err.data && err.data.problems) || [], unchecked: (err.data && err.data.unchecked) || [] };
-  return { ok: true, text: okText };
-}
-function noteBlock(n) {
-  if (!n) return null;
-  return h("div", {},
-    h("div", { class: "msg " + (n.ok ? "ok" : "bad") }, n.text),
-    n.problems && n.problems.length ? h("ul", { class: "problems" }, n.problems.map(p => h("li", {}, p.device + ": " + p.reason))) : null,
-    n.unchecked && n.unchecked.length ? h("div", { class: "note" }, "Not checked: " + n.unchecked.join("; ")) : null);
 }
 
 function when(iso) {
   if (!iso || iso.startsWith("0001")) return "";
-  const d = new Date(iso);
-  return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+const plural = (n, one, many) => n + " " + (n === 1 ? one : many);
+const mapEq = (a, b) => a.size === b.size && [...a].every(([k, v]) => b.get(k) === v);
+const setEq = (a, b) => a.size === b.size && [...a].every(v => b.has(v));
+const toChoices = m => [...m].map(([pkg, src]) => ({ package: pkg, source: src }));
+const choiceMap = list => new Map((list || []).map(c => [c.package, c.source]));
+
+const sourceById = id => (server.sources || []).find(s => s.id === id);
+const setById = id => (server.sets || []).find(x => x.id === id);
+const deviceById = id => (server.devices || []).find(x => x.id === id);
+
+// ---- messages: one line per scope, replaced by the next action in that scope ----
+function say(scope, kind, text, extra) {
+  const m = { kind, text, problems: (extra && extra.problems) || [], unchecked: (extra && extra.unchecked) || [], at: ++stamp };
+  messages[scope] = m;
+  if (kind === "ok" && !m.problems.length && !m.unchecked.length) {
+    setTimeout(() => { if (messages[scope] && messages[scope].at === m.at) { delete messages[scope]; safeRender(); } }, 6000);
+  }
+}
+function msgLine(scope) {
+  const m = messages[scope];
+  if (!m) return null;
+  return h("div", { class: "note-block " + m.kind, role: m.kind === "error" ? "alert" : "status" },
+    h("div", { class: "row" },
+      h("span", { class: "grow" }, m.text),
+      m.kind === "progress" ? null : h("button", { class: "x", type: "button", id: "x-" + scope, "aria-label": "Dismiss", onclick: () => { delete messages[scope]; render(); } }, "×")),
+    m.problems.length ? h("ul", {}, m.problems.map(p => h("li", {}, p.device + ": " + p.reason))) : null,
+    m.unchecked.length ? h("div", { class: "unchecked" }, "Not checked: " + m.unchecked.join("; ")) : null);
 }
 
-const sourceById = id => (state.sources || []).find(s => s.id === id);
-const defaultSource = () => (state.sources || [])[0]; // the first source is preferred when an app is in several
-
-// the device's current choice as a Map(package -> source id)
-function selection(dev) {
-  if (dirty[dev.id]) return dirty[dev.id];
-  const m = new Map();
-  for (const c of dev.apps || []) m.set(c.package, c.source);
-  return m;
+// Run one action at a time per key. It reports into one scope, and the page is reloaded once at the end.
+async function act({ key, scope, progress, run, ok }) {
+  if (busy.has(key)) return;
+  busy.add(key);
+  if (progress) say(scope, "progress", progress); else delete messages[scope];
+  safeRender();
+  try {
+    const r = await run();
+    const text = typeof ok === "function" ? ok(r) : ok;
+    if (text) say(scope, "ok", text, { unchecked: r && r.unchecked }); else delete messages[scope];
+  } catch (e) {
+    say(scope, "error", e.message, e.data);
+  } finally {
+    busy.delete(key);
+    await load(true);
+  }
 }
 
-// which source an app uses when ticked: keep the saved choice, else the default source if it has the app
+// ---- drafts ----
+const serverApps = dev => choiceMap(dev.apps);
+const selection = dev => (drafts.dev[dev.id] && drafts.dev[dev.id].apps) || serverApps(dev);
+const deviceSets = dev => (drafts.dev[dev.id] && drafts.dev[dev.id].sets) || new Set(dev.sets || []);
+const isDirty = dev => !!drafts.dev[dev.id];
+
+function editDevice(dev, key, value) {
+  const base = key === "apps" ? serverApps(dev) : new Set(dev.sets || []);
+  const same = key === "apps" ? mapEq(value, base) : setEq(value, base);
+  const d = drafts.dev[dev.id] || (drafts.dev[dev.id] = {});
+  if (same) delete d[key]; else d[key] = value;
+  if (!d.apps && !d.sets) delete drafts.dev[dev.id];
+  render();
+}
+
+function setView(st) {
+  return drafts.set[st.id] || { name: st.name, apps: choiceMap(st.apps), devices: new Set(st.devices || []) };
+}
+function editSet(st, change) {
+  const d = drafts.set[st.id] || (drafts.set[st.id] = setView(st));
+  change(d);
+  render();
+}
+
+// after each load: forget drafts and messages for things that are gone, and drafts that match the server again
+function prune() {
+  for (const id of Object.keys(drafts.dev)) {
+    const dev = deviceById(id);
+    if (!dev) { delete drafts.dev[id]; continue; }
+    const d = drafts.dev[id];
+    if (d.apps && mapEq(d.apps, serverApps(dev))) delete d.apps;
+    if (d.sets && setEq(d.sets, new Set(dev.sets || []))) delete d.sets;
+    if (!d.apps && !d.sets) delete drafts.dev[id];
+  }
+  for (const id of Object.keys(drafts.set)) {
+    if (id === "__new") continue;
+    const st = setById(id);
+    if (!st) { delete drafts.set[id]; continue; }
+    const d = drafts.set[id];
+    if (d.name === st.name && mapEq(d.apps, choiceMap(st.apps)) && setEq(d.devices, new Set(st.devices || []))) delete drafts.set[id];
+  }
+  for (const scope of Object.keys(messages)) {
+    const [kind, id] = scope.split(":");
+    if ((kind === "device" && !deviceById(id)) || (kind === "set" && id !== "__new" && !setById(id))) delete messages[scope];
+  }
+}
+
+// ---- loading: the newest answer wins; a slow old one is ignored ----
+async function load(force) {
+  const mine = ++seq;
+  try {
+    const r = await fetch("/api/state", { cache: "no-cache" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const text = await r.text();
+    if (mine < applied) return;
+    applied = mine;
+    const wasDown = fails >= 2;
+    fails = 0;
+    if (force || wasDown || text !== lastText) {
+      server = JSON.parse(text); lastText = text;
+      prune();
+      safeRender();
+    }
+  } catch (e) {
+    fails++;
+    if (fails === 2) safeRender();
+  }
+  schedule();
+}
+function schedule() {
+  clearTimeout(pollTimer);
+  const active = server && ((server.status && server.status.running) || (server.learning && (server.learning.pending || []).length));
+  pollTimer = setTimeout(refresh, document.hidden ? 30000 : (active ? 1500 : 3000));
+}
+async function refresh() {
+  await load(false);
+  if (document.getElementById("logbox").open) loadLog();
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+
+async function loadLog() {
+  try {
+    const l = await api("GET", "/api/log");
+    const pre = document.getElementById("log");
+    const text = l.lines.join("\n") || "(empty)";
+    if (pre.textContent !== text) { pre.textContent = text; pre.scrollTop = pre.scrollHeight; }
+  } catch (e) { /* the connection banner covers this */ }
+}
+
+// ---- inputs whose text lives in `fields` ----
+function textField(id, label, placeholder, extra) {
+  return h("input", Object.assign({ type: "text", id, "aria-label": label, placeholder, autocomplete: "off",
+    value: typeof fields[id] === "string" ? fields[id] : "",
+    oninput: ev => { fields[id] = ev.target.value; } }, extra || {}));
+}
+function checkField(id, text) {
+  return h("label", { class: "sub" }, h("input", { type: "checkbox", id, checked: !!fields[id], onchange: ev => { fields[id] = ev.target.checked; } }), " " + text);
+}
+
+// ---- app grid, shared by devices and sets ----
+const defaultSource = () => (server.sources || [])[0];
 function pickSource(app, wanted) {
   if (wanted && app.sources.some(s => s.id === wanted)) return wanted;
   const def = defaultSource();
   if (def && app.sources.some(s => s.id === def.id)) return def.id;
   return app.sources[0].id;
 }
-
-const setById = id => (state.sets || []).find(x => x.id === id);
-
-// One row per app the patch sources support. sel: Map(package -> source id). locked: Map(package ->
-// label) for apps a device gets from a set (shown ticked and disabled). onChange(newMap).
-function appGrid(idPrefix, sel, installs, locked, onChange) {
-  return h("div", { class: "apps" }, (state.apps || []).map(a => {
+// sel: Map(package -> source id). locked: Map(package -> set name) for apps a TV gets from a set.
+function appGrid(prefix, sel, installs, locked, onChange) {
+  const apps = server.apps || [];
+  if (!apps.length) return h("div", { class: "sub gap-top" }, "No apps yet. Add a patch repository under Patch sources.");
+  return h("div", { class: "apps" }, apps.map(a => {
     const chosen = sel.get(a.package);
     const src = a.sources.find(s => s.id === pickSource(a, chosen)) || a.sources[0];
     const srcInfo = sourceById(src.id) || {};
     const inst = (installs || {})[a.package];
     const lock = locked && locked.get(a.package);
-    const id = idPrefix + "-" + a.package;
+    const id = prefix + "-" + a.package;
     return h("div", { class: "app" + (lock ? " locked" : "") },
       h("input", { type: "checkbox", id, checked: sel.has(a.package) || !!lock, disabled: !!lock, onchange: ev => {
         const m = new Map(sel);
@@ -220,21 +309,26 @@ function appGrid(idPrefix, sel, installs, locked, onChange) {
         onChange(m);
       } }),
       h("span", { class: "grow" },
-        h("label", { for: id },
-          a.name,
-          lock ? h("span", { class: "chip" }, "from " + lock) : null,
-          src.experimental ? h("span", { class: "chip warn" }, "experimental") : null,
+        h("label", { for: id }, a.name, " ",
+          lock ? h("span", { class: "chip" }, "from " + lock) : null, " ",
+          src.experimental ? h("span", { class: "chip warn" }, "experimental") : null, " ",
           srcInfo.allow_phone ? h("span", { class: "chip warn", title: "A phone app: it may install but not show in the TV launcher" }, "phone app") : null),
         h("span", { class: "meta" }, "target " + src.target + (inst ? " · installed " + inst.apk_version + " (" + when(inst.installed_at) + ")" : "")),
         !lock && a.sources.length > 1 ? h("span", { class: "meta" }, "patches from ",
-          h("select", { onchange: ev => { const m = new Map(sel); m.set(a.package, ev.target.value); onChange(m); } },
+          h("select", { id: "sel-" + id, "aria-label": "Patch source for " + a.name, onchange: ev => { const m = new Map(sel); m.set(a.package, ev.target.value); onChange(m); } },
             a.sources.map(s => h("option", { value: s.id, selected: s.id === src.id }, (sourceById(s.id) || {}).repo || s.id)))) : null));
   }));
 }
 
-function deviceSets(dev) { return dirtySets[dev.id] || new Set(dev.sets || []); }
+// <details> that remembers whether the user opened it. forceOpen keeps it open while there is unsaved work.
+function det(key, defaultOpen, forceOpen, attrs, summary, ...kids) {
+  const current = () => (key in ui.open ? ui.open[key] : defaultOpen);
+  return h("details", Object.assign({ open: forceOpen || current(), ontoggle: ev => {
+    if (!forceOpen && ev.target.open !== current()) { ui.open[key] = ev.target.open; saveOpen(); }
+  } }, attrs || {}), h("summary", {}, summary), kids);
+}
 
-// one line saying what the TV gets, shown even when the app list is collapsed
+// ---- devices ----
 function appsSummary(dev) {
   const eff = dev.effective || [];
   const own = eff.filter(e => !e.via || !e.via.startsWith("set:")).length;
@@ -246,393 +340,352 @@ function appsSummary(dev) {
 }
 
 function deviceCard(dev) {
+  const scope = "device:" + dev.id;
   const sel = selection(dev);
   const sets = deviceSets(dev);
-  const isDirty = !!dirty[dev.id] || !!dirtySets[dev.id];
+  const dirty = isDirty(dev);
   const last = dev.last || [];
   const offline = last.some(r => !r.ok && !r.package);
-  const note = notes[dev.id];
+  const failed = last.filter(r => !r.ok).length;
+  const warnings = (server.warnings || []).filter(w => w.device === dev.name);
 
-  // apps this device gets from its sets (shown locked), by set name
   const locked = new Map();
-  for (const e of dev.effective || []) if (e.via && e.via.startsWith("set:") && !sel.has(e.package) && sets.has(e.via.slice(4))) locked.set(e.package, (setById(e.via.slice(4)) || {}).name || "a set");
-  if (dirtySets[dev.id]) { // unsaved: show what the ticked sets would give
-    locked.clear();
-    for (const sid of sets) { const st = setById(sid); if (st) for (const c of st.apps || []) if (!sel.has(c.package) && !locked.has(c.package)) locked.set(c.package, st.name); }
-  }
-  const apps = appGrid("c-" + dev.id, sel, dev.installs, locked, m => { dirty[dev.id] = m; render(); });
+  for (const sid of sets) { const st = setById(sid); if (st) for (const c of st.apps || []) if (!sel.has(c.package) && !locked.has(c.package)) locked.set(c.package, st.name); }
 
-  const setChecks = (state.sets || []).length ? h("div", {},
+  const grid = appGrid("c-" + dev.id, sel, dev.installs, locked, m => editDevice(dev, "apps", m));
+  const setChecks = (server.sets || []).length ? h("div", {},
     h("div", { class: "sub" }, "App sets for this TV"),
-    h("div", { class: "checks" }, (state.sets || []).map(st => h("label", {},
-      h("input", { type: "checkbox", checked: sets.has(st.id), onchange: ev => {
-        const next = new Set(deviceSets(dev));
+    h("div", { class: "checks" }, server.sets.map(st => h("label", {},
+      h("input", { type: "checkbox", id: "ds-" + dev.id + "-" + st.id, checked: sets.has(st.id), onchange: ev => {
+        const next = new Set(sets);
         ev.target.checked ? next.add(st.id) : next.delete(st.id);
-        dirtySets[dev.id] = next; render();
+        editDevice(dev, "sets", next);
       } }), " " + st.name + " (" + (st.apps || []).length + ")")))) : null;
 
-  const pairForm = openPair[dev.id] ? h("div", { class: "row", style: "margin-top:8px" },
-    h("span", { class: "sub" }, "On the TV choose “Pair device with pairing code”. The port fills itself in when the TV is advertising it; otherwise type it from that screen, with the code:"),
-    h("input", { type: "text", id: "pp-" + dev.id, placeholder: "pairing port", inputmode: "numeric", style: "width:130px" }),
-    h("input", { type: "text", id: "pc-" + dev.id, placeholder: "6-digit code", inputmode: "numeric", style: "width:120px",
-      oninput: ev => { ev.target.value = ev.target.value.replace(/\D/g, "").slice(0, 6); } }),
-    h("button", { disabled: busy.has("pair-" + dev.id), onclick: () => doPair(dev) }, busy.has("pair-" + dev.id) ? "Pairing…" : "Pair")) : null;
-
   const paired = dev.info && dev.info.paired_at;
-  const cpu = dev.info && dev.info.abis && dev.info.abis.length
-    ? h("span", { class: "chip", title: "What the device reports; builds are chosen to match" },
-        (dev.is64 ? "64-bit capable" : "32-bit") + " · " + dev.info.abis.join(", ") + " · Android API " + dev.info.sdk)
-    : null;
-  const helperChip = dev.info && dev.info.helper ? h("span", { class: "chip", title: "A small app on the TV that switches Wireless debugging back on after a restart, and stops the TV expiring this server's pairing" }, "boot helper ✓") : null;
-  const expiry = dev.info && dev.info.key_expiry;
+  const info = dev.info || {};
+  const cpu = info.abis && info.abis.length
+    ? h("span", { class: "chip", title: "What the device reports; builds are chosen to match" }, (dev.is64 ? "64-bit capable" : "32-bit") + " · " + info.abis.join(", ") + " · Android API " + info.sdk) : null;
+  const helper = info.helper ? h("span", { class: "chip", title: "A small app on the TV that switches Wireless debugging back on after a restart, and stops the TV expiring this server's pairing" }, "boot helper ✓") : null;
+  const expiry = info.key_expiry;
   const expiryChip = !expiry ? null : expiry === "0"
     ? h("span", { class: "chip", title: "adb_allowed_connection_time is 0, so Android will not drop this server's pairing key" }, "pairing kept ✓")
-    : h("span", { class: "chip warn", title: "This TV would not take adb_allowed_connection_time=0, so Android drops an unused pairing key after adb_allowed_connection_time=" + expiry + "ms. tv-patcher connects at least every 5 days to stop that" }, "expires pairings");
+    : h("span", { class: "chip warn", title: "This TV would not take adb_allowed_connection_time=0, so Android drops an unused pairing key after " + expiry + "ms. tv-patcher connects at least every 5 days to stop that" }, "expires pairings");
   const pairChip = paired ? h("span", { class: "chip" }, "paired") : (cpu ? null : h("span", { class: "chip warn" }, "not paired yet"));
 
-  return h("section", { class: "card" },
-    h("div", { class: "row" },
-      h("span", { class: "grow" },
-        h("strong", {}, h("span", { class: "dot " + (last.length ? (offline ? "bad" : "ok") : "") }), dev.name),
-        h("span", { class: "sub" }, "  " + dev.host),
-        pairChip, cpu, helperChip, expiryChip),
-      h("button", { onclick: () => { openPair[dev.id] = !openPair[dev.id]; render(); if (openPair[dev.id]) findPairPort(dev); } }, "Pair…"),
-      h("button", { disabled: busy.has("test-" + dev.id), title: "Looks at the network only: nothing connects to the TV, so it shows no notice", onclick: () => doTest(dev, false) }, busy.has("test-" + dev.id) ? "Testing…" : "Test"),
-      h("button", { disabled: busy.has("test-" + dev.id), title: "Really connects: checks the pairing, reads the CPU and updates the boot helper. The TV shows its 'debugging connected' notice.", onclick: () => doTest(dev, true) }, "Full test"),
-      h("button", { disabled: busy.has("run-" + dev.id), onclick: () => doRun(dev.id) }, "Run now"),
-      h("button", { class: "danger", disabled: busy.has("rm-" + dev.id), onclick: () => doRemove(dev) }, "Remove")),
-    pairForm,
-    h("details", { class: "appsbox", open: appsOpen[dev.id] !== false || isDirty || busy.has("save-" + dev.id) },
-    h("summary", { onclick: ev => { appsOpen[dev.id] = !ev.currentTarget.parentNode.open; saveAppsOpen(); } }, appsSummary(dev)), // only a click by the user changes the remembered state
-    setChecks,
-    h("div", { class: "sub", style: "margin-top:8px" }, (state.sets || []).length ? "Extra apps for this TV only" : "Apps for this TV (create an app set to give the same apps to several TVs)"),
-    apps,
-    h("div", { class: "row" },
-      h("button", { class: "primary", disabled: !isDirty || busy.has("save-" + dev.id), onclick: () => doSave(dev) }, busy.has("save-" + dev.id) ? "Saving… (checking CPUs)" : "Save"),
-      h("button", { disabled: sel.size === 0 || isDirty || busy.has("mk-" + dev.id), title: "Move this TV's own apps into a new set that this TV uses", onclick: () => doMakeSet(dev) }, "Make a set from these apps"),
-      h("span", { class: "sub" }, isDirty ? "Unsaved changes. Saving never installs anything." : "Saved. Installs happen on the next run."))),
-    noteBlock(note),
-    (state.warnings || []).some(w => w.device === dev.name) ? h("ul", { class: "problems" }, (state.warnings || []).filter(w => w.device === dev.name).map(w => h("li", {}, "Won't be installed: " + w.reason))) : null,
-    last.length ? h("ul", { class: "results" }, last.map(r => h("li", { class: r.ok ? "ok" : "bad" }, r.message))) : null);
-}
+  const pairBusy = busy.has("pair-" + dev.id);
+  const pairForm = ui.pair[dev.id] ? h("div", { class: "row gap-top" },
+    h("span", { class: "sub" }, "On the TV choose “Pair device with pairing code”. The port fills in when the TV is advertising it; otherwise type it from that screen, with the code:"),
+    textField("pp-" + dev.id, "Pairing port", "pairing port", { inputmode: "numeric", style: "width:130px" }),
+    textField("pc-" + dev.id, "Six-digit pairing code", "6-digit code", { inputmode: "numeric", style: "width:120px",
+      oninput: ev => { ev.target.value = ev.target.value.replace(/\D/g, "").slice(0, 6); fields["pc-" + dev.id] = ev.target.value; } }),
+    h("button", { id: "dopair-" + dev.id, disabled: pairBusy, onclick: () => doPair(dev) }, pairBusy ? "Pairing…" : "Pair")) : null;
 
-// ---- app sets ----
-function draftFor(set) {
-  if (!setDraft[set.id]) {
-    const m = new Map(); for (const c of set.apps || []) m.set(c.package, c.source);
-    const users = (state.devices || []).filter(d => (d.sets || []).includes(set.id)).map(d => d.id);
-    setDraft[set.id] = { name: set.name, apps: m, devices: new Set(users), dirty: false };
-  }
-  return setDraft[set.id];
-}
-
-// a collapsed one-line summary per set; the editor opens on demand (and stays open while edited)
-function setDetails(st) {
-  const d = draftFor(st);
-  const users = (state.devices || []).filter(x => d.devices.has(x.id)).map(x => x.name);
-  return h("details", { class: "setbox", open: !!setOpen[st.id] || d.dirty || !!setNotes[st.id], ontoggle: ev => { setOpen[st.id] = ev.target.open; } },
-    h("summary", {}, h("strong", {}, st.name), " · " + (((st.apps || []).length === 1) ? "1 app" : (st.apps || []).length + " apps") + " · " + (users.length ? "used by " + users.join(", ") : "not used by any TV yet")),
-    setEditor(st, false));
-}
-
-function setEditor(set, isNew) {
-  const d = draftFor(set);
-  const touch = f => { f(); d.dirty = true; render(); };
-  const usedBy = (state.devices || []);
-  return h("div", { class: isNew ? "setbox" : "seted" },
-    h("div", { class: "row" },
-      h("input", { type: "text", value: d.name, maxlength: 60, placeholder: "Set name (Streaming)", style: "min-width:200px",
-        oninput: ev => { d.name = ev.target.value; d.dirty = true; const b = document.getElementById("save-" + set.id); if (b) b.disabled = false; } }),
+  const testing = busy.has("test-" + dev.id);
+  const saving = busy.has("save-" + dev.id);
+  return h("section", { class: "card", id: "dev-" + dev.id },
+    h("div", { class: "row tight" },
+      h("strong", {}, h("span", { class: "dot " + (last.length ? (offline ? "bad" : "ok") : "") }), dev.name),
+      h("span", { class: "sub" }, dev.host), pairChip, cpu, helper, expiryChip),
+    h("div", { class: "row gap-top" },
+      h("button", { id: "run-" + dev.id, disabled: busy.has("run-" + dev.id), onclick: () => doRun(dev.id, dev.name) }, "Run now"),
+      h("button", { id: "test-" + dev.id, disabled: testing, title: "Looks at the network only: nothing connects to the TV, so it shows no notice", onclick: () => doTest(dev, false) }, "Test"),
+      h("button", { id: "ftest-" + dev.id, disabled: testing, title: "Really connects: checks the pairing, reads the CPU and updates the boot helper. The TV shows its 'debugging connected' notice.", onclick: () => doTest(dev, true) }, "Full test"),
       h("span", { class: "grow" }),
-      isNew ? h("button", { onclick: () => { delete setDraft[set.id]; render(); } }, "Cancel")
-            : h("button", { class: "danger", onclick: () => doRemoveSet(set) }, "Delete set")),
-    h("div", { class: "sub", style: "margin-top:6px" }, "Used by"),
-    h("div", { class: "checks" }, usedBy.length ? usedBy.map(dv => h("label", {},
-      h("input", { type: "checkbox", checked: d.devices.has(dv.id), onchange: ev => touch(() => { ev.target.checked ? d.devices.add(dv.id) : d.devices.delete(dv.id); }) }),
-      " " + dv.name)) : h("span", { class: "sub" }, "Add a device first")),
-    appGrid("s-" + set.id, d.apps, null, null, m => touch(() => { d.apps = m; })),
-    h("div", { class: "row" },
-      h("button", { class: "primary", id: "save-" + set.id, disabled: (!isNew && !d.dirty) || busy.has("set-" + set.id), onclick: () => doSaveSet(set, isNew) }, busy.has("set-" + set.id) ? "Saving… (checking CPUs)" : (isNew ? "Create set" : "Save set")),
-      h("span", { class: "sub" }, "Saving pushes the apps to every TV ticked above on its next run.")),
-    noteBlock(setNotes[set.id]));
-}
-
-function setsCard() {
-  const sets = state.sets || [];
-  const creating = !!setDraft["__new"];
-  return [
-    h("div", { class: "row" },
-      h("strong", { class: "grow" }, "App sets"),
-      creating ? null : h("button", { onclick: () => { setDraft["__new"] = { name: "", apps: new Map(), devices: new Set(), dirty: true }; render(); } }, "New set")),
-    h("div", { class: "sub" }, "Pick apps once, then give the set to several TVs. A TV that cannot run an app in a set is refused when you save, with the reason."),
-    creating ? setEditor({ id: "__new", name: "", apps: [] }, true) : null,
-    sets.length ? sets.map(st => setDetails(st)) : (creating ? null : h("div", { class: "sub", style: "margin-top:8px" }, "No sets yet.")),
-  ];
-}
-
-function sourcesCard() {
-  const rows = (state.sources || []).map(src => h("div", { class: "src" },
-    h("span", { class: "grow" },
-      h("strong", {}, src.repo),
-      src.prerelease ? h("span", { class: "chip" }, "pre-releases") : null,
-      src.allow_phone ? h("span", { class: "chip warn" }, "allows phone apps") : null,
-      h("span", { class: "meta" }, src.error ? "problem: " + src.error : ((src.tag || "not loaded yet") + " · " + src.apps + " apps")),
-      src.warning ? h("span", { class: "meta msg bad" }, "unreachable, using its last good bundle. If it is gone for good, remove it. (" + src.warning + ")") : null),
-    h("button", { class: "danger", onclick: () => doRemoveSource(src) }, "Remove")));
-
-  const owners = (state.allowed_owners || []);
-  return [
-    h("strong", {}, "Patch sources"),
-    h("div", { class: "sub" }, "GitHub repositories that publish Morphe patch bundles. Each one adds the apps it can patch."),
-    h("div", { style: "margin-top:8px" }, rows.length ? rows : h("div", { class: "sub" }, "No patch repositories yet. Add one below to see which apps you can patch.")),
-    h("div", { class: "row", style: "margin-top:10px" },
-      h("input", { type: "text", id: "newrepo", placeholder: "owner/repository", maxlength: 201, style: "min-width:220px" }),
-      h("label", { class: "sub" }, h("input", { type: "checkbox", id: "newpre" }), " include pre-releases"),
-      h("label", { class: "sub" }, h("input", { type: "checkbox", id: "newphone" }), " allow phone apps"),
-      h("button", { onclick: doAddSource }, "Add repository")),
-    h("div", { class: "warnbox" },
-      h("label", {}, h("input", { type: "checkbox", id: "newtrust" }),
-        " I trust this repository. Its patches run on this server (which holds your signing key) and the patched apps are installed on my TVs. Only add repositories you would run code from."),
-      owners.length ? h("div", { class: "sub" }, "Only these owners are allowed: " + owners.join(", ")) : null),
-    sourceNote ? h("div", { class: "msg " + (sourceNote.ok ? "ok" : "bad") }, sourceNote.text) : null,
-  ];
-}
-
-function render() {
-  if (!state) return;
-  const st = state.status || {};
-  const tags = (state.sources || []).map(s => s.tag).filter(Boolean);
-  document.getElementById("sub").textContent =
-    "patches " + (tags.length ? tags.join(" · ") : (st.patches_version || "?")) + " · " + (st.running ? "running…" : (st.finished_at && !st.finished_at.startsWith("0001") ? "last run " + when(st.finished_at) : "no run yet")) +
-    (state.version ? " · " + state.version : "");
-  document.getElementById("runall").disabled = !!st.running || busy.has("run-");
-  const lr = state.learning || {};
-  document.getElementById("learning").textContent = (lr.pending || []).length
-    ? "Checking which CPUs these apps have builds for: " + lr.pending.join(", ") + " (one APKMirror page at a time, so it takes a while)."
-    : (lr.paused_until && !lr.paused_until.startsWith("0001") ? "APKMirror asked us to slow down; CPU checks resume at " + new Date(lr.paused_until).toLocaleTimeString() + "." : "");
-  const box = document.getElementById("devices");
-  // The pair form lives inside a device card, and every card is rebuilt below, so a port and code
-  // typed into it would be thrown away by any poll that redraws (every 1.5s while a run or a CPU
-  // check is going). Carry the values, the focus and the caret across the rebuild. Only the pair
-  // form's own fields: the app checkboxes take their state from dirty/dirtySets, and restoring
-  // those from the DOM would bring back selections the render had just dropped.
-  const keepPair = [...box.querySelectorAll('input[id^="pp-"], input[id^="pc-"]')].map(e => [e.id, e.value]);
-  const focused = document.activeElement && /^p[pc]-/.test(document.activeElement.id || "")
-    ? [document.activeElement.id, document.activeElement.selectionStart] : null;
-  box.replaceChildren(...((state.devices || []).length
-    ? state.devices.map(deviceCard)
-    : [h("div", { class: "card empty" }, "No devices yet. Add one below.")]));
-  for (const [id, v] of keepPair) { const e = document.getElementById(id); if (e) e.value = v; }
-  if (focused) {
-    const e = document.getElementById(focused[0]);
-    if (e) { e.focus(); try { e.setSelectionRange(focused[1], focused[1]); } catch (err) { /* number inputs refuse a caret */ } }
-  }
-  // keep what is being typed in the add-repository form
-  const keep = ["newrepo", "newpre", "newphone", "newtrust"].map(id => { const e = document.getElementById(id); return e ? [id, e.type === "checkbox" ? e.checked : e.value] : null; }).filter(Boolean);
-  document.getElementById("sources").replaceChildren(...sourcesCard().filter(Boolean));
-  const keepName = document.activeElement && document.activeElement.type === "text" && document.getElementById("sets").contains(document.activeElement) ? document.activeElement : null;
-  if (!keepName) document.getElementById("sets").replaceChildren(...setsCard().flat().filter(Boolean));
-  for (const [id, v] of keep) { const e = document.getElementById(id); if (e) { if (e.type === "checkbox") e.checked = v; else e.value = v; } }
-}
-
-// the one polling loop: quick while something is happening, slow otherwise, paused when hidden
-function schedule() {
-  clearTimeout(pollTimer);
-  const busyNow = state && ((state.status && state.status.running) || (state.learning && (state.learning.pending || []).length));
-  pollTimer = setTimeout(refresh, document.hidden ? 30000 : (busyNow ? 1500 : 3000));
-}
-async function refresh() {
-  await reload(false);
-  if (document.getElementById("logbox").open) loadLog();
-}
-document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
-
-async function loadLog() {
-  try { const l = await api("GET", "/api/log"); const pre = document.getElementById("log"); pre.textContent = l.lines.join("\n") || "(empty)"; pre.scrollTop = pre.scrollHeight; } catch (e) { /* ignore */ }
+      h("button", { id: "pair-" + dev.id, onclick: () => { ui.pair[dev.id] = !ui.pair[dev.id]; render(); if (ui.pair[dev.id]) findPairPort(dev); } }, "Pair…"),
+      h("button", { class: "danger", id: "rm-" + dev.id, disabled: busy.has("rm-" + dev.id), onclick: () => doRemove(dev) }, "Remove")),
+    pairForm,
+    msgLine(scope),
+    det("apps:" + dev.id, true, dirty || saving, { class: "sub-details" }, appsSummary(dev),
+      setChecks,
+      h("div", { class: "sub gap-top" }, (server.sets || []).length ? "Extra apps for this TV only" : "Apps for this TV (create an app set to give the same apps to several TVs)"),
+      grid,
+      h("div", { class: "row" },
+        h("button", { class: "primary", id: "save-" + dev.id, disabled: !dirty || saving, onclick: () => doSave(dev) }, saving ? "Saving… (checking CPUs)" : "Save"),
+        h("button", { id: "mkset-" + dev.id, disabled: serverApps(dev).size === 0 || dirty || busy.has("mk-" + dev.id), title: "Move this TV's own apps into a new set that this TV uses", onclick: () => doMakeSet(dev) }, "Make a set from these apps"),
+        h("span", { class: "sub" }, dirty ? "Unsaved changes. Saving never installs anything." : "Saved. Installs happen on the next run."))),
+    last.length ? det("last:" + dev.id, failed > 0, false, { class: "sub-details" },
+      h("span", {}, h("strong", {}, "Last run: "), failed ? plural(last.length - failed, "ok", "ok") + ", " + failed + " failed" : plural(last.length, "result", "results") + ", all ok"),
+      h("ul", { class: "list" }, last.map(r => h("li", { class: r.ok ? "ok" : "bad" }, r.message)))) : null,
+    warnings.length ? h("ul", { class: "list" }, warnings.map(w => h("li", { class: "warn" }, "Won't be installed: " + w.reason))) : null);
 }
 
 async function doSave(dev) {
-  let unchecked = [];
-  try {
-    if (dirtySets[dev.id]) {
-      const r = await api("PUT", "/api/devices/" + encodeURIComponent(dev.id) + "/sets", { sets: [...dirtySets[dev.id]] });
+  await act({ key: "save-" + dev.id, scope: "device:" + dev.id, run: async () => {
+    let unchecked = [];
+    const d = drafts.dev[dev.id] || {};
+    if (d.sets) {
+      const r = await api("PUT", "/api/devices/" + encodeURIComponent(dev.id) + "/sets", { sets: [...d.sets] });
       unchecked = unchecked.concat(r.unchecked || []);
-      delete dirtySets[dev.id];
+      delete d.sets;
     }
-    if (dirty[dev.id]) {
-      const apps = [...dirty[dev.id]].map(([pkg, src]) => ({ package: pkg, source: src }));
-      const r = await api("PUT", "/api/devices/" + encodeURIComponent(dev.id) + "/apps", { apps });
+    if (d.apps) {
+      const r = await api("PUT", "/api/devices/" + encodeURIComponent(dev.id) + "/apps", { apps: toChoices(d.apps) });
       unchecked = unchecked.concat(r.unchecked || []);
-      delete dirty[dev.id];
+      delete d.apps;
     }
-    notes[dev.id] = { ok: true, text: "Saved.", unchecked };
-  } catch (e) { notes[dev.id] = noteFrom(e); }
-  await reload(true);
+    if (!d.apps && !d.sets) delete drafts.dev[dev.id];
+    return { unchecked };
+  }, ok: "Saved. Installs happen on the next run." });
 }
 
 async function doMakeSet(dev) {
-  const name = prompt("Name for the new set (the apps you ticked for " + dev.name + " move into it):");
+  const name = prompt("Name for the new set (the apps ticked for " + dev.name + " move into it):");
   if (!name) return;
-  const apps = [...selection(dev)].map(([pkg, src]) => ({ package: pkg, source: src }));
-  try {
-    await api("POST", "/api/sets", { name, apps, devices: [dev.id] });
+  await act({ key: "mk-" + dev.id, scope: "device:" + dev.id, progress: "Creating the set…", run: async () => {
+    await api("POST", "/api/sets", { name, apps: toChoices(serverApps(dev)), devices: [dev.id] });
     await api("PUT", "/api/devices/" + encodeURIComponent(dev.id) + "/apps", { apps: [] });
-    delete dirty[dev.id];
-    notes[dev.id] = { ok: true, text: "Created the set “" + name + "”. This TV uses it now; give it to other TVs under App sets." };
-  } catch (e) { notes[dev.id] = noteFrom(e); }
-  await reload(true);
+  }, ok: "Created the set “" + name + "”. This TV uses it now; give it to other TVs under App sets." });
 }
 
-async function doSaveSet(set, isNew) {
-  const d = setDraft[set.id];
-  const body = { name: d.name, apps: [...d.apps].map(([pkg, src]) => ({ package: pkg, source: src })), devices: [...d.devices] };
-  setNotes[set.id] = { ok: true, text: "Saving… (checking each TV can run these apps)" }; render();
-  try {
-    const r = isNew ? await api("POST", "/api/sets", body) : await api("PUT", "/api/sets/" + encodeURIComponent(set.id), body);
-    delete setDraft[set.id];
-    delete setNotes[set.id];
-    if (r.unchecked && r.unchecked.length) setNotes[isNew ? (r.set || {}).id : set.id] = { ok: true, text: "Saved.", unchecked: r.unchecked };
-    for (const k of Object.keys(dirtySets)) delete dirtySets[k];
-  } catch (e) { setNotes[set.id] = noteFrom(e); }
-  await reload(true);
-}
-
-async function doRemoveSet(set) {
-  const users = (state.devices || []).filter(d => (d.sets || []).includes(set.id)).map(d => d.name);
-  if (!confirm("Delete the set “" + set.name + "”?" + (users.length ? " It is used by " + users.join(", ") + ". Their apps from this set are no longer kept up to date (nothing is uninstalled)." : ""))) return;
-  try { await api("DELETE", "/api/sets/" + encodeURIComponent(set.id)); delete setDraft[set.id]; } catch (e) { alert(e.message); }
-  await reload(true);
-}
-
-async function doRun(device) {
-  try { await api("POST", "/api/run", { device: device || "", force: document.getElementById("force").checked }); } catch (e) { alert(e.message); }
-  await reload(true);
+async function doRun(deviceId, name) {
+  await act({ key: "run-" + (deviceId || ""), scope: deviceId ? "device:" + deviceId : "run", run: () =>
+    api("POST", "/api/run", { device: deviceId || "", force: !!fields.force }),
+  ok: name ? "Run queued for " + name + "." : "Run queued for every TV." });
 }
 
 async function doTest(dev, full) {
-  notes[dev.id] = { ok: true, text: full ? "Connecting… (up to a minute if the TV is off)" : "Looking for the TV… (up to a minute if it is off)" }; safeRender();
-  try {
-    const r = await api("POST", "/api/devices/" + encodeURIComponent(dev.id) + "/test" + (full ? "?full=1" : ""));
-    notes[dev.id] = { ok: true, text: r.message };
-  } catch (e) { notes[dev.id] = noteFrom(e); }
+  await act({ key: "test-" + dev.id, scope: "device:" + dev.id,
+    progress: full ? "Connecting… (up to a minute if the TV is off)" : "Looking for the TV… (up to a minute if it is off)",
+    run: () => api("POST", "/api/devices/" + encodeURIComponent(dev.id) + "/test" + (full ? "?full=1" : "")),
+    ok: r => r.message });
 }
 
 // The TV advertises its pairing port while the dialog is open, so it does not have to be typed.
 async function findPairPort(dev) {
   try {
     const r = await api("GET", "/api/devices/" + encodeURIComponent(dev.id) + "/pairport");
-    const box = document.getElementById("pp-" + dev.id);
-    if (!box) return;
-    if (r.port > 0 && !box.value) {
-      box.value = r.port;
-      // Move on to the code, which is the only thing left to type — and a focused field is also
-      // what stops a poll redrawing the form out from under it.
-      const codeBox = document.getElementById("pc-" + dev.id);
-      if (codeBox) codeBox.focus();
-    } else if (!r.port && !box.value) {
-      notes[dev.id] = { ok: true, text: "Nothing is advertising a pairing port yet: open “Pair device with pairing code” on the TV, or type the port from that screen." };
-      render();
-    }
+    if (!ui.pair[dev.id] || fields["pp-" + dev.id]) return;
+    if (r.port > 0) { fields["pp-" + dev.id] = String(r.port); focusId = "pc-" + dev.id; render(); }
+    else { messages["device:" + dev.id] = { kind: "info", text: "Nothing is advertising a pairing port yet. Open “Pair device with pairing code” on the TV, or type the port from that screen.", problems: [], unchecked: [], at: ++stamp }; render(); }
   } catch (e) { /* typing it in still works */ }
 }
 
 async function doPair(dev) {
-  // Take what the TV screen shows, not only what a tidy person types: that screen gives the port
-  // as "10.0.0.7:37123", and some firmware spaces the code out as "123 456".
-  const raw = document.getElementById("pp-" + dev.id).value.trim();
+  // Take what the TV screen shows: the port as "10.0.0.7:37123", and a code some firmware spaces out as "123 456".
+  const raw = (fields["pp-" + dev.id] || "").trim();
   const port = parseInt(raw.includes(":") ? raw.slice(raw.lastIndexOf(":") + 1) : raw, 10);
-  const code = document.getElementById("pc-" + dev.id).value.replace(/\D/g, "");
-  // Checked here so a blank field says so plainly instead of reaching the server as a zero.
+  const code = (fields["pc-" + dev.id] || "").replace(/\D/g, "");
+  const scope = "device:" + dev.id;
   if (!(port >= 1024 && port <= 65535)) {
-    notes[dev.id] = { ok: false, text: "Enter the pairing port from the TV's “Pair device with pairing code” screen (1024-65535)" + (raw ? ", not “" + raw + "”" : "") + "." };
-    render(); return;
+    say(scope, "error", "Enter the pairing port from the TV's “Pair device with pairing code” screen (1024-65535)" + (raw ? ", not “" + raw + "”" : "") + ".");
+    focusId = "pp-" + dev.id; render(); return;
   }
   if (code.length !== 6) {
-    notes[dev.id] = { ok: false, text: "Enter the six-digit code the TV is showing." };
-    render(); return;
+    say(scope, "error", "Enter the six-digit code the TV is showing.");
+    focusId = "pc-" + dev.id; render(); return;
   }
-  notes[dev.id] = { ok: true, text: "Pairing…" }; render();
-  try {
+  await act({ key: "pair-" + dev.id, scope, progress: "Pairing…", run: async () => {
     const r = await api("POST", "/api/devices/" + encodeURIComponent(dev.id) + "/pair", { pair_port: port, code });
-    notes[dev.id] = { ok: true, text: r.message }; openPair[dev.id] = false;
-  } catch (e) { notes[dev.id] = noteFrom(e); }
-  render();
+    ui.pair[dev.id] = false; delete fields["pp-" + dev.id]; delete fields["pc-" + dev.id];
+    return r;
+  }, ok: r => r.message });
 }
 
 async function doRemove(dev) {
   if (!confirm("Remove " + dev.name + "? Nothing is uninstalled from the TV.")) return;
-  try { await api("DELETE", "/api/devices/" + encodeURIComponent(dev.id)); delete dirty[dev.id]; } catch (e) { alert(e.message); }
-  await reload(true);
+  await act({ key: "rm-" + dev.id, scope: "device:" + dev.id, run: () => api("DELETE", "/api/devices/" + encodeURIComponent(dev.id)) });
+}
+
+async function doAddDevice() {
+  await act({ key: "adddev", scope: "add-device", run: async () => {
+    const d = await api("POST", "/api/devices", { name: fields.newname || "", host: fields.newhost || "" });
+    delete fields.newname; delete fields.newhost;
+    ui.pair[d.id] = true;
+  }, ok: "Added. Use “Pair…” on its card next." });
+}
+
+// ---- app sets ----
+function setEditor(st, isNew) {
+  const scope = "set:" + st.id;
+  const d = setView(st);
+  const dirty = isNew || !!drafts.set[st.id];
+  const saving = busy.has("set-" + st.id);
+  const devices = server.devices || [];
+  return h("div", { class: "stack gap-top" },
+    h("div", { class: "row" },
+      h("input", { type: "text", id: "sn-" + st.id, "aria-label": "Set name", value: d.name, maxlength: 60, placeholder: "Set name (Streaming)", style: "min-width:200px",
+        oninput: ev => editSet(st, x => { x.name = ev.target.value; }) }),
+      h("span", { class: "grow" }),
+      isNew ? h("button", { id: "cancel-new", onclick: () => { delete drafts.set.__new; ui.creatingSet = false; delete messages["set:__new"]; render(); } }, "Cancel")
+            : h("button", { class: "danger", id: "delset-" + st.id, disabled: busy.has("rmset-" + st.id), onclick: () => doRemoveSet(st) }, "Delete set")),
+    h("div", {},
+      h("div", { class: "sub" }, "Used by"),
+      h("div", { class: "checks" }, devices.length ? devices.map(dv => h("label", {},
+        h("input", { type: "checkbox", id: "su-" + st.id + "-" + dv.id, checked: d.devices.has(dv.id), onchange: ev => editSet(st, x => { ev.target.checked ? x.devices.add(dv.id) : x.devices.delete(dv.id); }) }),
+        " " + dv.name)) : h("span", { class: "sub" }, "Add a device first"))),
+    appGrid("s-" + st.id, d.apps, null, null, m => editSet(st, x => { x.apps = m; })),
+    h("div", { class: "row" },
+      h("button", { class: "primary", id: "saveset-" + st.id, disabled: !dirty || saving, onclick: () => doSaveSet(st, isNew) }, saving ? "Saving… (checking CPUs)" : (isNew ? "Create set" : "Save set")),
+      h("span", { class: "sub" }, "Saving pushes the apps to every TV ticked above on its next run.")),
+    msgLine(scope));
+}
+
+function setsSection() {
+  const sets = server.sets || [];
+  return h("section", { class: "sec" },
+    h("div", { class: "row sec-head" },
+      h("h2", { class: "grow" }, "App sets"),
+      ui.creatingSet ? null : h("button", { id: "newset", onclick: () => { ui.creatingSet = true; drafts.set.__new = { name: "", apps: new Map(), devices: new Set() }; focusId = "sn-__new"; render(); } }, "New set")),
+    h("div", { class: "sub" }, "Pick apps once, then give the set to several TVs. A TV that cannot run an app in a set is refused when you save, with the reason."),
+    h("div", { class: "card gap-top" },
+      ui.creatingSet ? setEditor({ id: "__new", name: "", apps: [], devices: [] }, true) : null,
+      sets.map(st => {
+        const users = (st.devices || []).map(id => (deviceById(id) || {}).name).filter(Boolean);
+        const d = drafts.set[st.id];
+        return det("set:" + st.id, false, !!d || busy.has("set-" + st.id) || (messages["set:" + st.id] && messages["set:" + st.id].kind === "error"), { class: "set" },
+          h("span", {}, h("strong", {}, st.name), " · " + plural((st.apps || []).length, "app", "apps") + " · " + (users.length ? "used by " + users.join(", ") : "not used by any TV yet")),
+          setEditor(st, false));
+      }),
+      !sets.length && !ui.creatingSet ? h("div", { class: "sub" }, "No sets yet.") : null));
+}
+
+async function doSaveSet(st, isNew) {
+  const d = setView(st);
+  const body = { name: d.name, apps: toChoices(d.apps), devices: [...d.devices] };
+  await act({ key: "set-" + st.id, scope: "set:" + st.id, progress: "Saving… (checking each TV can run these apps)", run: async () => {
+    const r = isNew ? await api("POST", "/api/sets", body) : await api("PUT", "/api/sets/" + encodeURIComponent(st.id), body);
+    delete drafts.set[st.id];
+    if (isNew) { ui.creatingSet = false; delete messages["set:__new"]; }
+    return r;
+  }, ok: isNew ? "Created." : "Saved." });
+}
+
+async function doRemoveSet(st) {
+  const users = (st.devices || []).map(id => (deviceById(id) || {}).name).filter(Boolean);
+  if (!confirm("Delete the set “" + st.name + "”?" + (users.length ? " It is used by " + users.join(", ") + ". Their apps from this set are no longer kept up to date (nothing is uninstalled)." : ""))) return;
+  await act({ key: "rmset-" + st.id, scope: "set:" + st.id, run: () => api("DELETE", "/api/sets/" + encodeURIComponent(st.id)) });
+}
+
+// ---- patch sources ----
+function sourcesSection() {
+  const rows = (server.sources || []).map(src => h("div", { class: "src" },
+    h("div", { class: "row" },
+      h("strong", { class: "grow" }, src.repo),
+      src.prerelease ? h("span", { class: "chip" }, "pre-releases") : null,
+      src.allow_phone ? h("span", { class: "chip warn" }, "allows phone apps") : null,
+      h("button", { class: "danger", id: "rmsrc-" + src.id, disabled: busy.has("rmsrc-" + src.id), onclick: () => doRemoveSource(src) }, "Remove")),
+    h("span", { class: "meta" }, src.error ? "Problem: " + src.error : ((src.tag || "Not loaded yet") + " · " + plural(src.apps, "app", "apps"))),
+    src.warning ? h("span", { class: "meta", style: "color:var(--bad)" }, "Unreachable, using its last good bundle. If it is gone for good, remove it. (" + src.warning + ")") : null));
+  const owners = server.allowed_owners || [];
+  const adding = busy.has("addsrc");
+  return h("section", { class: "sec" },
+    h("h2", { class: "sec-head" }, "Patch sources"),
+    h("div", { class: "sub" }, "GitHub repositories that publish Morphe patch bundles. Each one adds the apps it can patch."),
+    h("div", { class: "card gap-top" },
+      rows.length ? rows : h("div", { class: "sub" }, "No patch repositories yet. Add one below to see which apps you can patch."),
+      h("div", { class: "row gap-top" },
+        textField("newrepo", "Repository", "owner/repository", { maxlength: 201, style: "min-width:220px" }),
+        checkField("newpre", "include pre-releases"),
+        checkField("newphone", "allow phone apps"),
+        h("button", { id: "addsrc", disabled: adding, onclick: doAddSource }, adding ? "Adding…" : "Add repository")),
+      h("div", { class: "warnbox" },
+        h("label", {}, h("input", { type: "checkbox", id: "newtrust", checked: !!fields.newtrust, onchange: ev => { fields.newtrust = ev.target.checked; } }),
+          " I trust this repository. Its patches run on this server (which holds your signing key) and the patched apps are installed on my TVs. Only add repositories you would run code from."),
+        owners.length ? h("div", { class: "sub" }, "Only these owners are allowed: " + owners.join(", ")) : null),
+      msgLine("sources")));
 }
 
 async function doAddSource() {
-  const body = {
-    repo: document.getElementById("newrepo").value,
-    prerelease: document.getElementById("newpre").checked,
-    allow_phone: document.getElementById("newphone").checked,
-    trust: document.getElementById("newtrust").checked,
-  };
-  sourceNote = { ok: true, text: "Checking the repository…" }; render();
-  try {
-    const s = await api("POST", "/api/sources", body);
-    sourceNote = { ok: true, text: "Added " + s.repo + ". Its apps appear on the device cards in a moment." };
-    for (const id of ["newrepo", "newpre", "newphone", "newtrust"]) { const e = document.getElementById(id); if (e) { if (e.type === "checkbox") e.checked = false; else e.value = ""; } }
-  } catch (e) { sourceNote = { ok: false, text: e.message }; }
-  await reload(true);
+  await act({ key: "addsrc", scope: "sources", progress: "Checking the repository…", run: async () => {
+    const s = await api("POST", "/api/sources", { repo: fields.newrepo || "", prerelease: !!fields.newpre, allow_phone: !!fields.newphone, trust: !!fields.newtrust });
+    for (const k of ["newrepo", "newpre", "newphone", "newtrust"]) delete fields[k];
+    return s;
+  }, ok: s => "Added " + s.repo + ". Its apps appear on the device cards in a moment." });
 }
 
 async function doRemoveSource(src) {
   if (!confirm("Remove " + src.repo + "? Apps on your devices that use its patches are dropped from the lists (nothing is uninstalled).")) return;
-  try {
-    const r = await api("DELETE", "/api/sources/" + encodeURIComponent(src.id));
-    sourceNote = { ok: true, text: "Removed " + src.repo + (r.apps_dropped ? "; " + r.apps_dropped + " app choice(s) dropped." : ".") };
-    for (const k of Object.keys(dirty)) delete dirty[k];
-  } catch (e) { sourceNote = { ok: false, text: e.message }; }
-  await reload(true);
+  await act({ key: "rmsrc-" + src.id, scope: "sources", run: () => api("DELETE", "/api/sources/" + encodeURIComponent(src.id)),
+    ok: r => "Removed " + src.repo + (r.apps_dropped ? "; " + plural(r.apps_dropped, "app choice", "app choices") + " dropped." : ".") });
 }
 
-// force: redraw even if nothing changed (after an action). A poll never redraws while the user is
-// typing in a field, so a pairing code is not wiped.
-async function reload(force) {
-  try {
-    const r = await fetch("/api/state", { cache: "no-cache" });
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    const text = await r.text();
-    showError("");
-    const typing = document.activeElement && ["text", "number"].includes(document.activeElement.type) && document.activeElement.id && document.activeElement.closest("#devices");
-    if (force || (text !== lastText && !typing)) {
-      state = JSON.parse(text); lastText = text;
-      safeRender();
+// ---- page ----
+function headerBlock() {
+  const st = server.status || {};
+  const tags = (server.sources || []).map(s => s.tag).filter(Boolean);
+  const lastRun = st.running ? "running…" : (st.finished_at && !st.finished_at.startsWith("0001") ? "last run " + when(st.finished_at) : "no run yet");
+  const lr = server.learning || {};
+  const learning = (lr.pending || []).length
+    ? "Checking which CPUs these apps have builds for: " + lr.pending.join(", ") + " (one APKMirror page at a time, so it takes a while)."
+    : (lr.paused_until && !lr.paused_until.startsWith("0001") ? "APKMirror asked us to slow down; CPU checks resume at " + new Date(lr.paused_until).toLocaleTimeString() + "." : "");
+  return h("header", {},
+    h("div", { class: "row" },
+      h("div", { class: "grow" },
+        h("h1", {}, "TV Patcher"),
+        h("div", { class: "sub" }, "patches " + (tags.length ? tags.join(" · ") : (st.patches_version || "?")) + " · " + lastRun + (server.version ? " · " + server.version : ""))),
+      h("label", { class: "sub" }, h("input", { type: "checkbox", id: "force", checked: !!fields.force, onchange: ev => { fields.force = ev.target.checked; } }), " reinstall everything"),
+      h("button", { class: "primary", id: "runall", disabled: !!st.running || busy.has("run-"), onclick: () => doRun("") }, st.running ? "Running…" : "Run now")),
+    learning ? h("div", { class: "sub gap-top" }, learning) : null,
+    msgLine("run"));
+}
+
+function gettingStarted() {
+  const devs = server.devices || [];
+  const steps = [
+    ["Add a patch repository under Patch sources.", (server.sources || []).length > 0],
+    ["Add your TV under Devices.", devs.length > 0],
+    ["Press Pair… on its card and follow the prompt.", devs.some(d => d.info && d.info.paired_at)],
+    ["Tick apps and press Save.", devs.some(d => (d.effective || []).length > 0)],
+  ];
+  if (steps.every(s => s[1])) return null;
+  return h("section", { class: "card sec" },
+    h("h2", { class: "sec-head" }, "Getting started"),
+    h("ol", { class: "steps" }, steps.map(([text, done]) => h("li", { class: done ? "done" : "" }, text))),
+    h("div", { class: "sub gap-top" }, "Then press Run now. Saving never installs anything; installs happen on a run."));
+}
+
+function devicesSection() {
+  const devs = server.devices || [];
+  return h("section", { class: "sec" },
+    h("h2", { class: "sec-head" }, "Devices"),
+    devs.length ? devs.map(deviceCard) : h("div", { class: "card empty" }, "No devices yet. Add one below."),
+    h("div", { class: "card" },
+      h("strong", {}, "Add a device"),
+      h("div", { class: "sub" }, "Turn on Developer options → Wireless debugging on the TV, then enter its IP address. Give the TV a fixed IP in your router."),
+      h("div", { class: "row gap-top" },
+        textField("newname", "Device name", "Name (Living room)", { maxlength: 60 }),
+        textField("newhost", "IP address", "IP address (10.0.0.6)", { maxlength: 253 }),
+        h("button", { id: "adddev", disabled: busy.has("adddev"), onclick: doAddDevice }, busy.has("adddev") ? "Adding…" : "Add")),
+      msgLine("add-device")));
+}
+
+function build() {
+  return [
+    headerBlock(),
+    fails >= 2 ? h("div", { class: "banner", role: "alert" }, "Can't reach TV Patcher. Retrying every few seconds.") : null,
+    pageBroken ? h("div", { class: "banner", role: "alert" }, "Something broke on this page. Reload it.") : null,
+    gettingStarted(),
+    devicesSection(),
+    setsSection(),
+    sourcesSection(),
+  ];
+}
+
+// Always redraw everything, then put focus, caret and scroll back, so typing is never lost.
+function render() {
+  if (!server) return;
+  const app = document.getElementById("app");
+  const ae = document.activeElement;
+  const inApp = ae && ae.id && app.contains(ae);
+  const fid = focusId || (inApp ? ae.id : null);
+  const caret = inApp && ae.id === fid && typeof ae.selectionStart === "number" ? [ae.selectionStart, ae.selectionEnd] : null;
+  const y = window.scrollY;
+  app.replaceChildren(...build().filter(Boolean));
+  if (fid) {
+    const e = document.getElementById(fid);
+    if (e) {
+      e.focus({ preventScroll: true });
+      if (caret) { try { e.setSelectionRange(caret[0], caret[1]); } catch (err) { /* inputs without a caret */ } }
     }
-  } catch (e) { showError("Cannot reach the server: " + e.message + " (retrying)"); }
-  schedule();
+  }
+  focusId = null;
+  window.scrollTo(0, y);
 }
+function safeRender() { try { render(); } catch (e) { pageBroken = true; console.error(e); } }
 
-document.getElementById("runall").addEventListener("click", () => doRun(""));
-document.getElementById("adddev").addEventListener("click", async () => {
-  const msg = document.getElementById("addmsg");
-  try {
-    const d = await api("POST", "/api/devices", { name: document.getElementById("newname").value, host: document.getElementById("newhost").value });
-    document.getElementById("newname").value = ""; document.getElementById("newhost").value = "";
-    msg.className = "msg ok"; msg.textContent = "Added. Use “Pair…” on its card next.";
-    openPair[d.id] = true;
-  } catch (e) { msg.className = "msg bad"; msg.textContent = e.message; }
-  await reload(true);
-});
 document.getElementById("logbox").addEventListener("toggle", ev => { if (ev.target.open) loadLog(); });
-refresh();
-
-// every action runs once at a time and ends with a reload
-doSave = once(d => "save-" + d.id, doSave);
-doMakeSet = once(d => "mk-" + d.id, doMakeSet);
-doSaveSet = once(set => "set-" + set.id, doSaveSet);
-doRemoveSet = once(set => "rmset-" + set.id, doRemoveSet);
-doRun = once(d => "run-" + (d || ""), doRun);
-doPair = once(d => "pair-" + d.id, doPair);
-doTest = once(d => "test-" + d.id, doTest);
-doRemove = once(d => "rm-" + d.id, doRemove);
-doAddSource = once(() => "addsrc", doAddSource);
-doRemoveSource = once(src => "rmsrc-" + src.id, doRemoveSource);
+load(true);
 </script>
 </body>
 </html>
