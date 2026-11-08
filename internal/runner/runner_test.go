@@ -39,16 +39,17 @@ type fakeADB struct {
 	connects    int             // adb connect calls (each one makes the real TV show a notice)
 	playing     map[string]bool // host -> something is playing
 	playingErr  error
-	props       map[string]string // getprop/setprop
-	settings    map[string]string // "settings get/put global"; a real TV starts with no key expiry
-	refuses     map[string]bool   // global settings this TV will not keep
-	noSetprop   bool              // the adb shell may not write properties (Android 14 on some TVs)
-	disconnects []string          // "host:port" the adb server was told to forget
-	devicePort  int               // what the adb server says it is already talking to
-	pairingPort int               // what the TV advertises while its pairing dialog is open
-	tcpip       []string          // "serial port"
-	jobsDump    string            // what "dumpsys jobscheduler" says
-	helperLog   string            // what "logcat -s BootAdb" says
+	props       map[string]string       // getprop/setprop
+	settings    map[string]string       // "settings get/put global"; a real TV starts with no key expiry
+	refuses     map[string]bool         // global settings this TV will not keep
+	openPorts   map[string]map[int]bool // host -> extra ports that answer (a listening fixed port)
+	noSetprop   bool                    // the adb shell may not write properties (Android 14 on some TVs)
+	disconnects []string                // "host:port" the adb server was told to forget
+	devicePort  int                     // what the adb server says it is already talking to
+	pairingPort int                     // what the TV advertises while its pairing dialog is open
+	tcpip       []string                // "serial port"
+	jobsDump    string                  // what "dumpsys jobscheduler" says
+	helperLog   string                  // what "logcat -s BootAdb" says
 }
 
 func (f *fakeADB) Playing(ctx context.Context, s string) (bool, error) {
@@ -66,6 +67,20 @@ func newADB() *fakeADB {
 
 func (f *fakeADB) Reachable(ctx context.Context, host string, known ...int) (int, bool) {
 	return 40000, !f.down[host]
+}
+
+// Probe answers like a TV whose only open port is the random wireless-debugging one (40000),
+// unless the test opened another with openPorts.
+func (f *fakeADB) Probe(ctx context.Context, host string, known ...int) (int, bool) {
+	if f.down[host] {
+		return 0, false
+	}
+	for _, p := range known {
+		if f.openPorts[host][p] {
+			return p, true
+		}
+	}
+	return 40000, true
 }
 func (f *fakeADB) Connect(ctx context.Context, host string, known ...int) (int, error) {
 	f.connects++

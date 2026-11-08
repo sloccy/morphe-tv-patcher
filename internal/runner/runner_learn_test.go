@@ -730,3 +730,102 @@ func TestAFullTestReportsWhatTheHelperIsDoing(t *testing.T) {
 		t.Errorf("silence must read as silence: %+v", chk)
 	}
 }
+
+func watchRig(t *testing.T) (*rig, store.Device) {
+	rg, d := helperRig(t, 20261022)
+	rg.r.Cfg.TVFixedADBPort = 5555
+	rg.r.Cfg.WatchEvery = 5 * time.Minute
+	rg.r.Cfg.WatchAlertAfter = 15 * time.Minute
+	rg.adb.noSetprop = true                   // the Bedroom TV: the port only lasts until a restart
+	rg.r.Run(context.Background(), Options{}) // a first connection, so the TV is known
+	rg.adb.connects, rg.adb.tcpip = 0, nil
+	return rg, d
+}
+
+func TestTheWatchLeavesAListeningFixedPortAlone(t *testing.T) {
+	rg, d := watchRig(t)
+	rg.adb.openPorts = map[string]map[int]bool{d.Host: {5555: true}}
+	rg.r.watch(context.Background())
+	if got := rg.r.Status().Reach[d.ID]; got.State != "fixed" || got.Port != 5555 {
+		t.Fatalf("%+v", got)
+	}
+	if rg.adb.connects != 0 {
+		t.Error("a TV that answers on the fixed port must not be connected to: it would show a notice")
+	}
+}
+
+func TestTheWatchPutsTheFixedPortBackAfterARestart(t *testing.T) {
+	rg, d := watchRig(t)
+	rg.r.watch(context.Background()) // only the random port answers, as after a restart
+	got := rg.r.Status().Reach[d.ID]
+	if got.State != "wireless" || got.Restored.IsZero() {
+		t.Fatalf("%+v", got)
+	}
+	if rg.adb.connects != 1 || len(rg.adb.tcpip) != 1 {
+		t.Errorf("one session to restart adbd on the fixed port: connects=%d tcpip=%v", rg.adb.connects, rg.adb.tcpip)
+	}
+	rg.adb.openPorts = map[string]map[int]bool{d.Host: {5555: true}}
+	rg.r.watch(context.Background())
+	if got := rg.r.Status().Reach[d.ID]; got.State != "fixed" || got.Restored.IsZero() {
+		t.Errorf("the restore time is kept: %+v", got)
+	}
+	if rg.adb.connects != 1 {
+		t.Error("nothing more to do once the fixed port answers")
+	}
+}
+
+func TestTheWatchBacksOffFromATvThatWillNotTakeTheFixedPort(t *testing.T) {
+	rg, d := watchRig(t)
+	rg.adb.unpaired[d.Host] = true
+	now := time.Now()
+	rg.r.Now = func() time.Time { return now }
+	rg.r.watch(context.Background())
+	rg.r.watch(context.Background())
+	if rg.adb.connects != 1 {
+		t.Errorf("the second tick is inside the pause: %d", rg.adb.connects)
+	}
+	if got := rg.r.Status().Reach[d.ID]; got.Note == "" {
+		t.Errorf("say why: %+v", got)
+	}
+	now = now.Add(2 * time.Hour)
+	rg.r.watch(context.Background())
+	if rg.adb.connects != 2 {
+		t.Errorf("tries again after the pause: %d", rg.adb.connects)
+	}
+}
+
+func TestASilentTvIsReportedOnceAndWelcomedBack(t *testing.T) {
+	rg, d := watchRig(t)
+	var sent []string
+	rg.r.Notify = func(_ context.Context, title, body string) { sent = append(sent, title+": "+body) }
+	rg.adb.down[d.Host] = true
+	for range 2 { // 10 minutes: shorter than WatchAlertAfter
+		rg.r.watch(context.Background())
+	}
+	if len(sent) != 0 {
+		t.Fatalf("a TV that is merely off for a while is not an emergency: %v", sent)
+	}
+	rg.r.watch(context.Background()) // the third tick reaches 15 minutes
+	rg.r.watch(context.Background())
+	if len(sent) != 1 || !strings.Contains(sent[0], "Always allow on this network") {
+		t.Fatalf("once, and with what to do: %v", sent)
+	}
+	if got := rg.r.Status().Reach[d.ID]; got.State != "down" {
+		t.Errorf("%+v", got)
+	}
+	delete(rg.adb.down, d.Host)
+	rg.adb.openPorts = map[string]map[int]bool{d.Host: {5555: true}}
+	rg.r.watch(context.Background())
+	if len(sent) != 2 || !strings.Contains(sent[1], "answering again") {
+		t.Errorf("%v", sent)
+	}
+}
+
+func TestTheWatchCanBeTurnedOff(t *testing.T) {
+	rg, d := watchRig(t)
+	rg.r.Cfg.WatchEvery = 0
+	rg.r.watch(context.Background())
+	if _, ok := rg.r.Status().Reach[d.ID]; ok {
+		t.Error("WATCH_EVERY=0 means no watch")
+	}
+}

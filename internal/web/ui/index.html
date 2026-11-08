@@ -76,6 +76,8 @@
   .empty { color: var(--muted); text-align: center; padding: 24px 8px; }
   .gap-top { margin-top: 8px; }
   .stepline { margin-top: 8px; font-size: 13px; color: var(--accent); }
+  .reachline { margin-top: 8px; font-size: 13px; color: var(--muted); }
+  .reachline.bad { color: var(--bad, #c0392b); }
 </style>
 </head>
 <body>
@@ -356,6 +358,19 @@ function appsSummary(dev) {
   return h("span", {}, h("strong", {}, "Apps: " + eff.length), parts.length ? " (" + parts.join(", ") + ")" : " (none chosen yet)");
 }
 
+// How the server could reach this TV the last time it looked (every few minutes, without
+// connecting, so the TV shows no notice).
+function reachLine(dev) {
+  const rc = server.status && server.status.reach && server.status.reach[dev.id];
+  if (!rc) return null;
+  const since = rc.since && !rc.since.startsWith("0001") ? " since " + when(rc.since) : "";
+  const restored = rc.restored && !rc.restored.startsWith("0001") ? " · fixed port restored " + when(rc.restored) : "";
+  if (rc.state === "fixed") return h("div", { class: "reachline" }, "Reachable on fixed port " + rc.port + restored);
+  if (rc.state === "wireless") return h("div", { class: "reachline" + (rc.note ? " bad" : "") },
+    "Reachable on Wireless debugging port " + rc.port + restored + (rc.note ? " · could not put the fixed port back: " + rc.note : ""));
+  return h("div", { class: "reachline bad" }, "Not answering" + since + ". If the TV is on, Wireless debugging is off: turn it on in Developer options and tick “Always allow on this network”.");
+}
+
 function deviceCard(dev) {
   const scope = "device:" + dev.id;
   const sel = selection(dev);
@@ -413,6 +428,7 @@ function deviceCard(dev) {
       h("strong", {}, h("span", { class: "dot " + (last.length ? (offline ? "bad" : "ok") : "") }), dev.name),
       h("span", { class: "sub" }, dev.host), pairChip),
     step ? h("div", { class: "stepline", role: "status" }, step + "…") : null,
+    reachLine(dev),
     h("div", { class: "row gap-top" },
       h("button", { id: "run-" + dev.id, disabled: busy.has("run-" + dev.id), onclick: () => doRun(dev.id, dev.name) }, "Run now"),
       h("button", { id: "test-" + dev.id, disabled: testing, title: "Looks at the network only: nothing connects to the TV, so it shows no notice", onclick: () => doTest(dev, false) }, "Test"),

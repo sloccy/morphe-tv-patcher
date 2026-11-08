@@ -105,6 +105,7 @@ func (r *Runner) listenOnFixedPort(ctx context.Context, c *conn, line Result, wh
 type QuietCheck struct {
 	Reachable bool
 	Port      int
+	Fixed     bool   // answered on the fixed ADB port rather than Wireless debugging's own
 	Helper    string // boot helper version on record, if any
 	SeenAt    string // when tv-patcher last really connected
 }
@@ -116,12 +117,16 @@ func (r *Runner) CheckDevice(ctx context.Context, d store.Device) QuietCheck {
 	if p := r.Store.Port(d.ID); p > 0 {
 		known = append(known, p)
 	}
+	fixed := r.Cfg.TVFixedADBPort
+	if fixed > 0 {
+		known = append([]int{fixed}, known...)
+	}
 	port, ok := r.ADB.Reachable(ctx, d.Host, known...)
-	q := QuietCheck{Reachable: ok, Port: port}
+	q := QuietCheck{Reachable: ok, Port: port, Fixed: ok && fixed > 0 && port == fixed}
 	if info, have := r.Store.DeviceInfo(d.ID); have {
 		q.Helper, q.SeenAt = info.Helper, info.SeenAt
 	}
-	if ok {
+	if ok && !q.Fixed {
 		_ = r.Store.SetPort(d.ID, port)
 	}
 	return q

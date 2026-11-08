@@ -21,6 +21,14 @@ type Config struct {
 	Prerelease   bool
 	BytecodeMode string
 	Interval     time.Duration
+	// WatchEvery is how often the TVs are looked at between runs (plain TCP, no ADB session, so
+	// no notice on the TV), to put the fixed ADB port back after a restart and to keep the page's
+	// reachability line current. 0 turns it off.
+	WatchEvery time.Duration
+	// WatchAlertAfter is how long a TV may stay silent before the watch sends its own Telegram
+	// message saying what to do (0 = never; the run's own alert after two failed runs remains).
+	// A TV switched off looks the same as one with Wireless debugging off, so this is long.
+	WatchAlertAfter time.Duration
 
 	FlareSolverrURL     string
 	DirectOK            bool // false with APKMIRROR_DIRECT_DISABLED=true (tests the other routes)
@@ -113,6 +121,12 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	var err error
 	if c.Interval, err = time.ParseDuration(def("INTERVAL", "6h")); err != nil || c.Interval < time.Minute {
 		return c, fmt.Errorf("INTERVAL must be a duration of at least 1m (e.g. 6h): %q", getenv("INTERVAL"))
+	}
+	if c.WatchEvery, err = time.ParseDuration(def("WATCH_EVERY", "5m")); err != nil || (c.WatchEvery != 0 && c.WatchEvery < time.Minute) {
+		return c, fmt.Errorf("WATCH_EVERY must be 0 (off) or a duration of at least 1m (e.g. 5m): %q", getenv("WATCH_EVERY"))
+	}
+	if c.WatchAlertAfter, err = time.ParseDuration(def("WATCH_ALERT_AFTER", "3h")); err != nil || c.WatchAlertAfter < 0 {
+		return c, fmt.Errorf("WATCH_ALERT_AFTER must be 0 (never) or a duration (e.g. 3h): %q", getenv("WATCH_ALERT_AFTER"))
 	}
 	if c.MirrorGap, err = time.ParseDuration(def("APKMIRROR_MIN_INTERVAL", "4s")); err != nil || c.MirrorGap < 0 {
 		return c, fmt.Errorf("APKMIRROR_MIN_INTERVAL must be a duration (e.g. 4s): %q", getenv("APKMIRROR_MIN_INTERVAL"))

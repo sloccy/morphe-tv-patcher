@@ -40,6 +40,8 @@ type ADB interface {
 	Shell(ctx context.Context, serial, cmd string) (string, error)
 	Playing(ctx context.Context, serial string) (bool, error)
 	Reachable(ctx context.Context, host string, known ...int) (int, bool)
+	// Probe is Reachable without the port scan, cheap enough to repeat every few minutes.
+	Probe(ctx context.Context, host string, known ...int) (int, bool)
 	Pair(ctx context.Context, host string, pairPort int, code string) error
 	PairingPort(ctx context.Context, host string) int
 	ConnectedPort(ctx context.Context, host string) int
@@ -107,6 +109,8 @@ type Status struct {
 	Results    []Result       `json:"results"`
 	// Steps says what the run is doing for each device id right now, while it runs.
 	Steps map[string]string `json:"steps,omitempty"`
+	// Reach is how each device id could be reached the last time the watch looked.
+	Reach map[string]Reach `json:"reach,omitempty"`
 }
 
 // Runner holds the long-lived pieces.
@@ -124,6 +128,7 @@ type Runner struct {
 	listCache map[string]*patches.List // "<id>@<tag>@<repo>" -> parsed list, so a release is read once
 	wake      chan Options
 	learn     learner
+	watching  watchState
 }
 
 // New makes a Runner.
@@ -142,6 +147,7 @@ func (r *Runner) Status() Status {
 	if s.Steps != nil {
 		s.Steps = maps.Clone(s.Steps)
 	}
+	s.Reach = maps.Clone(s.Reach)
 	return s
 }
 
@@ -359,22 +365,43 @@ func (r *Runner) Trigger(o Options) bool {
 	}
 }
 
-// Loop runs once at start-up, then every Interval or when triggered, until ctx ends.
-// One goroutine, so a manual and a scheduled run can never overlap.
+// Loop runs once at start-up, then every Interval or when triggered, until ctx ends. Between
+// runs it looks at the TVs every WatchEvery. One goroutine, so a manual and a scheduled run, or
+// either of them and a watch, can never overlap.
 func (r *Runner) Loop(ctx context.Context) {
 	opts := Options{}
 	for {
 		r.Run(ctx, opts)
+		r.watch(ctx)
 		timer := time.NewTimer(r.Cfg.Interval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return
-		case opts = <-r.wake:
-		case <-timer.C:
-			opts = Options{}
+		var tick <-chan time.Time
+		var ticker *time.Ticker
+		if r.Cfg.WatchEvery > 0 {
+			ticker = time.NewTicker(r.Cfg.WatchEvery)
+			tick = ticker.C
 		}
-		timer.Stop()
+		stop := func() {
+			timer.Stop()
+			if ticker != nil {
+				ticker.Stop()
+			}
+		}
+	wait:
+		for {
+			select {
+			case <-ctx.Done():
+				stop()
+				return
+			case opts = <-r.wake:
+				break wait
+			case <-timer.C:
+				opts = Options{}
+				break wait
+			case <-tick:
+				r.watch(ctx)
+			}
+		}
+		stop()
 	}
 }
 
@@ -505,7 +532,7 @@ func (r *Runner) unreachable(d store.Device, err error) Result {
 	// a TV that stays unreachable usually has Wireless debugging switched off (a reboot does that),
 	// so say so after two cycles in a row rather than waiting for the usual three
 	alert := r.noteFailureAfter("device:"+d.ID, err, false, min(2, r.Cfg.FailuresBeforeAlert))
-	return Result{Device: d.Name, Alert: alert, Message: fmt.Sprintf("%s (%s) is not reachable: %v. If the TV restarted, turn Wireless debugging back on in Developer options (the pairing is kept; only the switch resets).", d.Name, d.Host, err)}
+	return Result{Device: d.Name, Alert: alert, Message: fmt.Sprintf("%s (%s) is not reachable: %v. If the TV is on, Wireless debugging is off (a restart does that, and so does joining an access point Android has not been told to trust): turn it back on in Developer options and tick \"Always allow on this network\" if asked. The pairing is kept.", d.Name, d.Host, err)}
 }
 
 // appKey is one app from one patch source; devices that picked the same pair share the work.

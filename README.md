@@ -265,6 +265,17 @@ and access point changes no longer matter, and the next run after a reboot sets 
 property (restarting adbd would drop the connection the installs need); **Full test** also restarts
 adbd so it takes effect at once.
 
+**Watching between runs.** Every `WATCH_EVERY` (default `5m`, `0` = off) tv-patcher looks at each TV with
+plain TCP dials: no ADB session, so the TV shows no notice. The device card says what it found:
+*Reachable on fixed port 5555*, *Reachable on Wireless debugging port N*, or *Not answering since …*.
+When `TV_FIXED_ADB_PORT` is set and a TV answers only on the random port (which is what a restart
+leaves behind), the watch connects once and puts the fixed port back, then records when
+(*fixed port restored …*); if the TV will not take it, the card says why and the retries slow down
+to once an hour. A TV silent for `WATCH_ALERT_AFTER` (default `3h`, `0` = never) gets a Telegram message that
+says what to do: turn Wireless debugging back on and tick "Always allow on this network", which each
+access point and band needs once. A TV that is simply switched off looks the same, hence the long
+delay; a message follows when it answers again.
+
 Temporary download failures alert on Telegram only after 3 cycles in a row (then at most daily); a
 wrong signature or a phone build alerts at once; a message follows when it recovers.
 
@@ -282,6 +293,8 @@ wrong signature or a phone build alerts at once; a message follows when it recov
 | `VERIFY_EVERY` | `168h` | how often a scheduled run connects to a TV only to check what is installed; capped at 120h for a TV that has not confirmed `adb_allowed_connection_time=0` |
 | `ADB_SCAN_RANGE` | `30000-61000` | ports the last-resort scan tries when mDNS is silent |
 | `TV_FIXED_ADB_PORT` | `0` | pin ADB to this port (0 = off); unencrypted and LAN-visible, read the section above |
+| `WATCH_EVERY` | `5m` | how often to look at the TVs between runs, without connecting (0 = off) |
+| `WATCH_ALERT_AFTER` | `3h` | how long a TV may stay silent before Telegram says what to do (0 = never) |
 | `PATCHES_REPO` / `PATCHES_PRERELEASE` | `ajstrick81/morphe-androidtv-patches` / `false` | seeds the patch sources on the first run only |
 | `PATCH_SOURCES_ALLOWED_OWNERS` | | limit repositories added from the page to these GitHub owners |
 | `BYTECODE_MODE` | `STRIP_SAFE` | Morphe `--bytecode-mode` |

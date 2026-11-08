@@ -802,6 +802,9 @@ func (s *Server) testDevice(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		msg := fmt.Sprintf("%s answers on port %d, so Wireless debugging is on. Nothing connected, so the TV shows no notice", dev.Name, q.Port)
+		if q.Fixed {
+			msg = fmt.Sprintf("%s answers on the fixed ADB port %d, which survives Wi-Fi drops. Nothing connected, so the TV shows no notice", dev.Name, q.Port)
+		}
 		if q.Helper != "" {
 			msg += " · boot helper version " + q.Helper
 		}

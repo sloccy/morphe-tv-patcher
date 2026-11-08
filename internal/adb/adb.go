@@ -197,6 +197,20 @@ func (c *Client) Connect(ctx context.Context, host string, known ...int) (int, e
 // shows no "debugging connected" notice: a plain TCP connection to the remembered ports, then
 // the mDNS listing. It cannot tell whether this machine is still paired.
 func (c *Client) Reachable(ctx context.Context, host string, known ...int) (port int, ok bool) {
+	if p, ok := c.Probe(ctx, host, known...); ok {
+		return p, true
+	}
+	// A scan is plain TCP, so it still opens no ADB session and the TV still shows no notice.
+	// It cannot tell adbd from any other open port, which is why it comes last.
+	for _, p := range c.scan(ctx, host) {
+		return p, true
+	}
+	return 0, false
+}
+
+// Probe is Reachable without the port scan: the ports given, in order, then the mDNS listing. It
+// is cheap enough to repeat every few minutes for a TV that is switched off.
+func (c *Client) Probe(ctx context.Context, host string, known ...int) (port int, ok bool) {
 	dialFn := c.Dial
 	if dialFn == nil {
 		dialFn = dial
@@ -207,11 +221,6 @@ func (c *Client) Reachable(ctx context.Context, host string, known ...int) (port
 		}
 	}
 	if p := c.mdnsPort(ctx, host, ServiceConnect); p > 0 && dialFn(host, p) {
-		return p, true
-	}
-	// A scan is plain TCP, so it still opens no ADB session and the TV still shows no notice.
-	// It cannot tell adbd from any other open port, which is why it comes last.
-	for _, p := range c.scan(ctx, host) {
 		return p, true
 	}
 	return 0, false

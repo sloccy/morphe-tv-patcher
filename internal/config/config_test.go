@@ -49,3 +49,16 @@ func TestPatchesRepoIsAFirstRunSeedList(t *testing.T) {
 		t.Errorf("bundles live in the backed-up state volume, not the cache: %s", c.PatchBundles())
 	}
 }
+
+func TestWatchSettings(t *testing.T) {
+	if c, err := FromEnv(env(nil)); err != nil || c.WatchEvery != 5*time.Minute || c.WatchAlertAfter != 3*time.Hour {
+		t.Errorf("defaults: %+v %v", c, err)
+	}
+	if _, err := FromEnv(env(map[string]string{"WATCH_EVERY": "30s"})); err == nil {
+		t.Error("WATCH_EVERY under a minute must be refused")
+	}
+	c, err := FromEnv(env(map[string]string{"WATCH_EVERY": "0"}))
+	if err != nil || c.WatchEvery != 0 {
+		t.Errorf("0 turns the watch off: %v %v", c.WatchEvery, err)
+	}
+}
