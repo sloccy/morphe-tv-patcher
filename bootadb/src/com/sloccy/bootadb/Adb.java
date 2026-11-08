@@ -5,7 +5,7 @@ import android.app.job.JobScheduler;
 import android.content.ComponentName;
 import android.content.ContentResolver;
 import android.content.Context;
-import android.os.SystemClock;
+import android.os.PersistableBundle;
 import android.provider.Settings;
 import android.util.Log;
 
@@ -17,6 +17,20 @@ final class Adb {
     private static final String TAG = "BootAdb";
     private static final int JOB_ID = 1;
     private static final int JOB_ID_WATCH = 2;
+    private static final int JOB_ID_RETRY = 3;
+
+    /** Extra on the retry job: which wait in {@link #RETRY_WAITS} it is on. */
+    static final String EXTRA_STEP = "step";
+
+    /**
+     * How long to wait before checking that Wireless debugging stayed on after we switched it on.
+     * Android switches it straight off again when the TV is on an access point it has not been
+     * told to trust ("Always allow on this network" is per BSSID, and every access point and band
+     * has its own) or Wi-Fi is not ready yet. The last wait repeats until it sticks.
+     */
+    private static final long[] RETRY_WAITS = {
+        30 * 1000L, 60 * 1000L, 2 * 60 * 1000L, 4 * 60 * 1000L, 8 * 60 * 1000L, 15 * 60 * 1000L,
+    };
 
     /** How often the backstop job re-checks. 15 minutes is JobScheduler's floor. */
     private static final long EVERY = 15 * 60 * 1000L;
@@ -33,6 +47,8 @@ final class Adb {
         // (7 days by default), which unpairs this server from a TV it simply had no work for.
         // 0 means the keys never expire.
         {GLOBAL, "adb_allowed_connection_time", "0"},
+        // Legacy ADB over TCP (TV_FIXED_ADB_PORT) needs ADB debugging itself on.
+        {GLOBAL, "adb_enabled", "1"},
         // Developer options off takes Wireless debugging with it.
         {GLOBAL, "development_settings_enabled", "1"},
         {GLOBAL, "wifi_scan_always_enabled", "0"},
@@ -43,18 +59,20 @@ final class Adb {
         {SECURE, "location_mode", "0"},
     };
 
-    /**
-     * When Wireless debugging was last switched back on. Android switches it off whenever Wi-Fi
-     * drops or the TV roams to another access point, and some firmware does so again straight
-     * away; without this a watch job could spend a burst of writes losing that argument.
-     */
-    private static long lastSwitchedOn;
-    private static final long MIN_GAP = 30 * 1000L;
-
     private Adb() {}
 
     /** Brings every wanted setting to its value. One rejected key does not stop the others. */
     static void ensureAll(Context context) {
+        ensureAll(context, -1);
+    }
+
+    /**
+     * As {@link #ensureAll(Context)}. {@code retryStep} is the retry job's own step (0 or more), or
+     * -1 from anywhere else. Anywhere else leaves Wireless debugging alone while a retry is
+     * pending: Android's switch-off after our write fires the watch job, and answering that at
+     * once would only start the argument again at the shortest wait.
+     */
+    static void ensureAll(Context context, int retryStep) {
         ContentResolver resolver = context.getContentResolver();
         int changed = 0;
         for (Object[] w : WANTED) {
@@ -67,16 +85,21 @@ final class Adb {
                     continue;
                 }
                 if (ADB_WIFI.equals(key)) {
-                    long now = SystemClock.elapsedRealtime();
-                    if (lastSwitchedOn != 0 && now - lastSwitchedOn < MIN_GAP) {
-                        Log.i(TAG, key + ": switched off again at once; leaving it to the next check");
+                    if (retryStep < 0 && retryPending(context)) {
+                        Log.i(TAG, key + ": off; a retry is already scheduled");
                         continue;
                     }
-                    lastSwitchedOn = now;
+                    if (retryStep > 0) {
+                        Log.w(TAG, key + ": Android switched it off again after step " + (retryStep - 1)
+                                + " (this access point is probably not trusted for Wireless debugging, or Wi-Fi was not ready)");
+                    }
                 }
                 boolean ok = global ? Settings.Global.putString(resolver, key, want) : Settings.Secure.putString(resolver, key, want);
                 changed++;
                 Log.i(TAG, key + ": " + have + " -> " + want + (ok ? "" : " (not accepted)"));
+                if (ADB_WIFI.equals(key)) {
+                    scheduleRetry(context, Math.max(retryStep, 0));
+                }
             } catch (SecurityException e) {
                 Log.w(TAG, key + ": WRITE_SECURE_SETTINGS is not granted");
             } catch (RuntimeException e) {
@@ -153,5 +176,33 @@ final class Adb {
                 .setTriggerContentMaxDelay(30 * 1000L)
                 .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
                 .build());
+    }
+
+    private static boolean retryPending(Context context) {
+        JobScheduler scheduler = context.getSystemService(JobScheduler.class);
+        return scheduler != null && scheduler.getPendingJob(JOB_ID_RETRY) != null;
+    }
+
+    /**
+     * Checks again after RETRY_WAITS[step] that Wireless debugging is still on, and switches it on
+     * again if Android undid it. Replaces any retry already scheduled.
+     */
+    private static void scheduleRetry(Context context, int step) {
+        try {
+            JobScheduler scheduler = context.getSystemService(JobScheduler.class);
+            if (scheduler == null) {
+                return;
+            }
+            PersistableBundle extras = new PersistableBundle();
+            extras.putInt(EXTRA_STEP, step + 1); // the step the retry will run as
+            long wait = RETRY_WAITS[Math.min(step, RETRY_WAITS.length - 1)];
+            scheduler.schedule(new JobInfo.Builder(JOB_ID_RETRY, new ComponentName(context, RetryJob.class))
+                    .setMinimumLatency(wait)
+                    .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                    .setExtras(extras)
+                    .build());
+        } catch (RuntimeException e) {
+            Log.w(TAG, "could not schedule the retry: " + e);
+        }
     }
 }

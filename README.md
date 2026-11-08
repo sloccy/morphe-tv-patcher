@@ -233,6 +233,12 @@ things Android does on purpose:
    point changes** ("Detected wifi network change"), so a TV roaming between mesh access points on
    one SSID is enough to do it. The helper puts it straight back, now within seconds rather than
    within the hour. Giving the TV one fixed access point (no band steering) avoids the churn.
+   Android only lets Wireless debugging come back on while the TV is on an access point it has
+   been told to trust ("Always allow on this network", which is per access point **and per
+   band**: each has its own BSSID). On an untrusted one it switches it straight off again, so the
+   helper retries with a growing wait (30 s up to 15 min) and logs each refusal under `BootAdb`.
+   With several access points or a dual-band SSID, tick that box on each one, or use
+   `TV_FIXED_ADB_PORT` below, which does not depend on Wi-Fi state.
 3. **The port changes every time.** adbd picks a new random port whenever Wireless debugging comes
    back on, so the remembered one is dead. tv-patcher asks the TV's own mDNS advertisement for the
    new port, which takes milliseconds; a port it could not reach is forgotten rather than dialled
