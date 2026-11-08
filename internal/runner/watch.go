@@ -19,7 +19,7 @@ type Reach struct {
 	// Since is when State last changed.
 	Since time.Time `json:"since"`
 	// Restored is when the watch last put the fixed port back after a restart.
-	Restored time.Time `json:"restored,omitempty"`
+	Restored time.Time `json:"restored,omitzero"`
 	// Note says why putting the fixed port back did not work, while it does not.
 	Note string `json:"note,omitempty"`
 }
@@ -81,7 +81,7 @@ func (r *Runner) watchOne(ctx context.Context, id, host, name string) {
 		r.noteReach(id, "wireless", port, r.noteOf(id), false)
 		r.answered(ctx, id, name, port)
 		if fixed > 0 {
-			r.restoreFixed(ctx, id, host, name)
+			r.restoreFixed(ctx, id, name)
 		}
 	}
 }
@@ -140,7 +140,7 @@ func (r *Runner) answered(ctx context.Context, id, name string, port int) {
 // restoreFixed puts the fixed ADB port back on a TV that is reachable only on Wireless
 // debugging's random port, which is what a restart leaves behind. A failure is waited out with a
 // growing pause, so a TV that cannot take it is not connected to every few minutes.
-func (r *Runner) restoreFixed(ctx context.Context, id, host, name string) {
+func (r *Runner) restoreFixed(ctx context.Context, id, name string) {
 	w := &r.watching
 	if w.fails == nil {
 		w.fails, w.next = map[string]int{}, map[string]time.Time{}

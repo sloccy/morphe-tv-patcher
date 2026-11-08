@@ -732,6 +732,7 @@ func TestAFullTestReportsWhatTheHelperIsDoing(t *testing.T) {
 }
 
 func watchRig(t *testing.T) (*rig, store.Device) {
+	t.Helper()
 	rg, d := helperRig(t, 20261022)
 	rg.r.Cfg.TVFixedADBPort = 5555
 	rg.r.Cfg.WatchEvery = 5 * time.Minute
