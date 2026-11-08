@@ -258,7 +258,10 @@ found. It is off by default and worth understanding before switching on: legacy 
 **not encrypted**, where the wireless-debugging transport is, and it leaves a well-known port
 listening on your LAN — still key-authenticated, but 5555 is a standard thing to scan for. Whether
 the property survives a restart depends on the TV's firmware, so tv-patcher reads it back and says
-on the card what actually stuck; normal discovery stays in place either way. A run only sets the
+on the card what actually stuck; normal discovery stays in place either way. Some firmware (Android 14
+on some TVs) will not let the adb shell write the property at all. tv-patcher then restarts adbd on
+the port at the end of the run instead (`adb tcpip`), which lasts until the TV restarts: Wi-Fi drops
+and access point changes no longer matter, and the next run after a reboot sets it again. A run only sets the
 property (restarting adbd would drop the connection the installs need); **Full test** also restarts
 adbd so it takes effect at once.
 

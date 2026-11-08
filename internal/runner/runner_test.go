@@ -42,6 +42,7 @@ type fakeADB struct {
 	props       map[string]string // getprop/setprop
 	settings    map[string]string // "settings get/put global"; a real TV starts with no key expiry
 	refuses     map[string]bool   // global settings this TV will not keep
+	noSetprop   bool              // the adb shell may not write properties (Android 14 on some TVs)
 	disconnects []string          // "host:port" the adb server was told to forget
 	devicePort  int               // what the adb server says it is already talking to
 	pairingPort int               // what the TV advertises while its pairing dialog is open
@@ -176,6 +177,8 @@ func (f *fakeADB) Shell(ctx context.Context, serial, cmd string) (string, error)
 		return f.helperLog, nil
 	case strings.HasPrefix(cmd, "getprop "):
 		return f.props[strings.TrimPrefix(cmd, "getprop ")] + "\n", nil
+	case strings.HasPrefix(cmd, "setprop ") && f.noSetprop:
+		return "Failed to set property\n", errors.New("exit status 1")
 	case strings.HasPrefix(cmd, "setprop "):
 		parts := strings.Fields(strings.TrimPrefix(cmd, "setprop "))
 		if f.props == nil {

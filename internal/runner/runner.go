@@ -449,6 +449,7 @@ type conn struct {
 	connErr   error    // why connecting failed this run, so it is tried and reported once
 	reported  bool     // the unreachable message has been given for this device
 	extra     []Result // lines from the connection-time steps (boot helper, TV settings)
+	tcpipDue  bool     // adbd must be restarted on the fixed port once the run is done with it
 }
 
 // keyExpirySafety is how long tv-patcher lets a TV go untouched while Android is still counting
@@ -624,6 +625,7 @@ func (r *Runner) pass(ctx context.Context, o Options) []Result {
 		}
 		out = append(out, r.app(ctx, o, ld, k.pkg, byApp[k])...)
 	}
+	r.finishFixedPort(ctx, conns) // last: it restarts adbd, which drops the connection
 	for i := range conns {
 		out = append(out, conns[i].extra...)
 	}

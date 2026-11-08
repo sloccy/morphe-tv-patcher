@@ -604,6 +604,38 @@ func TestTheFixedPortIsOnlySetWhenAskedFor(t *testing.T) {
 	}
 }
 
+// Some firmware will not let the adb shell write persist.adb.tcp.port. adbd is then told to listen
+// on the port for as long as the TV stays up, after the run's own work (that drops the connection).
+func TestAFixedPortTheTvWillNotKeepIsStillListenedOnUntilRestart(t *testing.T) {
+	rg, _ := helperRig(t, 20261022)
+	rg.r.Cfg.TVFixedADBPort = 5555
+	rg.adb.noSetprop = true
+	res := rg.r.Run(context.Background(), Options{})
+	var lines []Result
+	for _, x := range res {
+		if x.Package == tweakPackage {
+			lines = append(lines, x)
+		}
+	}
+	if len(lines) != 1 || !lines[0].OK || !strings.Contains(lines[0].Message, "until the TV restarts") {
+		t.Fatalf("%+v", lines)
+	}
+	if len(rg.adb.tcpip) != 1 {
+		t.Errorf("adbd is restarted once, after the run: %v", rg.adb.tcpip)
+	}
+	// Once listening, a later run leaves it alone.
+	rg.adb.props = map[string]string{"service.adb.tcp.port": "5555"}
+	rg.adb.tcpip = nil
+	for _, x := range rg.r.Run(context.Background(), Options{Manual: true}) {
+		if x.Package == tweakPackage {
+			t.Errorf("already listening: say nothing, %+v", x)
+		}
+	}
+	if len(rg.adb.tcpip) != 0 {
+		t.Errorf("%v", rg.adb.tcpip)
+	}
+}
+
 // An install that reports success but leaves the old app in place used to be silent, and then
 // looked like a settings problem further down while the page showed the version we shipped.
 func TestAnInstallThatDidNotTakeIsReported(t *testing.T) {
