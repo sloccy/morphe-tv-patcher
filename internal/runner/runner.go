@@ -45,6 +45,9 @@ type ADB interface {
 	Pair(ctx context.Context, host string, pairPort int, code string) error
 	PairingPort(ctx context.Context, host string) int
 	ConnectedPort(ctx context.Context, host string) int
+	// LivePort is the port the adb server already has a working connection to host on (0 = none),
+	// preferring prefer. It sends nothing to the TV.
+	LivePort(ctx context.Context, host string, prefer int) int
 	TCPIP(ctx context.Context, serial string, port int) error
 }
 
@@ -87,6 +90,10 @@ type Result struct {
 	OK      bool      `json:"ok"`
 	Changed bool      `json:"changed"` // something was patched or installed
 	Alert   bool      `json:"-"`       // worth a Telegram message
+	Short   string    `json:"-"`       // the one-line form of a failure, for Telegram
+	From    string    `json:"-"`       // an install: the version that was on the TV ("none" = nothing)
+	To      string    `json:"-"`       // an install: the version now on the TV
+	Patches string    `json:"-"`       // an install: the patches release it was built with
 	Message string    `json:"message"`
 	At      time.Time `json:"at"`
 }
@@ -119,7 +126,7 @@ type Runner struct {
 	Store  *store.Store
 	ADB    ADB
 	Deps   Deps
-	Notify func(ctx context.Context, title, body string)
+	Notify func(ctx context.Context, text string)
 	Now    func() time.Time
 
 	mu        sync.Mutex
@@ -129,12 +136,15 @@ type Runner struct {
 	wake      chan Options
 	learn     learner
 	watching  watchState
+	// reconnectPause is the wait between tries to reach adbd after it was restarted on the fixed port.
+	reconnectPause time.Duration
 }
 
 // New makes a Runner.
-func New(cfg config.Config, st *store.Store, a ADB, d Deps, notify func(context.Context, string, string)) *Runner {
+func New(cfg config.Config, st *store.Store, a ADB, d Deps, notify func(context.Context, string)) *Runner {
 	return &Runner{Cfg: cfg, Store: st, ADB: a, Deps: d, Notify: notify, Now: time.Now, wake: make(chan Options, 1),
-		lists: map[string]*patches.List{}, listCache: map[string]*patches.List{}}
+		lists: map[string]*patches.List{}, listCache: map[string]*patches.List{},
+		reconnectPause: 2 * time.Second}
 }
 
 // Status returns a copy of the current status.
@@ -267,6 +277,7 @@ func (r *Runner) helperStep(ctx context.Context, c *conn) []Result {
 	switch {
 	case err != nil:
 		line.Message = "boot helper: " + err.Error()
+		line.Short = c.dev.Name + ": boot helper problem: " + brief(err.Error())
 		line.Alert = r.noteFailureAfter(key, err, false, min(2, r.Cfg.FailuresBeforeAlert))
 		return []Result{line}
 	case res.Installed:
@@ -432,33 +443,14 @@ func (r *Runner) Run(ctx context.Context, o Options) []Result {
 
 	results := r.pass(ctx, o)
 
-	var alerts []string
-	failed := false
 	for i := range results {
 		results[i].At = r.Now()
-		failed = failed || !results[i].OK
-		if results[i].Alert {
-			alerts = append(alerts, results[i].Message)
-		}
 	}
 	r.mu.Lock()
 	r.status.Running, r.status.FinishedAt, r.status.Results, r.status.Steps = false, r.Now(), results, nil
 	r.mu.Unlock()
-	if len(alerts) > 0 && r.Notify != nil {
-		title := "updated"
-		if failed {
-			title = "PROBLEMS"
-		}
-		if failed {
-			// A failure still under its alert threshold sets the title but is not an alert on its
-			// own; without its line the message says PROBLEMS and lists only successes.
-			for _, x := range results {
-				if !x.OK && !x.Alert && x.Message != "" && !slices.Contains(alerts, x.Message) {
-					alerts = append(alerts, x.Message)
-				}
-			}
-		}
-		r.Notify(ctx, title, strings.Join(alerts, "\n"))
+	if text := telegramText(results); text != "" && r.Notify != nil {
+		r.Notify(ctx, text)
 	}
 	return results
 }
@@ -469,9 +461,9 @@ type conn struct {
 	serial string
 	abis   []string
 	sdk    int
-	// connected is false while the run is planning from what is on record. The TV is only
-	// connected to (ensureConn) when something needs it, because every ADB session makes the
-	// TV show a notice.
+	// connected is false while the run is planning from what is on record. A TV with no open connection is only
+	// connected to (ensureConn) when something needs it, because every new ADB session makes the
+	// TV show a notice; one the adb server already holds is simply used.
 	connected bool
 	connErr   error    // why connecting failed this run, so it is tried and reported once
 	reported  bool     // the unreachable message has been given for this device
@@ -526,13 +518,13 @@ func (r *Runner) unreachable(d store.Device, err error) Result {
 	// Losing the pairing needs somebody at the TV, so it is said at once and not dressed up as a
 	// TV that might just be asleep.
 	if errors.Is(err, adb.ErrNotPaired) {
-		return Result{Device: d.Name, Alert: r.noteFailureAfter("device:"+d.ID, err, false, 1),
+		return Result{Device: d.Name, Alert: r.noteFailureAfter("device:"+d.ID, err, false, 1), Short: d.Name + ": no longer paired, pair it again from the page",
 			Message: fmt.Sprintf("%s (%s) answers but no longer accepts this server: pair it again from the page (Pair…). Android drops a pairing key it has not seen for a week, which the boot helper switches off once it is installed.", d.Name, d.Host)}
 	}
 	// a TV that stays unreachable usually has Wireless debugging switched off (a reboot does that),
 	// so say so after two cycles in a row rather than waiting for the usual three
 	alert := r.noteFailureAfter("device:"+d.ID, err, false, min(2, r.Cfg.FailuresBeforeAlert))
-	return Result{Device: d.Name, Alert: alert, Message: fmt.Sprintf("%s (%s) is not reachable: %v. If the TV is on, Wireless debugging is off (a restart does that, and so does joining an access point Android has not been told to trust): turn it back on in Developer options and tick \"Always allow on this network\" if asked. The pairing is kept.", d.Name, d.Host, err)}
+	return Result{Device: d.Name, Alert: alert, Short: d.Name + ": not reachable", Message: fmt.Sprintf("%s (%s) is not reachable: %v. If the TV is on, Wireless debugging is off (a restart does that, and so does joining an access point Android has not been told to trust): turn it back on in Developer options and tick \"Always allow on this network\" if asked. The pairing is kept.", d.Name, d.Host, err)}
 }
 
 // appKey is one app from one patch source; devices that picked the same pair share the work.
@@ -579,7 +571,7 @@ func (r *Runner) pass(ctx context.Context, o Options) []Result {
 			c := conn{dev: d, abis: info.ABIs, sdk: info.SDK}
 			// Plan from what is on record. Connect now only for a manual run, a forced one, a TV
 			// not yet seen for VerifyEvery (or never); otherwise only when an install needs it.
-			if o.Manual || o.Force || r.verifyDue(info, known) {
+			if o.Manual || o.Force || r.verifyDue(info, known) || r.ADB.LivePort(ctx, d.Host, r.Cfg.TVFixedADBPort) > 0 { // a held connection costs the TV nothing
 				r.step([]*conn{&c}, "Connecting")
 				if err := r.ensureConn(ctx, &c); err != nil {
 					out = append(out, r.unreachable(d, err))
@@ -636,7 +628,7 @@ func (r *Runner) pass(ctx context.Context, o Options) []Result {
 		if ld.err != nil {
 			alert := r.noteFailure("source:"+k.src, ld.err, false)
 			for i, c := range byApp[k] {
-				out = append(out, Result{Device: c.dev.Name, Package: k.pkg, Name: patches.PrettyName(k.pkg), OK: false, Alert: alert && i == 0,
+				out = append(out, Result{Device: c.dev.Name, Package: k.pkg, Name: patches.PrettyName(k.pkg), OK: false, Alert: alert && i == 0, Short: "Patch source " + ld.src.Repo + " unavailable",
 					Message: fmt.Sprintf("%s: patch source %s unavailable: %v", patches.PrettyName(k.pkg), ld.src.Repo, ld.err)})
 			}
 			continue
@@ -645,7 +637,7 @@ func (r *Runner) pass(ctx context.Context, o Options) []Result {
 			// running on the cached bundle: say so (once the failure repeats), then carry on
 			if r.noteFailure("source:"+k.src, errors.New(ld.warn), false) && !warned[k.src] {
 				warned[k.src] = true
-				out = append(out, Result{OK: false, Alert: true, Message: fmt.Sprintf("patch source %s is unreachable and its apps are running on a cached bundle: %s. If the repository is gone for good, remove it on the page.", ld.src.Repo, ld.warn)})
+				out = append(out, Result{OK: false, Alert: true, Short: "Patch source " + ld.src.Repo + " unreachable, using the cached bundle", Message: fmt.Sprintf("patch source %s is unreachable and its apps are running on a cached bundle: %s. If the repository is gone for good, remove it on the page.", ld.src.Repo, ld.warn)})
 			}
 		} else {
 			r.noteRecovered("source:" + k.src)
@@ -663,21 +655,27 @@ func (r *Runner) pass(ctx context.Context, o Options) []Result {
 }
 
 func (r *Runner) connect(ctx context.Context, d store.Device) (conn, error) {
-	var known []int
-	if p := r.Store.Port(d.ID); p > 0 {
-		known = append(known, p)
-	}
-	if p := r.Cfg.TVFixedADBPort; p > 0 && !slices.Contains(known, p) {
-		known = append(known, p)
-	}
-	port, err := r.ADB.Connect(ctx, d.Host, known...)
-	if err != nil {
-		// Wireless debugging picks a new port every time Android switches it back on, so a
-		// remembered one that has gone must be forgotten: kept, it is dialled first forever.
-		if errors.Is(err, adb.ErrUnreachable) {
-			_ = r.Store.SetPort(d.ID, 0)
+	fixed := r.Cfg.TVFixedADBPort
+	// A connection the adb server already holds is used as it is: reconnecting would only make the
+	// TV show another notice, and the fallbacks below are for when it has dropped.
+	port := r.ADB.LivePort(ctx, d.Host, fixed)
+	if port == 0 {
+		var known []int
+		if fixed > 0 {
+			known = append(known, fixed)
 		}
-		return conn{}, err
+		if p := r.Store.Port(d.ID); p > 0 && p != fixed {
+			known = append(known, p)
+		}
+		var err error
+		if port, err = r.ADB.Connect(ctx, d.Host, known...); err != nil {
+			// Wireless debugging picks a new port every time Android switches it back on, so a
+			// remembered one that has gone must be forgotten: kept, it is dialled first forever.
+			if errors.Is(err, adb.ErrUnreachable) {
+				_ = r.Store.SetPort(d.ID, 0)
+			}
+			return conn{}, err
+		}
 	}
 	_ = r.Store.SetPort(d.ID, port)
 	serial := fmt.Sprintf("%s:%d", d.Host, port)
@@ -791,6 +789,7 @@ func (r *Runner) appGroup(ctx context.Context, o Options, ld *loaded, pkg, name,
 			for i, c := range gc {
 				x := res(c, false, msg)
 				x.Alert = alert && i == 0
+				x.Short = fmt.Sprintf("%s: no %s build for %s", name, newest, gc[0].dev.Name)
 				out = append(out, x)
 			}
 			return out
@@ -802,6 +801,7 @@ func (r *Runner) appGroup(ctx context.Context, o Options, ld *loaded, pkg, name,
 		for i, c := range gc {
 			x := res(c, false, msg)
 			x.Alert = alert && i == 0 // one message per app and CPU group, not per device
+			x.Short = fmt.Sprintf("%s: cannot download %s", name, newest)
 			out = append(out, x)
 		}
 		return out
@@ -861,6 +861,7 @@ func (r *Runner) appGroup(ctx context.Context, o Options, ld *loaded, pkg, name,
 	for _, c := range gc {
 		if p.err != nil {
 			x := res(c, false, fmt.Sprintf("%s: patching %s failed: %v", name, newest, p.err))
+			x.Short = fmt.Sprintf("%s: patching %s failed", name, newest)
 			x.Alert = true
 			out = append(out, x)
 			continue
@@ -914,6 +915,7 @@ func (r *Runner) appGroup(ctx context.Context, o Options, ld *loaded, pkg, name,
 		}
 		if err := r.install(ctx, c, pkg, p, ov); err != nil {
 			x := res(c, false, fmt.Sprintf("%s on %s: %v", name, c.dev.Name, err))
+			x.Short = fmt.Sprintf("%s on %s: %s", name, c.dev.Name, brief(err.Error()))
 			x.Alert = true
 			out = append(out, x)
 			continue
@@ -936,6 +938,7 @@ func (r *Runner) appGroup(ctx context.Context, o Options, ld *loaded, pkg, name,
 		}
 		x := res(c, true, msg)
 		x.Changed, x.Alert = true, true
+		x.From, x.To, x.Patches = prev, newest, rel.Tag
 		out = append(out, x)
 	}
 	return out

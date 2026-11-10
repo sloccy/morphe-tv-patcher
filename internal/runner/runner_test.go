@@ -46,6 +46,7 @@ type fakeADB struct {
 	noSetprop   bool                    // the adb shell may not write properties (Android 14 on some TVs)
 	disconnects []string                // "host:port" the adb server was told to forget
 	devicePort  int                     // what the adb server says it is already talking to
+	live        map[string]int          // host -> port of a connection the adb server already holds
 	pairingPort int                     // what the TV advertises while its pairing dialog is open
 	tcpip       []string                // "serial port"
 	jobsDump    string                  // what "dumpsys jobscheduler" says
@@ -91,20 +92,29 @@ func (f *fakeADB) Connect(ctx context.Context, host string, known ...int) (int, 
 		return 0, adb.ErrNotPaired
 	}
 	for _, p := range known { // the real adb returns the port it actually reached
-		if p > 0 {
+		if p > 0 && (p == 40000 || f.openPorts[host][p]) {
 			return p, nil
 		}
 	}
 	return 40000, nil
 }
-func (f *fakeADB) PairingPort(ctx context.Context, host string) int   { return f.pairingPort }
-func (f *fakeADB) ConnectedPort(ctx context.Context, host string) int { return f.devicePort }
+func (f *fakeADB) PairingPort(ctx context.Context, host string) int          { return f.pairingPort }
+func (f *fakeADB) ConnectedPort(ctx context.Context, host string) int        { return f.devicePort }
+func (f *fakeADB) LivePort(ctx context.Context, host string, prefer int) int { return f.live[host] }
 func (f *fakeADB) Disconnect(ctx context.Context, host string, port int) error {
 	f.disconnects = append(f.disconnects, fmt.Sprintf("%s:%d", host, port))
 	return nil
 }
 func (f *fakeADB) TCPIP(ctx context.Context, serial string, port int) error {
 	f.tcpip = append(f.tcpip, fmt.Sprintf("%s %d", serial, port))
+	host, _, _ := strings.Cut(serial, ":")
+	if f.openPorts == nil {
+		f.openPorts = map[string]map[int]bool{}
+	}
+	if f.openPorts[host] == nil {
+		f.openPorts[host] = map[int]bool{}
+	}
+	f.openPorts[host][port] = true // adbd now listens there
 	return nil
 }
 func (f *fakeADB) ABIs(ctx context.Context, s string) ([]string, error) {
@@ -323,7 +333,7 @@ func newRig(t *testing.T) *rig {
 			return "", errors.New("unknown")
 		},
 	}
-	rg.r = New(cfg, st, rg.adb, deps, func(ctx context.Context, title, body string) { rg.notes = append(rg.notes, title+": "+body) })
+	rg.r = New(cfg, st, rg.adb, deps, func(ctx context.Context, text string) { rg.notes = append(rg.notes, text) })
 	rg.r.Now = func() time.Time { return rg.now }
 	return rg
 }
@@ -481,7 +491,7 @@ func TestFetchFailureAlertRules(t *testing.T) {
 	if fmt.Sprint(alerts) != fmt.Sprint(want) {
 		t.Errorf("alerts %v, want %v", alerts, want)
 	}
-	if !strings.Contains(rg.notes[0], "Drop the .apkm into") || len(rg.notes) != 1 {
+	if !strings.Contains(rg.notes[0], "cannot download") || len(rg.notes) != 1 {
 		t.Errorf("notes %v", rg.notes)
 	}
 	// recovery
@@ -489,7 +499,7 @@ func TestFetchFailureAlertRules(t *testing.T) {
 	rg.now = rg.now.Add(48 * time.Hour)
 	rg.notes = nil
 	rg.r.Run(context.Background(), Options{})
-	if len(rg.notes) != 1 || !strings.Contains(rg.notes[0], "recovered") {
+	if len(rg.notes) != 1 || !strings.Contains(rg.notes[0], "\u2192") {
 		t.Errorf("notes %v", rg.notes)
 	}
 	if a := rg.st.App(prime); a.FetchFailures != 0 || a.LastFetchAlert != 0 {
@@ -512,7 +522,7 @@ func TestOneMessagePerAppNotPerDevice(t *testing.T) {
 	rg.device(t, "B", "10.0.0.2", prime)
 	rg.fetchErr = &sources.FetchError{Attempts: []string{"x"}, Fatal: true}
 	rg.r.Run(context.Background(), Options{})
-	if strings.Count(rg.notes[0], "cannot get") != 1 {
+	if strings.Count(rg.notes[0], "cannot download") != 1 {
 		t.Errorf("%q", rg.notes[0])
 	}
 }

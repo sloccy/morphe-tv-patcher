@@ -22,14 +22,14 @@ type Telegram struct {
 // Configured says whether messages are actually delivered (a token and a chat are set).
 func (t *Telegram) Configured() bool { return t != nil && t.Token != "" && t.Chat != "" }
 
-// Send logs the message and delivers it if configured. Errors are logged without the URL,
-// which contains the bot token.
-func (t *Telegram) Send(ctx context.Context, title, body string) {
-	slog.Info("notify", "title", title, "body", body)
+// Send logs the message and delivers it if configured. text is Telegram HTML (<b> only; escape
+// the rest). Errors are logged without the URL, which contains the bot token.
+func (t *Telegram) Send(ctx context.Context, text string) {
+	slog.Info("notify", "text", text)
 	if !t.Configured() {
 		return
 	}
-	if err := t.deliver(ctx, title, body); err != nil {
+	if err := t.deliver(ctx, text); err != nil {
 		slog.Warn("notify failed", "err", err)
 	}
 }
@@ -39,11 +39,11 @@ func (t *Telegram) Test(ctx context.Context) error {
 	if !t.Configured() {
 		return errors.New("Telegram is not set up")
 	}
-	return t.deliver(ctx, "test", "This is a test message from the TV Patcher page.")
+	return t.deliver(ctx, "This is a test message from the TV Patcher page.")
 }
 
 // deliver posts one message. Its errors never contain the bot token.
-func (t *Telegram) deliver(ctx context.Context, title, body string) error {
+func (t *Telegram) deliver(ctx context.Context, text string) error {
 	api := t.API
 	if api == "" {
 		api = "https://api.telegram.org"
@@ -52,11 +52,10 @@ func (t *Telegram) deliver(ctx context.Context, title, body string) error {
 	if hc == nil {
 		hc = &http.Client{Timeout: 20 * time.Second}
 	}
-	text := "tv-patcher: " + title + "\n" + body
 	if len(text) > 4000 {
 		text = text[:4000]
 	}
-	form := url.Values{"chat_id": {t.Chat}, "text": {text}}
+	form := url.Values{"chat_id": {t.Chat}, "text": {text}, "parse_mode": {"HTML"}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/bot%s/sendMessage", api, t.Token),
 		strings.NewReader(form.Encode()))
 	if err != nil {

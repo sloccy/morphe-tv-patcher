@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"log/slog"
+	"net"
+	"strconv"
 	"time"
 
 	"github.com/sloccy/morphe-tv-patcher/internal/store"
@@ -61,6 +64,12 @@ func (r *Runner) watch(ctx context.Context) {
 
 func (r *Runner) watchOne(ctx context.Context, id, host, name string) {
 	fixed := r.Cfg.TVFixedADBPort
+	// The connection the adb server already holds is the normal case: it needs no traffic to the
+	// TV at all. Only when it has gone is the TV looked for and connected to again.
+	if live := r.ADB.LivePort(ctx, host, fixed); live > 0 {
+		r.reached(ctx, id, host, name, live)
+		return
+	}
 	var known []int
 	if fixed > 0 {
 		known = append(known, fixed)
@@ -69,21 +78,105 @@ func (r *Runner) watchOne(ctx context.Context, id, host, name string) {
 		known = append(known, p)
 	}
 	port, ok := r.ADB.Probe(ctx, host, known...)
-	switch {
-	case !ok:
+	if !ok {
 		r.noteReach(id, "down", 0, "", false)
 		r.silent(ctx, id, name)
-	case fixed > 0 && port == fixed:
-		r.noteReach(id, "fixed", port, "", false)
-		r.answered(ctx, id, name, port)
-	default:
+		return
+	}
+	if fixed == 0 || port != fixed {
 		_ = r.Store.SetPort(id, port) // where a run finds it without searching
+	}
+	if fixed > 0 && port == fixed {
+		r.noteReach(id, "fixed", port, "", false)
+	} else {
 		r.noteReach(id, "wireless", port, r.noteOf(id), false)
-		r.answered(ctx, id, name, port)
-		if fixed > 0 {
+	}
+	r.answered(id)
+	r.reconnect(ctx, id, name)
+}
+
+// reached records a TV whose connection is still up and, on a random port, puts the fixed one back.
+func (r *Runner) reached(ctx context.Context, id, host, name string, port int) {
+	fixed := r.Cfg.TVFixedADBPort
+	if fixed > 0 && port == fixed {
+		r.noteReach(id, "fixed", port, "", false)
+		r.answered(id)
+		return
+	}
+	_ = r.Store.SetPort(id, port)
+	r.noteReach(id, "wireless", port, r.noteOf(id), false)
+	r.answered(id)
+	if fixed > 0 {
+		if p, ok := r.ADB.Probe(ctx, host, fixed); !ok || p != fixed {
 			r.restoreFixed(ctx, id, name)
 		}
 	}
+}
+
+// reconnect brings back a dropped connection to a TV that answers, then puts the fixed port back if
+// the connection came back on the random one. A failure is waited out with a growing pause, so a TV
+// that refuses this server is not dialled every few minutes.
+func (r *Runner) reconnect(ctx context.Context, id, name string) {
+	if r.watchPaused(id) {
+		return
+	}
+	dev, ok := r.device(id)
+	if !ok {
+		return
+	}
+	c, err := r.connect(ctx, dev)
+	if err != nil {
+		r.watchFail(id, name, "could not reconnect: "+err.Error())
+		return
+	}
+	r.watchOK(id)
+	slog.Info("reconnected to the TV", "device", name, "serial", c.serial)
+	if fixed := r.Cfg.TVFixedADBPort; fixed > 0 && c.serial != net.JoinHostPort(dev.Host, strconv.Itoa(fixed)) {
+		r.restoreFixedOn(ctx, id, name, &c)
+	}
+}
+
+func (r *Runner) device(id string) (store.Device, bool) {
+	for _, d := range r.Store.Settings().Devices {
+		if d.ID == id {
+			return d, true
+		}
+	}
+	return store.Device{}, false
+}
+
+// watchPaused says whether a failed reconnect or restore is still being waited out.
+func (r *Runner) watchPaused(id string) bool {
+	w := &r.watching
+	return r.Now().Before(w.next[id])
+}
+
+func (r *Runner) watchOK(id string) {
+	w := &r.watching
+	if w.fails != nil {
+		w.fails[id] = 0
+		delete(w.next, id)
+	}
+}
+
+// watchFail records why the TV could not be put right and waits longer each time.
+func (r *Runner) watchFail(id, name, why string) {
+	w := &r.watching
+	if w.fails == nil {
+		w.fails, w.next = map[string]int{}, map[string]time.Time{}
+	}
+	w.fails[id]++
+	pause := min(r.Cfg.WatchEvery<<min(w.fails[id], 6), time.Hour)
+	w.next[id] = r.Now().Add(pause)
+	r.mu.Lock()
+	if r.status.Reach == nil {
+		r.status.Reach = map[string]Reach{}
+	}
+	cur := r.status.Reach[id]
+	cur.Note = why
+	r.status.Reach[id] = cur
+	r.mu.Unlock()
+	slog.Warn("could not keep the TV connected", "device", name, "why", why, "retry in", pause)
 }
 
 func (r *Runner) noteOf(id string) string {
@@ -124,63 +217,43 @@ func (r *Runner) silent(ctx context.Context, id, name string) {
 	if !r.noteFailureAfter("reach:"+id, errors.New("not answering"), false, after) || r.Notify == nil {
 		return
 	}
-	r.Notify(ctx, "PROBLEMS", fmt.Sprintf("%s has not answered for %s. If it is on, Android has switched Wireless debugging off, "+
-		"most likely because it joined an access point it has not been told to trust. On the TV: Settings > Developer options > "+
-		"Wireless debugging > on, and tick \"Always allow on this network\" if it asks (once for each access point and band). "+
-		"The pairing is kept.", name, r.Cfg.WatchAlertAfter.Round(time.Minute)))
+	r.Notify(ctx, fmt.Sprintf("<b>Problems</b>\n%s: not answering for %s. Turn Wireless debugging back on",
+		html.EscapeString(name), r.Cfg.WatchAlertAfter.Round(time.Minute)))
 }
 
-// answered clears the silence counter and, if a message had gone out about it, says it is over.
-func (r *Runner) answered(ctx context.Context, id, name string, port int) {
-	if r.noteRecovered("reach:"+id) && r.Notify != nil {
-		r.Notify(ctx, "updated", fmt.Sprintf("%s is answering again (port %d).", name, port))
-	}
-}
+// answered clears the silence counter. Coming back is not worth a message of its own.
+func (r *Runner) answered(id string) { r.noteRecovered("reach:" + id) }
 
 // restoreFixed puts the fixed ADB port back on a TV that is reachable only on Wireless
-// debugging's random port, which is what a restart leaves behind. A failure is waited out with a
-// growing pause, so a TV that cannot take it is not connected to every few minutes.
+// debugging's random port, which is what a restart leaves behind.
 func (r *Runner) restoreFixed(ctx context.Context, id, name string) {
-	w := &r.watching
-	if w.fails == nil {
-		w.fails, w.next = map[string]int{}, map[string]time.Time{}
-	}
-	if r.Now().Before(w.next[id]) {
+	if r.watchPaused(id) {
 		return
 	}
-	fail := func(why string) {
-		w.fails[id]++
-		pause := min(r.Cfg.WatchEvery<<min(w.fails[id], 6), time.Hour)
-		w.next[id] = r.Now().Add(pause)
-		r.mu.Lock()
-		cur := r.status.Reach[id]
-		cur.Note = why
-		r.status.Reach[id] = cur
-		r.mu.Unlock()
-		slog.Warn("could not put the fixed ADB port back", "device", name, "why", why, "retry in", pause)
-	}
-	var dev store.Device
-	for _, d := range r.Store.Settings().Devices {
-		if d.ID == id {
-			dev = d
+	r.restoreFixedOn(ctx, id, name, nil)
+}
+
+// restoreFixedOn is restoreFixed over a connection already made (nil = connect first).
+func (r *Runner) restoreFixedOn(ctx context.Context, id, name string, c *conn) {
+	if c == nil {
+		dev, ok := r.device(id)
+		if !ok {
+			return
 		}
+		got, err := r.connect(ctx, dev)
+		if err != nil {
+			r.watchFail(id, name, err.Error())
+			return
+		}
+		c = &got
 	}
-	if dev.ID == "" {
-		return
-	}
-	c, err := r.connect(ctx, dev)
-	if err != nil {
-		fail(err.Error())
-		return
-	}
-	for _, l := range r.fixedPortStep(ctx, &c, true) {
+	for _, l := range r.fixedPortStep(ctx, c, true) {
 		if !l.OK {
-			fail(l.Message)
+			r.watchFail(id, name, l.Message)
 			return
 		}
 	}
-	w.fails[id] = 0
-	delete(w.next, id)
+	r.watchOK(id)
 	r.noteReach(id, "wireless", r.Store.Port(id), "", true)
 	slog.Info("put the fixed ADB port back", "device", name, "port", r.Cfg.TVFixedADBPort)
 }

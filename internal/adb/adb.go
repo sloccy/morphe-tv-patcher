@@ -136,6 +136,27 @@ func (c *Client) ConnectedPort(ctx context.Context, host string) int {
 	return best
 }
 
+// LivePort asks the adb server which port it already holds a working connection to host on (state
+// "device"), 0 if none. It talks only to the local adb server, so the TV sees nothing. prefer wins
+// when the server holds several, which is how the fixed port is kept over Wireless debugging's.
+func (c *Client) LivePort(ctx context.Context, host string, prefer int) int {
+	out, err := c.Run(ctx, "devices")
+	if err != nil {
+		return 0
+	}
+	best := 0
+	for _, m := range deviceLine.FindAllStringSubmatch(out, -1) {
+		if m[1] != host || m[3] != "device" {
+			continue
+		}
+		p, _ := strconv.Atoi(m[2])
+		if p > 0 && (best == 0 || p == prefer) {
+			best = p
+		}
+	}
+	return best
+}
+
 // Disconnect drops the adb server's entry for an address, so a port the TV has stopped using is
 // not kept around as an offline device that later "-s host:port" calls could pick up.
 func (c *Client) Disconnect(ctx context.Context, host string, port int) error {

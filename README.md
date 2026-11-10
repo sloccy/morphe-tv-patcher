@@ -263,18 +263,23 @@ on some TVs) will not let the adb shell write the property at all. tv-patcher th
 the port at the end of the run instead (`adb tcpip`), which lasts until the TV restarts: Wi-Fi drops
 and access point changes no longer matter, and the next run after a reboot sets it again. A run only sets the
 property (restarting adbd would drop the connection the installs need); **Full test** also restarts
-adbd so it takes effect at once.
+adbd so it takes effect at once. adbd is restarted only when the fixed port is not already
+answering, and tv-patcher connects to it straight afterwards, so the connection stays up.
+
+**The connection is kept.** tv-patcher uses the connection the adb server already holds for a TV
+and only runs the discovery below (last port, mDNS, scan) when that connection has dropped.
 
 **Watching between runs.** Every `WATCH_EVERY` (default `5m`, `0` = off) tv-patcher looks at each TV with
-plain TCP dials: no ADB session, so the TV shows no notice. The device card says what it found:
+plain TCP dials and the adb server's own list: no new ADB session while the connection is up, so the TV shows no notice. The device card says what it found:
 *Reachable on fixed port 5555*, *Reachable on Wireless debugging port N*, or *Not answering since …*.
-When `TV_FIXED_ADB_PORT` is set and a TV answers only on the random port (which is what a restart
-leaves behind), the watch connects once and puts the fixed port back, then records when
-(*fixed port restored …*); if the TV will not take it, the card says why and the retries slow down
-to once an hour. A TV silent for `WATCH_ALERT_AFTER` (default `3h`, `0` = never) gets a Telegram message that
+When a TV answers but the connection has dropped, the watch reconnects once (backing off, up to
+an hour, if the TV refuses). When `TV_FIXED_ADB_PORT` is set and the TV came back only on the random
+port (which is what a restart leaves behind), it puts the fixed port back and records when
+(*fixed port restored …*); if the TV will not take it, the card says why and the retries slow down.
+A TV silent for `WATCH_ALERT_AFTER` (default `3h`, `0` = never) gets a Telegram message that
 says what to do: turn Wireless debugging back on and tick "Always allow on this network", which each
 access point and band needs once. A TV that is simply switched off looks the same, hence the long
-delay; a message follows when it answers again.
+delay.
 
 Temporary download failures alert on Telegram only after 3 cycles in a row (then at most daily); a
 wrong signature or a phone build alerts at once; a message follows when it recovers.

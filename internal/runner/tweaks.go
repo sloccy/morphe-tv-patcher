@@ -3,8 +3,10 @@ package runner
 import (
 	"context"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sloccy/morphe-tv-patcher/internal/store"
 )
@@ -25,6 +27,14 @@ func (r *Runner) fixedPortStep(ctx context.Context, c *conn, restart bool) []Res
 		return nil
 	}
 	port := strconv.Itoa(want)
+	// Already on the fixed port, or adbd answers there: nothing to set and nothing to restart.
+	// Restarting adbd drops the connection, so it is done only when the port really is closed.
+	if c.serial == net.JoinHostPort(c.dev.Host, port) {
+		return nil
+	}
+	if p, ok := r.ADB.Probe(ctx, c.dev.Host, want); ok && p == want {
+		return nil
+	}
 	line := Result{Device: c.dev.Name, Package: tweakPackage, Name: "TV settings"}
 	have, err := r.ADB.Shell(ctx, c.serial, "getprop persist.adb.tcp.port")
 	if err != nil {
@@ -57,7 +67,7 @@ func (r *Runner) fixedPortStep(ctx context.Context, c *conn, restart bool) []Res
 	line.OK, line.Changed = true, true
 	line.Message = fmt.Sprintf("TV settings: ADB will listen on the fixed port %s from the next restart, so its random port no longer has to be found", port)
 	if restart {
-		if err := r.ADB.TCPIP(ctx, c.serial, want); err != nil {
+		if err := r.restartOnFixed(ctx, c); err != nil {
 			line.Message = fmt.Sprintf("TV settings: the fixed ADB port %s is set but adbd would not restart on it: %v. It takes effect when the TV next restarts", port, err)
 			line.OK, line.Changed = false, false
 			return []Result{line}
@@ -92,13 +102,37 @@ func (r *Runner) finishFixedPort(ctx context.Context, conns []conn) {
 
 func (r *Runner) listenOnFixedPort(ctx context.Context, c *conn, line Result, why string) Result {
 	port := r.Cfg.TVFixedADBPort
-	if err := r.ADB.TCPIP(ctx, c.serial, port); err != nil {
+	if err := r.restartOnFixed(ctx, c); err != nil {
 		line.Message = fmt.Sprintf("TV settings: this TV %s, and adbd would not restart on port %d either: %v. The random wireless-debugging port is still used", why, port, err)
 		return line
 	}
 	line.OK, line.Changed = true, true
 	line.Message = fmt.Sprintf("TV settings: this TV %s, so ADB listens on port %d only until the TV restarts; the next run sets it again", why, port)
 	return line
+}
+
+// restartOnFixed restarts adbd on the fixed port and connects to it straight away, so the adb
+// server holds the stable connection instead of the TV staying disconnected until the next run.
+// The connection that carried the restart is gone, so c is pointed at the new one.
+func (r *Runner) restartOnFixed(ctx context.Context, c *conn) error {
+	want := r.Cfg.TVFixedADBPort
+	if err := r.ADB.TCPIP(ctx, c.serial, want); err != nil {
+		return err
+	}
+	// adbd needs a moment to come back; a failed connect here is not an error, the watch retries.
+	for range 5 {
+		if got, err := r.ADB.Connect(ctx, c.dev.Host, want); err == nil && got == want {
+			c.serial = net.JoinHostPort(c.dev.Host, strconv.Itoa(want))
+			_ = r.Store.SetPort(c.dev.ID, want)
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(r.reconnectPause):
+		}
+	}
+	return nil
 }
 
 // QuietCheck is what a connection-free test found.

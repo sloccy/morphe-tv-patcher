@@ -247,6 +247,24 @@ func TestConnectedPortReadsTheAdbServerList(t *testing.T) {
 	}
 }
 
+func TestLivePortOnlyCountsWorkingConnectionsAndPrefersTheFixedPort(t *testing.T) {
+	list := "List of devices attached\n" +
+		"10.0.0.6:37000\toffline\n" +
+		"10.0.0.6:45678\tdevice\n" +
+		"10.0.0.6:5555\tdevice\n" +
+		"10.0.0.9:41000\tdevice\n"
+	c := &Client{Run: func(ctx context.Context, args ...string) (string, error) { return list, nil }}
+	if p := c.LivePort(context.Background(), "10.0.0.6", 5555); p != 5555 {
+		t.Errorf("the fixed port wins: %d", p)
+	}
+	if p := c.LivePort(context.Background(), "10.0.0.6", 0); p != 45678 {
+		t.Errorf("an offline entry is not a connection: %d", p)
+	}
+	if p := c.LivePort(context.Background(), "10.0.0.5", 5555); p != 0 {
+		t.Errorf("unknown host: %d", p)
+	}
+}
+
 func TestPairingPortComesFromTheTVsAdvertisement(t *testing.T) {
 	c := &Client{
 		Run: func(ctx context.Context, args ...string) (string, error) { return "", errors.New("no mdns") },

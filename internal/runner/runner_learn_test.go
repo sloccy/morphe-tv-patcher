@@ -454,6 +454,7 @@ func TestPairingLearnsThePortTheAdbServerJustFound(t *testing.T) {
 	d := rg.device(t, "Bedroom", "10.0.0.7", prime)
 	_ = rg.st.SetPort(d.ID, 37000) // the port it was on before it was unpaired
 	rg.adb.devicePort = 45678
+	rg.adb.openPorts = map[string]map[int]bool{d.Host: {45678: true}}
 	if _, err := rg.r.PairDevice(context.Background(), d, 42123, "123456"); err != nil {
 		t.Fatal(err)
 	}
@@ -740,18 +741,32 @@ func watchRig(t *testing.T) (*rig, store.Device) {
 	rg.adb.noSetprop = true                   // the Bedroom TV: the port only lasts until a restart
 	rg.r.Run(context.Background(), Options{}) // a first connection, so the TV is known
 	rg.adb.connects, rg.adb.tcpip = 0, nil
+	rg.adb.openPorts = nil // the TV has restarted since: adbd no longer listens on the fixed port
 	return rg, d
 }
 
-func TestTheWatchLeavesAListeningFixedPortAlone(t *testing.T) {
+func TestTheWatchLeavesAHeldConnectionAlone(t *testing.T) {
+	rg, d := watchRig(t)
+	rg.adb.openPorts = map[string]map[int]bool{d.Host: {5555: true}}
+	rg.adb.live = map[string]int{d.Host: 5555}
+	rg.r.watch(context.Background())
+	if got := rg.r.Status().Reach[d.ID]; got.State != "fixed" || got.Port != 5555 {
+		t.Fatalf("%+v", got)
+	}
+	if rg.adb.connects != 0 || len(rg.adb.tcpip) != 0 {
+		t.Error("a connection that is up must be left alone")
+	}
+}
+
+func TestTheWatchReconnectsOnceAfterADrop(t *testing.T) {
 	rg, d := watchRig(t)
 	rg.adb.openPorts = map[string]map[int]bool{d.Host: {5555: true}}
 	rg.r.watch(context.Background())
 	if got := rg.r.Status().Reach[d.ID]; got.State != "fixed" || got.Port != 5555 {
 		t.Fatalf("%+v", got)
 	}
-	if rg.adb.connects != 0 {
-		t.Error("a TV that answers on the fixed port must not be connected to: it would show a notice")
+	if rg.adb.connects != 1 || len(rg.adb.tcpip) != 0 {
+		t.Errorf("one reconnect, no adbd restart: connects=%d tcpip=%v", rg.adb.connects, rg.adb.tcpip)
 	}
 }
 
@@ -762,16 +777,17 @@ func TestTheWatchPutsTheFixedPortBackAfterARestart(t *testing.T) {
 	if got.State != "wireless" || got.Restored.IsZero() {
 		t.Fatalf("%+v", got)
 	}
-	if rg.adb.connects != 1 || len(rg.adb.tcpip) != 1 {
-		t.Errorf("one session to restart adbd on the fixed port: connects=%d tcpip=%v", rg.adb.connects, rg.adb.tcpip)
+	if len(rg.adb.tcpip) != 1 {
+		t.Errorf("adbd restarted once on the fixed port: %v", rg.adb.tcpip)
 	}
-	rg.adb.openPorts = map[string]map[int]bool{d.Host: {5555: true}}
+	rg.adb.live = map[string]int{d.Host: 5555}
+	connects := rg.adb.connects
 	rg.r.watch(context.Background())
 	if got := rg.r.Status().Reach[d.ID]; got.State != "fixed" || got.Restored.IsZero() {
 		t.Errorf("the restore time is kept: %+v", got)
 	}
-	if rg.adb.connects != 1 {
-		t.Error("nothing more to do once the fixed port answers")
+	if rg.adb.connects != connects || len(rg.adb.tcpip) != 1 {
+		t.Error("nothing more to do once the connection is held on the fixed port")
 	}
 }
 
@@ -798,7 +814,7 @@ func TestTheWatchBacksOffFromATvThatWillNotTakeTheFixedPort(t *testing.T) {
 func TestASilentTvIsReportedOnceAndWelcomedBack(t *testing.T) {
 	rg, d := watchRig(t)
 	var sent []string
-	rg.r.Notify = func(_ context.Context, title, body string) { sent = append(sent, title+": "+body) }
+	rg.r.Notify = func(_ context.Context, text string) { sent = append(sent, text) }
 	rg.adb.down[d.Host] = true
 	for range 2 { // 10 minutes: shorter than WatchAlertAfter
 		rg.r.watch(context.Background())
@@ -808,7 +824,7 @@ func TestASilentTvIsReportedOnceAndWelcomedBack(t *testing.T) {
 	}
 	rg.r.watch(context.Background()) // the third tick reaches 15 minutes
 	rg.r.watch(context.Background())
-	if len(sent) != 1 || !strings.Contains(sent[0], "Always allow on this network") {
+	if len(sent) != 1 || !strings.Contains(sent[0], "not answering") {
 		t.Fatalf("once, and with what to do: %v", sent)
 	}
 	if got := rg.r.Status().Reach[d.ID]; got.State != "down" {
@@ -817,8 +833,8 @@ func TestASilentTvIsReportedOnceAndWelcomedBack(t *testing.T) {
 	delete(rg.adb.down, d.Host)
 	rg.adb.openPorts = map[string]map[int]bool{d.Host: {5555: true}}
 	rg.r.watch(context.Background())
-	if len(sent) != 2 || !strings.Contains(sent[1], "answering again") {
-		t.Errorf("%v", sent)
+	if len(sent) != 1 {
+		t.Errorf("coming back is not worth a message: %v", sent)
 	}
 }
 
