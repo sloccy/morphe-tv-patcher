@@ -29,7 +29,7 @@ import (
 	"github.com/sloccy/morphe-tv-patcher/internal/store"
 )
 
-//go:embed ui/index.html
+//go:embed ui/index.html ui/favicon.svg
 var ui embed.FS
 
 // Backend is what the server needs from the runner.
@@ -75,6 +75,8 @@ const maxBody = 64 << 10
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.index)
+	mux.HandleFunc("GET /favicon.svg", s.favicon)
+	mux.HandleFunc("GET /favicon.ico", s.favicon)
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") })
 	mux.HandleFunc("GET /api/state", s.state)
 	mux.HandleFunc("GET /api/log", s.log)
@@ -106,7 +108,7 @@ func (s *Server) guard(next http.Handler) http.Handler {
 		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data:; frame-ancestors 'none'; base-uri 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'")
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			w.Header().Set("Cache-Control", "no-store")
 		}
@@ -166,6 +168,14 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	b, _ := ui.ReadFile("ui/index.html")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(b)
+}
+
+// favicon serves the page icon as a real file so tools like Lantern can fetch it.
+func (s *Server) favicon(w http.ResponseWriter, _ *http.Request) {
+	b, _ := ui.ReadFile("ui/favicon.svg")
+	w.Header().Set("Content-Type", "image/svg+xml")
+	w.Header().Set("Cache-Control", "max-age=86400")
 	_, _ = w.Write(b)
 }
 

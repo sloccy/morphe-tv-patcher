@@ -274,8 +274,27 @@ func TestSecurityHeaders(t *testing.T) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.Header.Get("X-Content-Type-Options") != "nosniff" || !strings.Contains(resp.Header.Get("Content-Security-Policy"), "default-src 'none'") ||
-		!strings.Contains(resp.Header.Get("Content-Security-Policy"), "img-src data:") { // the page's favicon is a data: URI
+		!strings.Contains(resp.Header.Get("Content-Security-Policy"), "img-src 'self'") {
 		t.Errorf("headers %v", resp.Header)
+	}
+}
+
+func TestFaviconIsServedAsAFile(t *testing.T) {
+	srv, _, _ := setup(t)
+	for _, p := range []string{"/favicon.svg", "/favicon.ico"} {
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+p, http.NoBody)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != "image/svg+xml" || !strings.HasPrefix(string(b), "<svg") {
+			t.Errorf("%s: %d %q %q", p, resp.StatusCode, resp.Header.Get("Content-Type"), b)
+		}
+	}
+	if code, b := do(t, srv, "GET", "/", "", nil); code != 200 || !strings.Contains(b, `href="/favicon.svg"`) {
+		t.Errorf("index does not link /favicon.svg: %d", code)
 	}
 }
 
