@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -108,22 +109,44 @@ func TestFailedLookupsAreNotRepeatedAtOnce(t *testing.T) {
 	}
 }
 
-func TestUnreachableTVAlertsOnTheSecondCycleAndSaysWhatToDo(t *testing.T) {
+func TestUnreachableTVAlertsOnlyAfterAFullDayAndSaysWhatToDo(t *testing.T) {
 	rg := newRig(t)
 	rg.device(t, "Bedroom", "10.0.0.7", prime)
 	rg.adb.down["10.0.0.7"] = true
-	alerts := make([]bool, 0, 3)
+	alerts := make([]bool, 0, 9)
 	var msg string
-	for range 3 {
+	// every 6 hours for 2 days: down for 0h, 6h, 12h, 18h, 24h (the alert), then quiet until a day later
+	for range 9 {
 		res := rg.r.Run(context.Background(), Options{})
 		alerts = append(alerts, res[0].Alert)
 		msg = res[0].Message
+		rg.now = rg.now.Add(6 * time.Hour)
 	}
-	if alerts[0] || !alerts[1] || alerts[2] {
-		t.Fatalf("alert on the 2nd failed cycle only (then at most daily): %v", alerts)
+	want := []bool{false, false, false, false, true, false, false, false, false}
+	if !slices.Equal(alerts, want) {
+		t.Fatalf("one alert once it has been down a full day, then at most daily: %v", alerts)
 	}
 	if !strings.Contains(msg, "Wireless debugging") {
 		t.Errorf("tell the user what to do: %s", msg)
+	}
+}
+
+func TestATVThatComesBackRestartsTheDayCount(t *testing.T) {
+	rg := newRig(t)
+	rg.device(t, "Bedroom", "10.0.0.7", prime)
+	for range 3 { // 18 hours down
+		rg.adb.down["10.0.0.7"] = true
+		rg.r.Run(context.Background(), Options{Manual: true})
+		rg.now = rg.now.Add(6 * time.Hour)
+	}
+	delete(rg.adb.down, "10.0.0.7")
+	rg.r.Run(context.Background(), Options{Manual: true}) // answers: the streak is over
+	rg.adb.down["10.0.0.7"] = true
+	rg.now = rg.now.Add(12 * time.Hour)
+	for _, x := range rg.r.Run(context.Background(), Options{Manual: true}) {
+		if x.Alert && !x.OK {
+			t.Fatalf("down only 12h since it last answered: %+v", x)
+		}
 	}
 }
 
@@ -414,18 +437,26 @@ func TestQuietCheckNeverConnects(t *testing.T) {
 	}
 }
 
-func TestAStalePortIsForgottenSoItIsNotDialledForever(t *testing.T) {
+func TestAFailedConnectKeepsThePortAndAMovedOneReplacesIt(t *testing.T) {
 	rg := newRig(t)
 	d := rg.device(t, "Bedroom", "10.0.0.7", prime)
 	rg.r.Run(context.Background(), Options{Manual: true})
 	if rg.st.Port(d.ID) != 40000 {
 		t.Fatalf("the working port is remembered: %d", rg.st.Port(d.ID))
 	}
-	// Wireless debugging goes off and on, so adbd picks a new port: the old one is now dead.
+	// A TV that does not answer (asleep, a dropped packet) says nothing about its port: keeping it
+	// saves the next run a search over the least reliable path.
 	rg.adb.down["10.0.0.7"] = true
 	rg.r.Run(context.Background(), Options{Manual: true})
-	if rg.st.Port(d.ID) != 0 {
-		t.Errorf("a port nothing answers on must be forgotten, not dialled first forever: %d", rg.st.Port(d.ID))
+	if rg.st.Port(d.ID) != 40000 {
+		t.Errorf("a failed connect must not erase the remembered port: %d", rg.st.Port(d.ID))
+	}
+	// The real client dials the remembered port and then looks further; whatever it reaches is saved.
+	delete(rg.adb.down, "10.0.0.7")
+	_ = rg.st.SetPort(d.ID, 41111)
+	rg.r.Run(context.Background(), Options{Manual: true})
+	if rg.st.Port(d.ID) == 0 {
+		t.Errorf("a working connect saves its port")
 	}
 }
 
@@ -441,8 +472,19 @@ func TestALapsedPairingKeepsThePortAndSaysToPairAgain(t *testing.T) {
 			line = &res[i]
 		}
 	}
+	if line == nil || line.Alert {
+		t.Fatalf("losing the pairing is only worth a message after a full day, like any other outage: %+v", res)
+	}
+	rg.now = rg.now.Add(25 * time.Hour)
+	res = rg.r.Run(context.Background(), Options{Manual: true})
+	line = nil
+	for i := range res {
+		if strings.Contains(res[i].Message, "Pair") {
+			line = &res[i]
+		}
+	}
 	if line == nil || !line.Alert {
-		t.Fatalf("losing the pairing needs somebody at the TV, so it is said at once: %+v", res)
+		t.Fatalf("a day later it is said: %+v", res)
 	}
 	if rg.st.Port(d.ID) != 40000 {
 		t.Errorf("the TV answered, so its port is still good: %d", rg.st.Port(d.ID))

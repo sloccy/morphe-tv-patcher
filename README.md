@@ -169,6 +169,13 @@ hand, and is shortened to 5 days for a TV that still expires ADB keys), or the f
 downloading, so a release that changes nothing for an app never reaches the TV at all. **Run now** always connects. Each TV card has two test buttons: **Test**
 only looks at the network (no ADB session, so no notice) and says whether Wireless debugging is
 answering; **Full test** really connects, checks the pairing, reads the CPU and updates the boot helper.
+A connection that fails is not reported at once: the whole connect sequence (adb's current
+connection, the remembered port, mDNS, a port scan) is run again from the start up to `CONNECT_ATTEMPTS`
+times (default 3), pausing `CONNECT_RETRY_WAIT` (default 30s, doubling) between rounds and restarting the
+adb server before the last one. A connection only counts once adb reports the device as online, a dead
+"offline" entry is dropped and reconnected, and a "no longer paired" answer has to repeat before it is
+believed. A message is sent only for a TV that has stayed unreachable, with no success in between,
+for a full day (then at most once a day), and it carries adb's last output. The remembered port is kept across a failure.
 The app list on each card can be collapsed (the line above it still says how many apps the TV gets).
 
 **Boot helper.** Android turns Wireless debugging off when a TV restarts — and at other times of its
@@ -295,6 +302,8 @@ wrong signature or a phone build alerts at once; a message follows when it recov
 | `FLARESOLVERR_URL` | | e.g. `http://127.0.0.1:8191` |
 | `APKMIRROR_MIN_INTERVAL` | `4s` | minimum gap between APKMirror requests |
 | `APKMIRROR_COOLDOWN` | `5m` | first pause after APKMirror pushes back (doubles, up to 1h) |
+| `CONNECT_ATTEMPTS` | `3` | how many times a run goes through the whole connect sequence before calling a TV unreachable (1-10) |
+| `CONNECT_RETRY_WAIT` | `30s` | pause after the first failed round; doubles after each further one |
 | `VERIFY_EVERY` | `168h` | how often a scheduled run connects to a TV only to check what is installed; capped at 120h for a TV that has not confirmed `adb_allowed_connection_time=0` |
 | `ADB_SCAN_RANGE` | `30000-61000` | ports the last-resort scan tries when mDNS is silent |
 | `TV_FIXED_ADB_PORT` | `0` | pin ADB to this port (0 = off); unencrypted and LAN-visible, read the section above |

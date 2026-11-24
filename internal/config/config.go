@@ -47,6 +47,11 @@ type Config struct {
 	// means the random wireless-debugging port is found each time). Legacy ADB over TCP is not
 	// encrypted and leaves a well-known port listening on the LAN, so this is opt-in.
 	TVFixedADBPort int
+	// ConnectAttempts is how many times a run goes through the whole connect sequence (known port,
+	// mDNS, port scan) before it calls a TV unreachable; ConnectRetryWait is the pause after the
+	// first failed round, doubling after each further one.
+	ConnectAttempts  int
+	ConnectRetryWait time.Duration
 	// ScanLo, ScanHi bound the port scan that looks for the wireless-debugging port when neither
 	// the remembered port nor mDNS found it. adbd picks it from the kernel's ephemeral range.
 	ScanLo, ScanHi int
@@ -139,6 +144,12 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	}
 	if c.TVFixedADBPort, err = strconv.Atoi(def("TV_FIXED_ADB_PORT", "0")); err != nil || c.TVFixedADBPort < 0 || c.TVFixedADBPort > 65535 || (c.TVFixedADBPort > 0 && c.TVFixedADBPort < 1024) {
 		return c, fmt.Errorf("TV_FIXED_ADB_PORT must be 0 (off) or a port from 1024 to 65535: %q", getenv("TV_FIXED_ADB_PORT"))
+	}
+	if c.ConnectAttempts, err = strconv.Atoi(def("CONNECT_ATTEMPTS", "3")); err != nil || c.ConnectAttempts < 1 || c.ConnectAttempts > 10 {
+		return c, fmt.Errorf("CONNECT_ATTEMPTS must be from 1 to 10: %q", getenv("CONNECT_ATTEMPTS"))
+	}
+	if c.ConnectRetryWait, err = time.ParseDuration(def("CONNECT_RETRY_WAIT", "30s")); err != nil || c.ConnectRetryWait < 0 {
+		return c, fmt.Errorf("CONNECT_RETRY_WAIT must be a duration (e.g. 30s): %q", getenv("CONNECT_RETRY_WAIT"))
 	}
 	if c.ScanLo, c.ScanHi, err = ports(def("ADB_SCAN_RANGE", "30000-61000")); err != nil {
 		return c, fmt.Errorf("ADB_SCAN_RANGE must be two port numbers low-high (e.g. 30000-61000): %q", getenv("ADB_SCAN_RANGE"))

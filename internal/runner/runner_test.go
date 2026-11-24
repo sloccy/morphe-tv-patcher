@@ -51,7 +51,12 @@ type fakeADB struct {
 	tcpip       []string                // "serial port"
 	jobsDump    string                  // what "dumpsys jobscheduler" says
 	helperLog   string                  // what "logcat -s BootAdb" says
+	failFirst   int                     // the first N Connect calls fail as unreachable (a hiccup)
+	notPairedN  int                     // the first N Connect calls fail as not paired
+	resets      int                     // adb server restarts
 }
+
+func (f *fakeADB) ResetServer(ctx context.Context) error { f.resets++; return nil }
 
 func (f *fakeADB) Playing(ctx context.Context, s string) (bool, error) {
 	host, _, _ := strings.Cut(s, ":")
@@ -85,6 +90,14 @@ func (f *fakeADB) Probe(ctx context.Context, host string, known ...int) (int, bo
 }
 func (f *fakeADB) Connect(ctx context.Context, host string, known ...int) (int, error) {
 	f.connects++
+	if f.failFirst > 0 {
+		f.failFirst--
+		return 0, adb.ErrUnreachable
+	}
+	if f.notPairedN > 0 {
+		f.notPairedN--
+		return 0, adb.ErrNotPaired
+	}
 	if f.down[host] {
 		return 0, adb.ErrUnreachable
 	}
@@ -1635,5 +1648,68 @@ func TestCanRollbackFollowsTheOptOutAndNetflix(t *testing.T) {
 	no := false
 	if !CanRollback(prime, store.Override{}) || CanRollback(prime, store.Override{AllowUninstall: &no}) || CanRollback(netflix, store.Override{}) {
 		t.Error("rollback rule is wrong")
+	}
+}
+
+// retryRig is a rig that goes through the connect sequence three times and never really waits.
+func retryRig(t *testing.T) (rg *rig, slept *int) {
+	t.Helper()
+	rg, slept = newRig(t), new(int)
+	rg.r.Cfg.ConnectAttempts, rg.r.Cfg.ConnectRetryWait = 3, time.Second
+	rg.r.Sleep = func(context.Context, time.Duration) bool { *slept++; return true }
+	return rg, slept
+}
+
+func TestAHiccupIsRetriedFromTheStartWithoutAnAlert(t *testing.T) {
+	rg, slept := retryRig(t)
+	d := rg.deviceWith(t, "TV", "10.0.0.6", store.AppChoice{Package: prime, Source: defSrc})
+	_ = rg.r.Store.SetPort(d.ID, 41000)
+	rg.adb.failFirst = 2
+	for _, x := range rg.r.Run(context.Background(), Options{Manual: true}) {
+		if (x.Alert && !x.OK) || strings.Contains(x.Message, "not reachable") {
+			t.Fatalf("a TV that answers on the third try must not alert: %+v", x)
+		}
+	}
+	if rg.adb.connects < 3 || *slept != 2 {
+		t.Errorf("connects %d, sleeps %d", rg.adb.connects, *slept)
+	}
+	if rg.adb.resets != 1 {
+		t.Errorf("the adb server is restarted before the last round, got %d", rg.adb.resets)
+	}
+}
+
+func TestUnreachableAfterEveryRoundRestartsAdbAndKeepsThePort(t *testing.T) {
+	rg, _ := retryRig(t)
+	d := rg.deviceWith(t, "TV", "10.0.0.6", store.AppChoice{Package: prime, Source: defSrc})
+	_ = rg.r.Store.SetPort(d.ID, 41000)
+	rg.adb.down["10.0.0.6"] = true
+	res := rg.r.Run(context.Background(), Options{Manual: true})
+	if rg.adb.connects != 3 || rg.adb.resets != 1 {
+		t.Errorf("connects %d, resets %d", rg.adb.connects, rg.adb.resets)
+	}
+	if len(res) == 0 || res[0].OK || !strings.Contains(res[0].Message, "after 3 tries") {
+		t.Errorf("%+v", res)
+	}
+	if p := rg.r.Store.Port(d.ID); p != 41000 {
+		t.Errorf("one failed run must not forget the right port, got %d", p)
+	}
+}
+
+func TestLostPairingNeedsTwoRoundsInARow(t *testing.T) {
+	rg, _ := retryRig(t)
+	rg.deviceWith(t, "TV", "10.0.0.6", store.AppChoice{Package: prime, Source: defSrc})
+	rg.adb.notPairedN = 1
+	for _, x := range rg.r.Run(context.Background(), Options{Manual: true}) {
+		if (x.Alert && !x.OK) || strings.Contains(x.Message, "no longer accepts") {
+			t.Fatalf("one refusal followed by success is not a lost pairing: %+v", x)
+		}
+	}
+	rg.adb.notPairedN, rg.adb.connects = 5, 0
+	rg.r.Run(context.Background(), Options{Manual: true})
+	rg.now = rg.now.Add(25 * time.Hour)
+	rg.adb.notPairedN, rg.adb.connects = 5, 0
+	res := rg.r.Run(context.Background(), Options{Manual: true})
+	if rg.adb.connects != 2 || len(res) == 0 || !res[0].Alert || !strings.Contains(res[0].Message, "no longer accepts") {
+		t.Errorf("connects %d: %+v", rg.adb.connects, res)
 	}
 }

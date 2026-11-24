@@ -49,6 +49,7 @@ type ADB interface {
 	// preferring prefer. It sends nothing to the TV.
 	LivePort(ctx context.Context, host string, prefer int) int
 	TCPIP(ctx context.Context, serial string, port int) error
+	ResetServer(ctx context.Context) error
 }
 
 // Deps are the outside world; tests replace them. Patch sources are passed in so each
@@ -128,6 +129,8 @@ type Runner struct {
 	Deps   Deps
 	Notify func(ctx context.Context, text string)
 	Now    func() time.Time
+	// Sleep waits between connect rounds; false means ctx ended first. Tests replace it.
+	Sleep func(ctx context.Context, d time.Duration) bool
 
 	mu        sync.Mutex
 	status    Status
@@ -142,9 +145,20 @@ type Runner struct {
 
 // New makes a Runner.
 func New(cfg config.Config, st *store.Store, a ADB, d Deps, notify func(context.Context, string)) *Runner {
-	return &Runner{Cfg: cfg, Store: st, ADB: a, Deps: d, Notify: notify, Now: time.Now, wake: make(chan Options, 1),
+	return &Runner{Cfg: cfg, Store: st, ADB: a, Deps: d, Notify: notify, Now: time.Now, Sleep: sleep, wake: make(chan Options, 1),
 		lists: map[string]*patches.List{}, listCache: map[string]*patches.List{},
 		reconnectPause: 2 * time.Second}
+}
+
+func sleep(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 // Status returns a copy of the current status.
@@ -314,7 +328,7 @@ type DeviceCheck struct {
 // TestDevice connects to a device the way a run would (known port, mDNS, port scan) and reads
 // its CPU. The error is plain advice the page can show as it is.
 func (r *Runner) TestDevice(ctx context.Context, d store.Device) (DeviceCheck, error) {
-	c, err := r.connect(ctx, d)
+	c, err := r.connectTries(ctx, d, 1) // one round: the page's button must answer quickly
 	if err != nil {
 		if errors.Is(err, adb.ErrNotPaired) {
 			return DeviceCheck{}, fmt.Errorf("wireless debugging is on, but this server is not paired with %s (the pairing may have been reset). Use Pair… again", d.Name)
@@ -359,7 +373,7 @@ func (r *Runner) PairDevice(ctx context.Context, d store.Device, pairPort int, c
 	}
 	cctx, cancel := context.WithTimeout(ctx, 40*time.Second)
 	defer cancel()
-	if _, err := r.connect(cctx, d); err != nil {
+	if _, err := r.connectTries(cctx, d, 1); err != nil {
 		slog.Info("paired, but could not read the device yet", "device", d.Name, "err", err)
 		return false, nil
 	}
@@ -513,18 +527,25 @@ func (r *Runner) ensureConn(ctx context.Context, c *conn) error {
 	return nil
 }
 
+// deviceDownAlert is how long a TV has to stay unreachable, with no success in between, before
+// tv-patcher sends a message about it.
+const deviceDownAlert = day
+
 // unreachable is the result line for a TV that could not be connected to.
 func (r *Runner) unreachable(d store.Device, err error) Result {
 	// Losing the pairing needs somebody at the TV, so it is said at once and not dressed up as a
 	// TV that might just be asleep.
 	if errors.Is(err, adb.ErrNotPaired) {
-		return Result{Device: d.Name, Alert: r.noteFailureAfter("device:"+d.ID, err, false, 1), Short: d.Name + ": no longer paired, pair it again from the page",
+		return Result{Device: d.Name, Alert: r.noteDownFor("device:"+d.ID, err, deviceDownAlert), Short: d.Name + ": no longer paired, pair it again from the page",
 			Message: fmt.Sprintf("%s (%s) answers but no longer accepts this server: pair it again from the page (Pair…). Android drops a pairing key it has not seen for a week, which the boot helper switches off once it is installed.", d.Name, d.Host)}
 	}
-	// a TV that stays unreachable usually has Wireless debugging switched off (a reboot does that),
-	// so say so after two cycles in a row rather than waiting for the usual three
-	alert := r.noteFailureAfter("device:"+d.ID, err, false, min(2, r.Cfg.FailuresBeforeAlert))
-	return Result{Device: d.Name, Alert: alert, Short: d.Name + ": not reachable", Message: fmt.Sprintf("%s (%s) is not reachable: %v. If the TV is on, Wireless debugging is off (a restart does that, and so does joining an access point Android has not been told to trust): turn it back on in Developer options and tick \"Always allow on this network\" if asked. The pairing is kept.", d.Name, d.Host, err)}
+	// A TV that does not answer is only worth a message once it has not answered for a full day.
+	alert := r.noteDownFor("device:"+d.ID, err, deviceDownAlert)
+	tries := ""
+	if n := r.Cfg.ConnectAttempts; n > 1 {
+		tries = fmt.Sprintf(" after %d tries", n)
+	}
+	return Result{Device: d.Name, Alert: alert, Short: d.Name + ": not reachable", Message: fmt.Sprintf("%s (%s) is not reachable%s: %v. If the TV is on, Wireless debugging is off (a restart does that, and so does joining an access point Android has not been told to trust): turn it back on in Developer options and tick \"Always allow on this network\" if asked. The pairing is kept.", d.Name, d.Host, tries, err)}
 }
 
 // appKey is one app from one patch source; devices that picked the same pair share the work.
@@ -654,7 +675,8 @@ func (r *Runner) pass(ctx context.Context, o Options) []Result {
 	return out
 }
 
-func (r *Runner) connect(ctx context.Context, d store.Device) (conn, error) {
+// connectRound is one pass of the connect sequence: find the port, then read the TV's CPU over it.
+func (r *Runner) connectRound(ctx context.Context, d store.Device) (conn, error) {
 	fixed := r.Cfg.TVFixedADBPort
 	// A connection the adb server already holds is used as it is: reconnecting would only make the
 	// TV show another notice, and the fallbacks below are for when it has dropped.
@@ -669,14 +691,12 @@ func (r *Runner) connect(ctx context.Context, d store.Device) (conn, error) {
 		}
 		var err error
 		if port, err = r.ADB.Connect(ctx, d.Host, known...); err != nil {
-			// Wireless debugging picks a new port every time Android switches it back on, so a
-			// remembered one that has gone must be forgotten: kept, it is dialled first forever.
-			if errors.Is(err, adb.ErrUnreachable) {
-				_ = r.Store.SetPort(d.ID, 0)
-			}
 			return conn{}, err
 		}
 	}
+	// A remembered port that has gone is kept on failure: one dropped Wi-Fi packet must not erase
+	// the right answer. A connect that works saves the port it really reached, so a moved port is
+	// still replaced.
 	_ = r.Store.SetPort(d.ID, port)
 	serial := fmt.Sprintf("%s:%d", d.Host, port)
 	abis, err := r.ADB.ABIs(ctx, serial)
@@ -686,6 +706,59 @@ func (r *Runner) connect(ctx context.Context, d store.Device) (conn, error) {
 	sdk, _ := r.ADB.SDK(ctx, serial)
 	_ = r.Store.SetDeviceInfo(d.ID, store.DeviceInfo{ABIs: abis, SDK: sdk, SeenAt: r.Now().Format(time.RFC3339)})
 	return conn{dev: d, serial: serial, abis: abis, sdk: sdk}, nil
+}
+
+// roundTimeout bounds one connect round, so a wedged adb cannot hold a run for good.
+const roundTimeout = 90 * time.Second
+
+// connect goes through the whole connect sequence from the start, up to ConnectAttempts times,
+// before it gives up: a TV on Wi-Fi often misses the first packets or answers mDNS late, and it
+// is not worth a message to say so. The adb server is restarted before the last round.
+func (r *Runner) connect(ctx context.Context, d store.Device) (conn, error) {
+	return r.connectTries(ctx, d, max(1, r.Cfg.ConnectAttempts))
+}
+
+func (r *Runner) connectTries(ctx context.Context, d store.Device, attempts int) (conn, error) {
+	var lastErr error
+	notPaired := 0
+	wait := r.Cfg.ConnectRetryWait
+	for round := 1; round <= attempts; round++ {
+		if round > 1 {
+			r.stepFor(d.ID, fmt.Sprintf("Connecting (try %d of %d)", round, attempts))
+			if round == attempts {
+				if err := r.ADB.ResetServer(ctx); err != nil {
+					slog.Warn("could not restart the adb server", "err", err)
+				}
+			}
+		}
+		rctx, cancel := context.WithTimeout(ctx, roundTimeout)
+		c, err := r.connectRound(rctx, d)
+		cancel()
+		if err == nil {
+			return c, nil
+		}
+		lastErr = err
+		if errors.Is(err, adb.ErrNotPaired) {
+			notPaired++
+		} else {
+			notPaired = 0
+		}
+		// Losing the pairing is only believed when it is said twice in a row
+		if notPaired >= 2 || ctx.Err() != nil || round == attempts {
+			break
+		}
+		slog.Warn("connecting to the TV failed, trying again from the start", "device", d.Name, "try", round, "of", attempts, "err", err)
+		if !r.Sleep(ctx, wait) {
+			break
+		}
+		wait *= 2
+	}
+	return conn{}, lastErr
+}
+
+// stepFor is step for one device id.
+func (r *Runner) stepFor(id, text string) {
+	r.step([]*conn{{dev: store.Device{ID: id}}}, text)
 }
 
 type patched struct {
@@ -1029,11 +1102,39 @@ func (r *Runner) noteFailureAfter(key string, err error, fatal bool, after int) 
 	return alert
 }
 
+// noteDownFor counts a failed cycle for key and reports whether to alert: only once the failures
+// have gone on, without a single success between them, for the whole of d. A TV that is off for the
+// evening or drops off Wi-Fi for a while is not worth a message; one that stays gone for a day is.
+func (r *Runner) noteDownFor(key string, err error, d time.Duration) bool {
+	now := r.Now()
+	alert := false
+	_ = r.Store.UpdateApp(key, func(a *store.AppState) {
+		a.FetchFailures++
+		if a.FirstFailure == 0 {
+			a.FirstFailure = now.Unix()
+		}
+		msg := err.Error()
+		if len(msg) > 500 {
+			msg = msg[:500]
+		}
+		a.LastFetchError = msg
+		down := now.Unix()-a.FirstFailure >= int64(d/time.Second)
+		cooled := now.Unix()-a.LastFetchAlert > int64(day/time.Second)
+		if down && cooled {
+			alert = true
+			a.LastFetchAlert = now.Unix()
+		}
+	})
+	return alert
+}
+
 // noteRecovered clears the failure counters and says whether an alert had gone out before.
 func (r *Runner) noteRecovered(key string) bool {
 	was := r.Store.App(key).LastFetchAlert != 0
 	if r.Store.App(key).FetchFailures != 0 || was {
-		_ = r.Store.UpdateApp(key, func(a *store.AppState) { a.FetchFailures, a.LastFetchError, a.LastFetchAlert = 0, "", 0 })
+		_ = r.Store.UpdateApp(key, func(a *store.AppState) {
+			a.FetchFailures, a.LastFetchError, a.LastFetchAlert, a.FirstFailure = 0, "", 0, 0
+		})
 	}
 	return was
 }

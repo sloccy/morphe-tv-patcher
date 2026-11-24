@@ -151,6 +151,7 @@ type AppState struct {
 	FetchFailures  int    `json:"fetch_failures,omitempty"`
 	LastFetchError string `json:"last_fetch_error,omitempty"`
 	LastFetchAlert int64  `json:"last_fetch_alert,omitempty"` // unix seconds
+	FirstFailure   int64  `json:"first_failure,omitempty"`    // unix seconds of the first failure in the current streak
 	// Builds records which CPU builds a version of the app offers (ABI names, "*" = universal),
 	// learned from APKMirror or from a bundle we have. It lets the page refuse to give a device an
 	// app it cannot run without downloading anything.

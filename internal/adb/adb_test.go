@@ -26,6 +26,61 @@ func fake(goodPort int, log *[]string) Runner {
 	}
 }
 
+func init() { settle = 0 }
+
+// A connection adb still lists but that no longer answers is not a connection.
+func TestConnectReconnectsAnOfflineEntry(t *testing.T) {
+	var log []string
+	states := []string{"error: device offline", "device"}
+	c := &Client{Run: func(ctx context.Context, args ...string) (string, error) {
+		log = append(log, strings.Join(args, " "))
+		switch args[0] {
+		case "connect":
+			return "already connected to " + args[1], nil
+		case "-s":
+			if args[2] == "get-state" {
+				s := states[0]
+				states = states[1:]
+				if s != "device" {
+					return s, errors.New("exit 1")
+				}
+				return s, nil
+			}
+		}
+		return "", nil
+	}, Dial: func(string, int) bool { return false }}
+	port, err := c.Connect(context.Background(), "10.0.0.6", 41000)
+	if err != nil || port != 41000 {
+		t.Fatalf("port %d err %v", port, err)
+	}
+	all := strings.Join(log, "\n")
+	if !strings.Contains(all, "disconnect 10.0.0.6:41000") || strings.Count(all, "connect 10.0.0.6:41000") < 3 {
+		t.Errorf("should drop the dead entry and connect again:\n%s", all)
+	}
+}
+
+func TestConnectDropsOfflineEntriesFirstAndReportsWhyItFailed(t *testing.T) {
+	var log []string
+	c := &Client{Run: func(ctx context.Context, args ...string) (string, error) {
+		log = append(log, strings.Join(args, " "))
+		switch args[0] {
+		case "devices":
+			return "List of devices attached\n10.0.0.6:39000\toffline\n10.0.0.9:39000\toffline", nil
+		case "connect":
+			return "failed to connect to " + args[1] + ": No route to host", nil
+		}
+		return "", nil
+	}, Dial: func(string, int) bool { return false }, ScanLo: 1, ScanHi: 3}
+	_, err := c.Connect(context.Background(), "10.0.0.6", 41000)
+	if !errors.Is(err, ErrUnreachable) || !strings.Contains(err.Error(), "No route to host") {
+		t.Errorf("got %v", err)
+	}
+	all := strings.Join(log, "\n")
+	if !strings.Contains(all, "disconnect 10.0.0.6:39000") || strings.Contains(all, "disconnect 10.0.0.9") {
+		t.Errorf("only this TV's offline entries go:\n%s", all)
+	}
+}
+
 func TestConnectTriesSavedThenMDNSThenScan(t *testing.T) {
 	var log []string
 	c := &Client{Run: fake(41234, &log), Dial: func(string, int) bool { return false }}

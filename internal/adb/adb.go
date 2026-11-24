@@ -173,23 +173,90 @@ func (c *Client) TCPIP(ctx context.Context, serial string, port int) error {
 	return nil
 }
 
-// Connect finds a working port for host: the ports given first (last good, configured),
-// then mDNS, then a scan of the usual wireless-debugging range. It returns the port.
+// settle is how long Connect waits after dropping a dead adb entry before it connects again.
+// A variable so the tests do not wait.
+var settle = time.Second
+
+// pause waits d or until ctx ends, and says whether the full wait happened.
+func pause(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+// dropOffline disconnects every "offline" entry adb keeps for host, so a connect starts from a
+// clean slate: "adb connect" to an address it still lists answers "already connected" even though
+// nothing behind it answers any more.
+func (c *Client) dropOffline(ctx context.Context, host string) {
+	out, err := c.Run(ctx, "devices")
+	if err != nil {
+		return
+	}
+	for _, m := range deviceLine.FindAllStringSubmatch(out, -1) {
+		if m[1] == host && m[3] == "offline" {
+			_ = c.Disconnect(ctx, host, atoi(m[2]))
+		}
+	}
+}
+
+func atoi(s string) int {
+	n, _ := strconv.Atoi(s)
+	return n
+}
+
+// Connect finds a working port for host: the port adb is already talking to, the ports given
+// (last good, configured), then mDNS, then a scan of the usual wireless-debugging range. A port
+// counts only once the adb server reports the device as really online. It returns the port.
+// ErrUnreachable carries the last thing adb said, so a failure can be told apart from another.
 func (c *Client) Connect(ctx context.Context, host string, known ...int) (int, error) {
 	tried := map[int]bool{}
+	last := ""
 	attempt := func(p int) (bool, error) {
 		if p <= 0 || tried[p] {
 			return false, nil
 		}
 		tried[p] = true
-		out, _ := c.Run(ctx, "connect", net.JoinHostPort(host, strconv.Itoa(p)))
-		switch {
-		case strings.Contains(out, "unauthorized"), strings.Contains(out, "failed to authenticate"):
-			return false, ErrNotPaired
-		case strings.Contains(out, "connected to"):
-			return true, nil
+		addr := net.JoinHostPort(host, strconv.Itoa(p))
+		for round := range 2 {
+			out, _ := c.Run(ctx, "connect", addr)
+			switch {
+			case strings.Contains(out, "unauthorized"), strings.Contains(out, "failed to authenticate"):
+				return false, ErrNotPaired
+			case !strings.Contains(out, "connected to"):
+				last = firstLine(out, nil)
+				return false, nil
+			}
+			// "connected to" and "already connected to" are both only adb's word for it: ask whether
+			// the device behind the address answers.
+			state, err := c.Run(ctx, "-s", addr, "get-state")
+			switch {
+			case strings.Contains(state, "unauthorized"):
+				return false, ErrNotPaired
+			case err == nil && !strings.Contains(state, "offline"):
+				return true, nil
+			}
+			last = "adb lists " + addr + " but it is " + firstLine(state, err)
+			_ = c.Disconnect(ctx, host, p)
+			if round == 0 && !pause(ctx, settle) {
+				return false, nil
+			}
 		}
 		return false, nil
+	}
+	c.dropOffline(ctx, host)
+	// adb may already hold a live connection on a port the TV moved to
+	if p := c.ConnectedPort(ctx, host); p > 0 {
+		if ok, err := attempt(p); ok || err != nil {
+			return p, err
+		}
 	}
 	for _, p := range known {
 		if ok, err := attempt(p); ok || err != nil {
@@ -211,7 +278,21 @@ func (c *Client) Connect(ctx context.Context, host string, known ...int) (int, e
 			return p, err
 		}
 	}
+	if last != "" {
+		return 0, fmt.Errorf("%w: %s", ErrUnreachable, last)
+	}
 	return 0, ErrUnreachable
+}
+
+// ResetServer restarts the adb server, for the rare case where it is wedged and answers nothing.
+func (c *Client) ResetServer(ctx context.Context) error {
+	if out, err := c.Run(ctx, "kill-server"); err != nil {
+		return fmt.Errorf("adb kill-server: %s", firstLine(out, err))
+	}
+	if out, err := c.Run(ctx, "start-server"); err != nil {
+		return fmt.Errorf("adb start-server: %s", firstLine(out, err))
+	}
+	return nil
 }
 
 // Reachable looks for the wireless debugging port without opening an ADB session, so the TV
