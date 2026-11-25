@@ -213,6 +213,50 @@ func atoi(s string) int {
 	return n
 }
 
+// tryPort makes one connection attempt to host:p and says whether adb really has the device online.
+// why is what went wrong, for the error that reaches the alert. A connection adb lists but that no
+// longer answers is dropped and made again once; "unauthorized" is ErrNotPaired.
+func (c *Client) tryPort(ctx context.Context, host string, p int) (ok bool, why string, err error) {
+	addr := net.JoinHostPort(host, strconv.Itoa(p))
+	for round := range 2 {
+		out, _ := c.Run(ctx, "connect", addr)
+		switch {
+		case strings.Contains(out, "unauthorized"), strings.Contains(out, "failed to authenticate"):
+			return false, "", ErrNotPaired
+		case !strings.Contains(out, "connected to"):
+			return false, firstLine(out, nil), nil
+		}
+		// "connected to" and "already connected to" are both only adb's word for it: ask whether
+		// the device behind the address answers.
+		state, serr := c.Run(ctx, "-s", addr, "get-state")
+		switch {
+		case strings.Contains(state, "unauthorized"):
+			return false, "", ErrNotPaired
+		case serr == nil && !strings.Contains(state, "offline"):
+			return true, "", nil
+		}
+		why = "adb lists " + addr + " but it is " + firstLine(state, serr)
+		_ = c.Disconnect(ctx, host, p)
+		if round == 0 && !pause(ctx, settle) {
+			return false, why, nil
+		}
+	}
+	return false, why, nil
+}
+
+// ConnectPort makes one attempt at one port, with no mDNS and no scan on failure: for switching to a
+// port already known to be advertised, where a failure just means staying where we are.
+func (c *Client) ConnectPort(ctx context.Context, host string, port int) error {
+	ok, why, err := c.tryPort(ctx, host, port)
+	switch {
+	case err != nil:
+		return err
+	case !ok:
+		return fmt.Errorf("%w: %s", ErrUnreachable, why)
+	}
+	return nil
+}
+
 // Connect finds a working port for host: the port adb is already talking to, the ports given
 // (last good, configured), then mDNS, then a scan of the usual wireless-debugging range. A port
 // counts only once the adb server reports the device as really online. It returns the port.
@@ -232,32 +276,11 @@ func (c *Client) ConnectWithFallback(ctx context.Context, host string, fallback 
 			return false, nil
 		}
 		tried[p] = true
-		addr := net.JoinHostPort(host, strconv.Itoa(p))
-		for round := range 2 {
-			out, _ := c.Run(ctx, "connect", addr)
-			switch {
-			case strings.Contains(out, "unauthorized"), strings.Contains(out, "failed to authenticate"):
-				return false, ErrNotPaired
-			case !strings.Contains(out, "connected to"):
-				last = firstLine(out, nil)
-				return false, nil
-			}
-			// "connected to" and "already connected to" are both only adb's word for it: ask whether
-			// the device behind the address answers.
-			state, err := c.Run(ctx, "-s", addr, "get-state")
-			switch {
-			case strings.Contains(state, "unauthorized"):
-				return false, ErrNotPaired
-			case err == nil && !strings.Contains(state, "offline"):
-				return true, nil
-			}
-			last = "adb lists " + addr + " but it is " + firstLine(state, err)
-			_ = c.Disconnect(ctx, host, p)
-			if round == 0 && !pause(ctx, settle) {
-				return false, nil
-			}
+		ok, why, err := c.tryPort(ctx, host, p)
+		if why != "" {
+			last = why
 		}
-		return false, nil
+		return ok, err
 	}
 	c.dropOffline(ctx, host)
 	// adb may already hold a live connection on a port the TV moved to

@@ -67,6 +67,11 @@ func (r *Runner) watchOne(ctx context.Context, id, host, name string) {
 	// The connection the adb server already holds is the normal case: it needs no traffic to the
 	// TV at all. Only when it has gone is the TV looked for and connected to again.
 	if live := r.ADB.LivePort(ctx, host, fixed); live > 0 {
+		if fixed > 0 && live == fixed {
+			if up := r.leaveFixedPort(ctx, id, host, name); up > 0 {
+				live = up
+			}
+		}
 		r.reached(ctx, id, host, name, live)
 		return
 	}

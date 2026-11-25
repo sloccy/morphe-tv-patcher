@@ -31,6 +31,8 @@ const day = 24 * time.Hour
 // ADB is the part of the adb client the runner uses.
 type ADB interface {
 	Connect(ctx context.Context, host string, known ...int) (int, error)
+	// ConnectPort makes one attempt at one port and nothing more.
+	ConnectPort(ctx context.Context, host string, port int) error
 	// ConnectWithFallback tries fallback (the plain fixed port) only after known, mDNS and the scan failed.
 	ConnectWithFallback(ctx context.Context, host string, fallback int, known ...int) (int, error)
 	ABIs(ctx context.Context, serial string) ([]string, error)
@@ -684,6 +686,11 @@ func (r *Runner) connectRound(ctx context.Context, d store.Device) (conn, error)
 	// TV show another notice, and the fallbacks below are for when it has dropped. The encrypted
 	// wireless port is preferred; the fixed one is dialled last, after mDNS and the port scan.
 	port := r.ADB.LivePort(ctx, d.Host, fixed)
+	if port > 0 && port == fixed {
+		if up := r.leaveFixedPort(ctx, d.ID, d.Host, d.Name); up > 0 {
+			port = up
+		}
+	}
 	if port == 0 {
 		var known []int
 		if p := r.Store.Port(d.ID); p > 0 && p != fixed {
@@ -754,6 +761,29 @@ func (r *Runner) connectTries(ctx context.Context, d store.Device, attempts int)
 		wait *= 2
 	}
 	return conn{}, lastErr
+}
+
+// leaveFixedPort is for a TV whose held connection is the plain fixed port: it asks the LAN whether
+// the encrypted wireless-debugging port is advertised and, if so, connects to it, remembers it and
+// returns it. Otherwise (not advertised, would not connect) it returns 0 and the fixed connection
+// stays in use. mDNS opens no session, so the TV only shows a notice for the one real switch.
+func (r *Runner) leaveFixedPort(ctx context.Context, id, host, name string) int {
+	fixed := r.Cfg.TVFixedADBPort
+	var known []int
+	if p := r.Store.Port(id); p > 0 && p != fixed {
+		known = append(known, p)
+	}
+	p, ok := r.ADB.Probe(ctx, host, known...)
+	if !ok || p == fixed {
+		return 0
+	}
+	if err := r.ADB.ConnectPort(ctx, host, p); err != nil {
+		slog.Info("the encrypted port is advertised but did not connect, staying on the fixed port", "device", name, "port", p, "err", err)
+		return 0
+	}
+	_ = r.Store.SetPort(id, p)
+	slog.Info("moved from the fixed port to the encrypted wireless-debugging port", "device", name, "port", p)
+	return p
 }
 
 // resetAdbServer restarts the adb server in case it is wedged, unless another TV holds a working

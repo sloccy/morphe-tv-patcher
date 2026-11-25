@@ -22,39 +22,41 @@ import (
 )
 
 type fakeADB struct {
-	mu          sync.Mutex
-	down        map[string]bool     // host -> unreachable
-	unpaired    map[string]bool     // host -> answers, but no longer trusts this server
-	abis        map[string][]string // host -> abis
-	installed   map[string]string   // "serial/pkg" -> version
-	deviceAPK   string              // path to a copy of the helper APK the device holds
-	installMsg  map[string]string   // pkg -> failure output (first attempt)
-	installs    []string            // "serial pkg"
-	uninstalled []string
-	pairErr     error
-	paired      []string
-	shells      []string        // commands run through Shell
-	grantErr    string          // output of "pm grant" when it fails
-	helperVer   string          // version a successful helper install leaves on the device
-	connects    int             // adb connect calls (each one makes the real TV show a notice)
-	playing     map[string]bool // host -> something is playing
-	playingErr  error
-	props       map[string]string       // getprop/setprop
-	settings    map[string]string       // "settings get/put global"; a real TV starts with no key expiry
-	refuses     map[string]bool         // global settings this TV will not keep
-	openPorts   map[string]map[int]bool // host -> extra ports that answer (a listening fixed port)
-	noSetprop   bool                    // the adb shell may not write properties (Android 14 on some TVs)
-	disconnects []string                // "host:port" the adb server was told to forget
-	devicePort  int                     // what the adb server says it is already talking to
-	live        map[string]int          // host -> port of a connection the adb server already holds
-	pairingPort int                     // what the TV advertises while its pairing dialog is open
-	tcpip       []string                // "serial port"
-	jobsDump    string                  // what "dumpsys jobscheduler" says
-	helperLog   string                  // what "logcat -s BootAdb" says
-	failFirst   int                     // the first N Connect calls fail as unreachable (a hiccup)
-	notPairedN  int                     // the first N Connect calls fail as not paired
-	resets      int                     // adb server restarts
-	wirelessOff map[string]bool         // host -> Wireless debugging is off: only a port in openPorts answers
+	mu           sync.Mutex
+	down         map[string]bool     // host -> unreachable
+	unpaired     map[string]bool     // host -> answers, but no longer trusts this server
+	abis         map[string][]string // host -> abis
+	installed    map[string]string   // "serial/pkg" -> version
+	deviceAPK    string              // path to a copy of the helper APK the device holds
+	installMsg   map[string]string   // pkg -> failure output (first attempt)
+	installs     []string            // "serial pkg"
+	uninstalled  []string
+	pairErr      error
+	paired       []string
+	shells       []string        // commands run through Shell
+	grantErr     string          // output of "pm grant" when it fails
+	helperVer    string          // version a successful helper install leaves on the device
+	connects     int             // adb connect calls (each one makes the real TV show a notice)
+	playing      map[string]bool // host -> something is playing
+	playingErr   error
+	props        map[string]string       // getprop/setprop
+	settings     map[string]string       // "settings get/put global"; a real TV starts with no key expiry
+	refuses      map[string]bool         // global settings this TV will not keep
+	openPorts    map[string]map[int]bool // host -> extra ports that answer (a listening fixed port)
+	noSetprop    bool                    // the adb shell may not write properties (Android 14 on some TVs)
+	disconnects  []string                // "host:port" the adb server was told to forget
+	devicePort   int                     // what the adb server says it is already talking to
+	live         map[string]int          // host -> port of a connection the adb server already holds
+	pairingPort  int                     // what the TV advertises while its pairing dialog is open
+	tcpip        []string                // "serial port"
+	jobsDump     string                  // what "dumpsys jobscheduler" says
+	helperLog    string                  // what "logcat -s BootAdb" says
+	failFirst    int                     // the first N Connect calls fail as unreachable (a hiccup)
+	notPairedN   int                     // the first N Connect calls fail as not paired
+	resets       int                     // adb server restarts
+	connectPorts []int                   // ports ConnectPort was asked for
+	refusePort   map[int]bool            // ports ConnectPort will not connect to
+	wirelessOff  map[string]bool         // host -> Wireless debugging is off: only a port in openPorts answers
 }
 
 func (f *fakeADB) ResetServer(ctx context.Context) error { f.resets++; return nil }
@@ -88,6 +90,14 @@ func (f *fakeADB) Probe(ctx context.Context, host string, known ...int) (int, bo
 		}
 	}
 	return 40000, !f.wirelessOff[host]
+}
+func (f *fakeADB) ConnectPort(ctx context.Context, host string, port int) error {
+	f.connects++
+	f.connectPorts = append(f.connectPorts, port)
+	if f.down[host] || f.unpaired[host] || (port == 40000 && f.wirelessOff[host]) || f.refusePort[port] {
+		return adb.ErrUnreachable
+	}
+	return nil
 }
 func (f *fakeADB) ConnectWithFallback(ctx context.Context, host string, fallback int, known ...int) (int, error) {
 	p, err := f.Connect(ctx, host, known...)

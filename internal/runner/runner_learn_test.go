@@ -789,6 +789,7 @@ func watchRig(t *testing.T) (*rig, store.Device) {
 
 func TestTheWatchLeavesAHeldConnectionAlone(t *testing.T) {
 	rg, d := watchRig(t)
+	rg.adb.wirelessOff = map[string]bool{d.Host: true} // no encrypted port to move to
 	rg.adb.openPorts = map[string]map[int]bool{d.Host: {5555: true}}
 	rg.adb.live = map[string]int{d.Host: 5555}
 	rg.r.watch(context.Background())
@@ -825,6 +826,7 @@ func TestTheWatchPutsTheFixedPortBackAfterARestart(t *testing.T) {
 		t.Errorf("adbd restarted once on the fixed port: %v", rg.adb.tcpip)
 	}
 	rg.adb.live = map[string]int{d.Host: 5555}
+	rg.adb.wirelessOff = map[string]bool{d.Host: true} // the encrypted port is not advertised now
 	connects := rg.adb.connects
 	rg.r.watch(context.Background())
 	if got := rg.r.Status().Reach[d.ID]; got.State != "fixed" || got.Restored.IsZero() {
@@ -927,5 +929,39 @@ func TestTheAdbServerIsNotRestartedWhileAnotherTVIsConnectedThroughIt(t *testing
 	rg.r.Run(context.Background(), Options{Manual: true, DeviceID: rg.st.Settings().Devices[0].ID})
 	if rg.adb.resets != 0 {
 		t.Errorf("a wedged-server restart would drop the other TV's session: %d", rg.adb.resets)
+	}
+}
+
+func TestAHeldFixedConnectionMovesToTheEncryptedPortWhenItIsAdvertised(t *testing.T) {
+	rg, d := watchRig(t)
+	rg.adb.openPorts = map[string]map[int]bool{d.Host: {5555: true}}
+	rg.adb.live = map[string]int{d.Host: 5555}
+	rg.r.watch(context.Background())
+	if got := rg.r.Status().Reach[d.ID]; got.State != "wireless" || got.Port != 40000 {
+		t.Fatalf("the encrypted port is advertised, so it is the one used: %+v", got)
+	}
+	if !slices.Equal(rg.adb.connectPorts, []int{40000}) || rg.st.Port(d.ID) != 40000 {
+		t.Errorf("one connect to the advertised port, remembered: %v, stored %d", rg.adb.connectPorts, rg.st.Port(d.ID))
+	}
+}
+
+func TestAHeldFixedConnectionStaysWhenTheEncryptedPortWillNotConnect(t *testing.T) {
+	rg, d := watchRig(t)
+	rg.adb.openPorts = map[string]map[int]bool{d.Host: {5555: true}}
+	rg.adb.live = map[string]int{d.Host: 5555}
+	rg.adb.refusePort = map[int]bool{40000: true}
+	rg.r.watch(context.Background())
+	if got := rg.r.Status().Reach[d.ID]; got.State != "fixed" || got.Port != 5555 {
+		t.Fatalf("a failed switch must leave the working connection alone: %+v", got)
+	}
+}
+
+func TestARunOnAHeldFixedConnectionMovesToTheEncryptedPort(t *testing.T) {
+	rg, d := watchRig(t)
+	rg.adb.openPorts = map[string]map[int]bool{d.Host: {5555: true}}
+	rg.adb.live = map[string]int{d.Host: 5555}
+	c, err := rg.r.connectRound(context.Background(), d)
+	if err != nil || c.serial != d.Host+":40000" {
+		t.Fatalf("%+v %v", c, err)
 	}
 }

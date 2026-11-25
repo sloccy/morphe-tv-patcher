@@ -420,3 +420,23 @@ func TestConnectWithFallbackTriesTheFixedPortLast(t *testing.T) {
 		t.Errorf("the remembered port first, the fixed one once and last:\n%s", all)
 	}
 }
+
+// A switch to an advertised port is one attempt: a failure must not start a scan.
+func TestConnectPortIsOneAttemptWithNoSearch(t *testing.T) {
+	var log []string
+	c := &Client{Run: func(ctx context.Context, args ...string) (string, error) {
+		log = append(log, strings.Join(args, " "))
+		if args[0] == "connect" {
+			return "failed to connect to " + args[1], nil
+		}
+		return "", nil
+	}, Dial: func(string, int) bool { t.Error("no scan"); return false }, ScanLo: 1, ScanHi: 3}
+	if err := c.ConnectPort(context.Background(), "10.0.0.6", 41000); !errors.Is(err, ErrUnreachable) {
+		t.Errorf("got %v", err)
+	}
+	for _, l := range log {
+		if strings.HasPrefix(l, "mdns") {
+			t.Errorf("no mDNS lookup either: %v", log)
+		}
+	}
+}

@@ -263,7 +263,9 @@ pairing port in from the same source, so only the six-digit code has to be typed
 on a fixed port (`persist.adb.tcp.port`, read by adbd at every boot), so there is always a way in
 even when the random port cannot be found. The encrypted wireless-debugging port is still used first
 (a connection already held, the remembered port, mDNS, the port scan); the fixed port is only tried
-after all of those fail. It is off by default and worth understanding before switching on: legacy ADB over TCP is
+after all of those fail. A TV that is only being reached on the fixed port is checked for the
+encrypted one too (a LAN lookup, no session): once it is advertised tv-patcher connects to it, once, and
+uses it from then on. It is off by default and worth understanding before switching on: legacy ADB over TCP is
 **not encrypted**, where the wireless-debugging transport is, and it leaves a well-known port
 listening on your LAN — still key-authenticated, but 5555 is a standard thing to scan for. Whether
 the property survives a restart depends on the TV's firmware, so tv-patcher reads it back and says
