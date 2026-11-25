@@ -31,6 +31,8 @@ const day = 24 * time.Hour
 // ADB is the part of the adb client the runner uses.
 type ADB interface {
 	Connect(ctx context.Context, host string, known ...int) (int, error)
+	// ConnectWithFallback tries fallback (the plain fixed port) only after known, mDNS and the scan failed.
+	ConnectWithFallback(ctx context.Context, host string, fallback int, known ...int) (int, error)
 	ABIs(ctx context.Context, serial string) ([]string, error)
 	SDK(ctx context.Context, serial string) (int, error)
 	InstalledVersion(ctx context.Context, serial, pkg string) (string, error)
@@ -47,7 +49,7 @@ type ADB interface {
 	ConnectedPort(ctx context.Context, host string) int
 	// LivePort is the port the adb server already has a working connection to host on (0 = none),
 	// preferring prefer. It sends nothing to the TV.
-	LivePort(ctx context.Context, host string, prefer int) int
+	LivePort(ctx context.Context, host string, avoid int) int
 	TCPIP(ctx context.Context, serial string, port int) error
 	ResetServer(ctx context.Context) error
 }
@@ -679,25 +681,25 @@ func (r *Runner) pass(ctx context.Context, o Options) []Result {
 func (r *Runner) connectRound(ctx context.Context, d store.Device) (conn, error) {
 	fixed := r.Cfg.TVFixedADBPort
 	// A connection the adb server already holds is used as it is: reconnecting would only make the
-	// TV show another notice, and the fallbacks below are for when it has dropped.
+	// TV show another notice, and the fallbacks below are for when it has dropped. The encrypted
+	// wireless port is preferred; the fixed one is dialled last, after mDNS and the port scan.
 	port := r.ADB.LivePort(ctx, d.Host, fixed)
 	if port == 0 {
 		var known []int
-		if fixed > 0 {
-			known = append(known, fixed)
-		}
 		if p := r.Store.Port(d.ID); p > 0 && p != fixed {
 			known = append(known, p)
 		}
 		var err error
-		if port, err = r.ADB.Connect(ctx, d.Host, known...); err != nil {
+		if port, err = r.ADB.ConnectWithFallback(ctx, d.Host, fixed, known...); err != nil {
 			return conn{}, err
 		}
 	}
 	// A remembered port that has gone is kept on failure: one dropped Wi-Fi packet must not erase
 	// the right answer. A connect that works saves the port it really reached, so a moved port is
 	// still replaced.
-	_ = r.Store.SetPort(d.ID, port)
+	if port != fixed { // the fixed port is always there; what is remembered is the one that has to be found
+		_ = r.Store.SetPort(d.ID, port)
+	}
 	serial := fmt.Sprintf("%s:%d", d.Host, port)
 	abis, err := r.ADB.ABIs(ctx, serial)
 	if err != nil {
@@ -726,9 +728,7 @@ func (r *Runner) connectTries(ctx context.Context, d store.Device, attempts int)
 		if round > 1 {
 			r.stepFor(d.ID, fmt.Sprintf("Connecting (try %d of %d)", round, attempts))
 			if round == attempts {
-				if err := r.ADB.ResetServer(ctx); err != nil {
-					slog.Warn("could not restart the adb server", "err", err)
-				}
+				r.resetAdbServer(ctx, d)
 			}
 		}
 		rctx, cancel := context.WithTimeout(ctx, roundTimeout)
@@ -754,6 +754,21 @@ func (r *Runner) connectTries(ctx context.Context, d store.Device, attempts int)
 		wait *= 2
 	}
 	return conn{}, lastErr
+}
+
+// resetAdbServer restarts the adb server in case it is wedged, unless another TV holds a working
+// connection through it: killing the server drops every session, and each reconnect makes that
+// TV show a notice, for a problem that is not its own.
+func (r *Runner) resetAdbServer(ctx context.Context, d store.Device) {
+	for _, o := range r.Store.Settings().Devices {
+		if o.ID != d.ID && r.ADB.LivePort(ctx, o.Host, r.Cfg.TVFixedADBPort) > 0 {
+			slog.Info("not restarting the adb server: another TV is connected through it", "device", o.Name)
+			return
+		}
+	}
+	if err := r.ADB.ResetServer(ctx); err != nil {
+		slog.Warn("could not restart the adb server", "err", err)
+	}
 }
 
 // stepFor is step for one device id.

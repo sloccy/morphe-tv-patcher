@@ -54,6 +54,7 @@ type fakeADB struct {
 	failFirst   int                     // the first N Connect calls fail as unreachable (a hiccup)
 	notPairedN  int                     // the first N Connect calls fail as not paired
 	resets      int                     // adb server restarts
+	wirelessOff map[string]bool         // host -> Wireless debugging is off: only a port in openPorts answers
 }
 
 func (f *fakeADB) ResetServer(ctx context.Context) error { f.resets++; return nil }
@@ -86,7 +87,14 @@ func (f *fakeADB) Probe(ctx context.Context, host string, known ...int) (int, bo
 			return p, true
 		}
 	}
-	return 40000, true
+	return 40000, !f.wirelessOff[host]
+}
+func (f *fakeADB) ConnectWithFallback(ctx context.Context, host string, fallback int, known ...int) (int, error) {
+	p, err := f.Connect(ctx, host, known...)
+	if err != nil && errors.Is(err, adb.ErrUnreachable) && fallback > 0 && f.openPorts[host][fallback] {
+		return fallback, nil
+	}
+	return p, err
 }
 func (f *fakeADB) Connect(ctx context.Context, host string, known ...int) (int, error) {
 	f.connects++
@@ -105,15 +113,18 @@ func (f *fakeADB) Connect(ctx context.Context, host string, known ...int) (int, 
 		return 0, adb.ErrNotPaired
 	}
 	for _, p := range known { // the real adb returns the port it actually reached
-		if p > 0 && (p == 40000 || f.openPorts[host][p]) {
+		if p > 0 && ((p == 40000 && !f.wirelessOff[host]) || f.openPorts[host][p]) {
 			return p, nil
 		}
 	}
+	if f.wirelessOff[host] {
+		return 0, adb.ErrUnreachable
+	}
 	return 40000, nil
 }
-func (f *fakeADB) PairingPort(ctx context.Context, host string) int          { return f.pairingPort }
-func (f *fakeADB) ConnectedPort(ctx context.Context, host string) int        { return f.devicePort }
-func (f *fakeADB) LivePort(ctx context.Context, host string, prefer int) int { return f.live[host] }
+func (f *fakeADB) PairingPort(ctx context.Context, host string) int         { return f.pairingPort }
+func (f *fakeADB) ConnectedPort(ctx context.Context, host string) int       { return f.devicePort }
+func (f *fakeADB) LivePort(ctx context.Context, host string, avoid int) int { return f.live[host] }
 func (f *fakeADB) Disconnect(ctx context.Context, host string, port int) error {
 	f.disconnects = append(f.disconnects, fmt.Sprintf("%s:%d", host, port))
 	return nil

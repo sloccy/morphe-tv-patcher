@@ -260,8 +260,10 @@ support, so `adb mdns services` finds nothing there), and then a scan of `ADB_SC
 pairing port in from the same source, so only the six-digit code has to be typed.
 
 **A port that never changes (opt-in).** `TV_FIXED_ADB_PORT=5555` moves the TV to legacy ADB over TCP
-on a fixed port (`persist.adb.tcp.port`, read by adbd at every boot), so no port ever has to be
-found. It is off by default and worth understanding before switching on: legacy ADB over TCP is
+on a fixed port (`persist.adb.tcp.port`, read by adbd at every boot), so there is always a way in
+even when the random port cannot be found. The encrypted wireless-debugging port is still used first
+(a connection already held, the remembered port, mDNS, the port scan); the fixed port is only tried
+after all of those fail. It is off by default and worth understanding before switching on: legacy ADB over TCP is
 **not encrypted**, where the wireless-debugging transport is, and it leaves a well-known port
 listening on your LAN — still key-authenticated, but 5555 is a standard thing to scan for. Whether
 the property survives a restart depends on the TV's firmware, so tv-patcher reads it back and says

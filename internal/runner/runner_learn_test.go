@@ -802,6 +802,8 @@ func TestTheWatchLeavesAHeldConnectionAlone(t *testing.T) {
 
 func TestTheWatchReconnectsOnceAfterADrop(t *testing.T) {
 	rg, d := watchRig(t)
+	// Wireless debugging is off, so only the fixed port is left to answer: the fallback.
+	rg.adb.wirelessOff = map[string]bool{d.Host: true}
 	rg.adb.openPorts = map[string]map[int]bool{d.Host: {5555: true}}
 	rg.r.watch(context.Background())
 	if got := rg.r.Status().Reach[d.ID]; got.State != "fixed" || got.Port != 5555 {
@@ -886,5 +888,44 @@ func TestTheWatchCanBeTurnedOff(t *testing.T) {
 	rg.r.watch(context.Background())
 	if _, ok := rg.r.Status().Reach[d.ID]; ok {
 		t.Error("WATCH_EVERY=0 means no watch")
+	}
+}
+
+func TestTheEncryptedPortIsPreferredAndTheFixedOneIsTheFallback(t *testing.T) {
+	rg, d := watchRig(t)
+	rg.adb.openPorts = map[string]map[int]bool{d.Host: {5555: true}} // both answer
+	rg.r.watch(context.Background())
+	if got := rg.r.Status().Reach[d.ID]; got.State != "wireless" || got.Port != 40000 {
+		t.Fatalf("both answer: the encrypted port is the one used: %+v", got)
+	}
+	if p := rg.st.Port(d.ID); p != 40000 {
+		t.Errorf("the encrypted port is what is remembered: %d", p)
+	}
+}
+
+func TestReachingTheFixedPortDoesNotForgetTheEncryptedOne(t *testing.T) {
+	rg, d := watchRig(t)
+	_ = rg.st.SetPort(d.ID, 41000)
+	rg.adb.wirelessOff = map[string]bool{d.Host: true}
+	rg.adb.openPorts = map[string]map[int]bool{d.Host: {5555: true}}
+	c, err := rg.r.connectRound(context.Background(), d)
+	if err != nil || c.serial != d.Host+":5555" {
+		t.Fatalf("falls back to the fixed port: %+v %v", c, err)
+	}
+	if p := rg.st.Port(d.ID); p != 41000 {
+		t.Errorf("the remembered encrypted port must survive a fallback: %d", p)
+	}
+}
+
+func TestTheAdbServerIsNotRestartedWhileAnotherTVIsConnectedThroughIt(t *testing.T) {
+	rg, slept := retryRig(t)
+	_ = slept
+	rg.deviceWith(t, "TV", "10.0.0.6", store.AppChoice{Package: prime, Source: defSrc})
+	other := rg.deviceWith(t, "Other", "10.0.0.7", store.AppChoice{Package: prime, Source: defSrc})
+	rg.adb.live = map[string]int{other.Host: 45000}
+	rg.adb.down["10.0.0.6"] = true
+	rg.r.Run(context.Background(), Options{Manual: true, DeviceID: rg.st.Settings().Devices[0].ID})
+	if rg.adb.resets != 0 {
+		t.Errorf("a wedged-server restart would drop the other TV's session: %d", rg.adb.resets)
 	}
 }

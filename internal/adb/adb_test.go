@@ -302,15 +302,21 @@ func TestConnectedPortReadsTheAdbServerList(t *testing.T) {
 	}
 }
 
-func TestLivePortOnlyCountsWorkingConnectionsAndPrefersTheFixedPort(t *testing.T) {
+func TestLivePortOnlyCountsWorkingConnectionsAndAvoidsTheFixedPort(t *testing.T) {
 	list := "List of devices attached\n" +
 		"10.0.0.6:37000\toffline\n" +
 		"10.0.0.6:45678\tdevice\n" +
 		"10.0.0.6:5555\tdevice\n" +
 		"10.0.0.9:41000\tdevice\n"
 	c := &Client{Run: func(ctx context.Context, args ...string) (string, error) { return list, nil }}
-	if p := c.LivePort(context.Background(), "10.0.0.6", 5555); p != 5555 {
-		t.Errorf("the fixed port wins: %d", p)
+	if p := c.LivePort(context.Background(), "10.0.0.6", 5555); p != 45678 {
+		t.Errorf("the encrypted port wins over the fixed one: %d", p)
+	}
+	only := &Client{Run: func(ctx context.Context, args ...string) (string, error) {
+		return "List of devices attached\n10.0.0.6:5555\tdevice\n", nil
+	}}
+	if p := only.LivePort(context.Background(), "10.0.0.6", 5555); p != 5555 {
+		t.Errorf("a held fixed connection is still used when it is the only one: %d", p)
 	}
 	if p := c.LivePort(context.Background(), "10.0.0.6", 0); p != 45678 {
 		t.Errorf("an offline entry is not a connection: %d", p)
@@ -389,5 +395,28 @@ func TestTCPIPNeedsAdbToSaySoWorked(t *testing.T) {
 	}}
 	if err := c.TCPIP(context.Background(), "10.0.0.6:41234", 5555); err == nil {
 		t.Error("a refused restart must be an error")
+	}
+}
+
+// The fixed port is only dialled after the known port, mDNS and the whole scan have failed.
+func TestConnectWithFallbackTriesTheFixedPortLast(t *testing.T) {
+	var log []string
+	c := &Client{Run: func(ctx context.Context, args ...string) (string, error) {
+		log = append(log, strings.Join(args, " "))
+		if args[0] == "connect" {
+			if strings.HasSuffix(args[1], ":5555") {
+				return "connected to " + args[1], nil
+			}
+			return "failed to connect to " + args[1], nil
+		}
+		return "", nil
+	}, Dial: func(string, int) bool { return false }, ScanLo: 1, ScanHi: 3}
+	port, err := c.ConnectWithFallback(context.Background(), "10.0.0.6", 5555, 41000)
+	if err != nil || port != 5555 {
+		t.Fatalf("port %d err %v", port, err)
+	}
+	all := strings.Join(log, "\n")
+	if strings.Index(all, "connect 10.0.0.6:41000") > strings.Index(all, "connect 10.0.0.6:5555") || strings.Count(all, "connect 10.0.0.6:5555") != 1 {
+		t.Errorf("the remembered port first, the fixed one once and last:\n%s", all)
 	}
 }

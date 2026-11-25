@@ -137,9 +137,10 @@ func (c *Client) ConnectedPort(ctx context.Context, host string) int {
 }
 
 // LivePort asks the adb server which port it already holds a working connection to host on (state
-// "device"), 0 if none. It talks only to the local adb server, so the TV sees nothing. prefer wins
-// when the server holds several, which is how the fixed port is kept over Wireless debugging's.
-func (c *Client) LivePort(ctx context.Context, host string, prefer int) int {
+// "device"), 0 if none. It talks only to the local adb server, so the TV sees nothing. avoid is
+// the plain (fixed) port: Wireless debugging's encrypted port wins when the server holds both, and
+// the avoided one is only returned when it is the only connection there is.
+func (c *Client) LivePort(ctx context.Context, host string, avoid int) int {
 	out, err := c.Run(ctx, "devices")
 	if err != nil {
 		return 0
@@ -150,7 +151,7 @@ func (c *Client) LivePort(ctx context.Context, host string, prefer int) int {
 			continue
 		}
 		p, _ := strconv.Atoi(m[2])
-		if p > 0 && (best == 0 || p == prefer) {
+		if p > 0 && (best == 0 || (best == avoid && p != avoid)) {
 			best = p
 		}
 	}
@@ -217,6 +218,13 @@ func atoi(s string) int {
 // counts only once the adb server reports the device as really online. It returns the port.
 // ErrUnreachable carries the last thing adb said, so a failure can be told apart from another.
 func (c *Client) Connect(ctx context.Context, host string, known ...int) (int, error) {
+	return c.ConnectWithFallback(ctx, host, 0, known...)
+}
+
+// ConnectWithFallback is Connect with one more port to try, but only once everything else has
+// failed: the ports given, mDNS and the whole scan. It is for the plain fixed port, which is a
+// worse way in than Wireless debugging's encrypted one and so is not worth dialling first.
+func (c *Client) ConnectWithFallback(ctx context.Context, host string, fallback int, known ...int) (int, error) {
 	tried := map[int]bool{}
 	last := ""
 	attempt := func(p int) (bool, error) {
@@ -253,7 +261,7 @@ func (c *Client) Connect(ctx context.Context, host string, known ...int) (int, e
 	}
 	c.dropOffline(ctx, host)
 	// adb may already hold a live connection on a port the TV moved to
-	if p := c.ConnectedPort(ctx, host); p > 0 {
+	if p := c.ConnectedPort(ctx, host); p > 0 && p != fallback {
 		if ok, err := attempt(p); ok || err != nil {
 			return p, err
 		}
@@ -277,6 +285,9 @@ func (c *Client) Connect(ctx context.Context, host string, known ...int) (int, e
 		if ok, err := attempt(p); ok || err != nil {
 			return p, err
 		}
+	}
+	if ok, err := attempt(fallback); ok || err != nil {
+		return fallback, err
 	}
 	if last != "" {
 		return 0, fmt.Errorf("%w: %s", ErrUnreachable, last)

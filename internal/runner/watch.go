@@ -70,14 +70,16 @@ func (r *Runner) watchOne(ctx context.Context, id, host, name string) {
 		r.reached(ctx, id, host, name, live)
 		return
 	}
+	// The encrypted wireless port first (the remembered one, then mDNS); the fixed one only if that
+	// finds nothing.
 	var known []int
-	if fixed > 0 {
-		known = append(known, fixed)
-	}
 	if p := r.Store.Port(id); p > 0 && p != fixed {
 		known = append(known, p)
 	}
 	port, ok := r.ADB.Probe(ctx, host, known...)
+	if !ok && fixed > 0 {
+		port, ok = r.ADB.Probe(ctx, host, fixed)
+	}
 	if !ok {
 		r.noteReach(id, "down", 0, "", false)
 		r.silent(ctx, id, name)
